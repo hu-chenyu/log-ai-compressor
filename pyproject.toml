@@ -14,10 +14,10 @@ dependencies = [
     "PyYAML>=6.0",
     "matplotlib>=3.5",
     "customtkinter>=5.2",
+    "tkinterdnd2>=0.4.2",
 ]
 
 [project.optional-dependencies]
-gui = ["tkinterdnd2>=0.4.2"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4"]
 
 [project.scripts]

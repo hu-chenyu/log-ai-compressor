@@ -107,6 +107,7 @@ class LogCompressorApp(_make_app_base()):
         self._chart_window: Optional[ctk.CTkToplevel] = None
 
         self._build_ui()
+        self._setup_drag_and_drop()
         self._restore_config()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(80, self._poll_queue)
@@ -154,18 +155,17 @@ class LogCompressorApp(_make_app_base()):
     def _build_file_tab(self) -> None:
         tab = self._tabview.tab("文件导入")
         tab.grid_columnconfigure(0, weight=1)
-        hint = ctk.CTkLabel(
-            tab, text="选择或拖拽导入日志文件（支持超大文件、UTF-8/GBK 自动适配）",
-            text_color="#8fa4b8")
+        hint_text = ("选择或将日志文件拖入窗口任意位置（支持超大文件、"
+                     "UTF-8/GBK 自动适配）")
+        if not _HAS_DND:
+            hint_text += "  |  拖拽未启用：pip install tkinterdnd2 后重启"
+        hint = ctk.CTkLabel(tab, text=hint_text, text_color="#8fa4b8")
         hint.grid(row=0, column=0, sticky="w", pady=(2, 4))
         self._file_entry = ctk.CTkEntry(tab, placeholder_text="日志文件路径…")
         self._file_entry.grid(row=1, column=0, sticky="ew", padx=(0, 6))
         browse = ctk.CTkButton(tab, text="选择文件", width=90,
                                command=self._browse_file)
         browse.grid(row=1, column=1)
-        if _HAS_DND:
-            self._file_entry.drop_target_register(DND_FILES)
-            self._file_entry.dnd_bind("<<Drop>>", self._on_drop_file)
 
     def _build_text_tab(self) -> None:
         tab = self._tabview.tab("文本粘贴")
@@ -367,6 +367,22 @@ class LogCompressorApp(_make_app_base()):
     # ==================================================================
     # 文件选择 / 拖拽
     # ==================================================================
+    def _setup_drag_and_drop(self) -> None:
+        """拖拽初始化：注册整窗为拖放目标。
+
+        说明：注册在根窗口（而非单个输入框）上，任何位置松手均可接收，
+        规避 CTk 控件级注册的兼容性问题；tkinterdnd2 缺失时自动降级
+        为纯点击选择并给出安装提示。
+        """
+        if not _HAS_DND:
+            return
+        try:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind("<<Drop>>", self._on_drop_file)
+        except tk.TclError:
+            # tkdnd 二进制与当前环境不兼容时静默降级
+            pass
+
     def _browse_file(self, entry: Optional[ctk.CTkEntry] = None) -> None:
         target = entry or self._file_entry
         path = filedialog.askopenfilename(
@@ -377,15 +393,37 @@ class LogCompressorApp(_make_app_base()):
             target.insert(0, path)
 
     def _on_drop_file(self, event) -> None:
-        """拖拽导入（tkinterdnd2 可用时启用）。"""
+        """拖拽导入：整窗接收，按当前 Tab 路由填充文件路径。"""
         try:
-            paths = self.tk.splitlist(event.data)
-        except tk.TclError:
-            paths = [event.data.strip("{}")]
-        if paths:
+            paths = [str(p) for p in self.tk.splitlist(event.data)]
+        except (tk.TclError, AttributeError, TypeError):
+            raw = getattr(event, "data", "") or ""
+            paths = [raw.strip("{}")] if raw else []
+        paths = [p for p in paths if p]
+        if not paths:
+            return
+
+        if self._tabview.get() == "多文件对比":
+            # 对比模式：按 A/B/C 顺序填充
+            for entry, path in zip(self._compare_entries, paths[:3]):
+                entry.delete(0, "end")
+                entry.insert(0, path)
+            self._status_label.configure(
+                text=f"已拖入 {min(len(paths), 3)} 个文件（对比模式，点击开始分析）")
+        else:
+            # 常规模式：首个文件进导入框，其余预填对比区
             self._file_entry.delete(0, "end")
             self._file_entry.insert(0, paths[0])
-            self._status_label.configure(text=f"已拖入文件：{paths[0]}")
+            if len(paths) > 1:
+                for entry, path in zip(self._compare_entries, paths[1:3]):
+                    entry.delete(0, "end")
+                    entry.insert(0, path)
+                self._status_label.configure(
+                    text=f"已拖入 {len(paths)} 个文件：首个进入文件导入，"
+                         f"其余已填入多文件对比区（可切换 Tab 对比）")
+            else:
+                self._status_label.configure(
+                    text=f"已拖入文件：{paths[0]}（点击开始分析）")
 
     def _toggle_theme(self) -> None:
         current = ctk.get_appearance_mode().lower()
