@@ -221,3 +221,85 @@ class TestClusterer:
         for i in range(5):
             c.add(entry("boom", ts=1000.0 + i))
         assert c.clusters[0].hist.total == 5
+
+
+# ---------------------------------------------------------------------------
+# 修复缺陷R4：簇实例记录（全屏簇展开数据源）
+# ---------------------------------------------------------------------------
+class TestClusterInstances:
+    def test_instances_match_count(self):
+        """每个错误实例都被记录：count == len(instances)。"""
+        c = ErrorClusterer()
+        for i in range(12):
+            c.add(entry(f"boom {i}", ts=100.0 + i, line=i + 1))
+        cl = c.clusters[0]
+        assert cl.count == 12
+        assert len(cl.instances) == 12
+        assert not cl.instances_truncated
+
+    def test_instance_fields(self):
+        """实例记录时间戳/行号/摘要/完整条目/前上下文。"""
+        c = ErrorClusterer()
+        c.add(entry("Connection refused", ts=1700000000.0, line=42,
+                    stack=["java.net.ConnectException: x"]),
+              before_lines=["ctx-40", "ctx-41"])
+        inst = c.clusters[0].instances[0]
+        assert inst.timestamp == 1700000000.0
+        assert inst.line_no == 42
+        assert "Connection refused" in inst.summary
+        assert inst.entry is not None
+        assert inst.entry.has_stack
+        assert inst.before == ["ctx-40", "ctx-41"]
+
+    def test_instance_order_chronological(self):
+        """实例按出现顺序记录（时间戳/行号递增）。"""
+        c = ErrorClusterer()
+        for i in range(5):
+            c.add(entry("boom", ts=1000.0 + i, line=10 * (i + 1)))
+        insts = c.clusters[0].instances
+        assert [i.timestamp for i in insts] == sorted(i.timestamp
+                                                      for i in insts)
+        assert [i.line_no for i in insts] == [10, 20, 30, 40, 50]
+
+    def test_detailed_cap_only_first_n_have_entry(self):
+        """超出详情上限（200/簇）后实例仅记元数据（entry=None）。"""
+        from log_ai_compressor.constants import (
+            MAX_CLUSTER_INSTANCES_DETAILED,
+        )
+        c = ErrorClusterer()
+        n = MAX_CLUSTER_INSTANCES_DETAILED + 5
+        for i in range(n):
+            c.add(entry("boom", line=i + 1))
+        cl = c.clusters[0]
+        assert cl.count == n
+        assert len(cl.instances) == n          # 元数据仍全量（未到 2000）
+        assert cl.instances[0].entry is not None
+        assert cl.instances[MAX_CLUSTER_INSTANCES_DETAILED - 1].entry \
+            is not None
+        assert cl.instances[MAX_CLUSTER_INSTANCES_DETAILED].entry is None
+        # 元数据实例无前上下文（内存有界）
+        assert cl.instances[-1].before == []
+
+    def test_meta_cap_marks_truncated(self):
+        """超出元数据上限（2000/簇）后标记 truncated 且不再记录。"""
+        from log_ai_compressor.constants import (
+            MAX_CLUSTER_INSTANCES_META,
+        )
+        c = ErrorClusterer()
+        n = MAX_CLUSTER_INSTANCES_META + 10
+        for i in range(n):
+            c.add(entry("boom", line=i + 1))
+        cl = c.clusters[0]
+        assert cl.count == n
+        assert cl.instances_truncated is True
+        assert len(cl.instances) == MAX_CLUSTER_INSTANCES_META
+
+    def test_instances_do_not_break_dedup(self):
+        """实例记录不影响聚类去重（行为与旧版一致）。"""
+        c = ErrorClusterer()
+        c.add(entry("request 12345 to 10.0.0.7 failed"))
+        c.add(entry("request 98765 to 10.0.0.9 failed"))
+        c.add(entry("disk full on /var"))
+        assert len(c) == 2
+        assert [cl.count for cl in c.clusters] == [2, 1]
+        assert [len(cl.instances) for cl in c.clusters] == [2, 1]

@@ -24,9 +24,17 @@ from typing import Dict, List, Optional, Tuple
 
 from log_ai_compressor.constants import (
     CLUSTER_SIMILARITY_THRESHOLD,
+    MAX_CLUSTER_INSTANCES_DETAILED,
+    MAX_CLUSTER_INSTANCES_META,
     MAX_SIMILARITY_COMPARE,
+    MAX_TOTAL_INSTANCES,
 )
-from log_ai_compressor.core.models import ClusterSample, ErrorCluster, LogEntry
+from log_ai_compressor.core.models import (
+    ClusterInstance,
+    ClusterSample,
+    ErrorCluster,
+    LogEntry,
+)
 
 # ---------------------------------------------------------------------------
 # 指纹归一化（顺序敏感：UUID -> 十六进制令牌 -> 0x地址 -> 引号串 -> 路径 -> 数字）
@@ -97,6 +105,8 @@ class ErrorClusterer:
         self._by_level: Dict[str, List[ErrorCluster]] = {}  # 级别桶（相似度回退）
         self._clusters: List[ErrorCluster] = []
         self._next_id = 0
+        # 修复缺陷R4：全局实例记录计数（内存有界）
+        self._instance_total = 0
 
     # ------------------------------------------------------------------
     # 主入口
@@ -203,6 +213,8 @@ class ErrorClusterer:
         cluster.last_seen = entry.timestamp
         if entry.timestamp is not None:
             cluster.hist.add(entry.timestamp)
+        # 修复缺陷R4：记录实例（前 N 个含完整条目+上下文，其余仅元数据）
+        self._record_instance(cluster, entry, before_lines)
         replaced = False
         # 样例升级：已存样例无堆栈而新条目带堆栈 -> 替换（更利于根因定位）
         if entry.has_stack and not (cluster.sample and cluster.sample.entry.has_stack):
@@ -212,6 +224,34 @@ class ErrorClusterer:
         if not cluster.module and entry.module:
             cluster.module = entry.module
         return replaced
+
+    def _record_instance(self, cluster: ErrorCluster, entry: LogEntry,
+                         before_lines: Optional[List[str]]) -> None:
+        """记录簇内单个实例（修复缺陷R4，全屏簇展开数据源）。
+
+        三层上限（内存有界）：
+        1. 全局总数超限 -> 不再记录（instances_truncated 标记）；
+        2. 每簇超 MAX_CLUSTER_INSTANCES_META -> 不再记录；
+        3. 每簇超 MAX_CLUSTER_INSTANCES_DETAILED -> 仅记元数据
+           （entry/before 为空，详情面板退化为摘要视图）。
+        """
+        if self._instance_total >= MAX_TOTAL_INSTANCES:
+            cluster.instances_truncated = True
+            return
+        insts = cluster.instances
+        if len(insts) >= MAX_CLUSTER_INSTANCES_META:
+            cluster.instances_truncated = True
+            return
+        self._instance_total += 1
+        detailed = len(insts) < MAX_CLUSTER_INSTANCES_DETAILED
+        insts.append(ClusterInstance(
+            timestamp=entry.timestamp,
+            line_no=entry.line_no,
+            last_line_no=entry.last_line_no or entry.line_no,
+            summary=self._summarize(entry),
+            entry=entry if detailed else None,
+            before=list(before_lines or []) if detailed else [],
+        ))
 
     @staticmethod
     def _summarize(entry: LogEntry) -> str:

@@ -852,6 +852,172 @@ class TestFullscreenView:
             app_mod.messagebox.showinfo = original
 
 
+# ---------------------------------------------------------------------------
+# 修复R4：全屏窗口簇展开（左右分栏 + 实例列表 + 实例详情联动）
+# ---------------------------------------------------------------------------
+REPEAT_LOG = "\n".join(
+    f"2024-01-01 09:{i // 60:02d}:{i % 60:02d} ERROR [db] "
+    f"connection refused to db-primary (attempt {i})"
+    for i in range(12)
+) + "\n" + "2024-01-01 09:01:01 ERROR [api] request 404 failed\n"
+
+
+def _click_ctk_label(widget):
+    """模拟真实点击 CTkLabel：事件发给内部子控件（Tk 不冒泡）。
+
+    CTk 的 bind() 重写把绑定转发到内部 Canvas/tk.Label 上，
+    在容器上 event_generate 不会触发——真实鼠标点击命中的
+    正是内部子控件，此处对内部 Label 发事件等价模拟。
+    """
+    for child in widget.winfo_children():
+        if child.winfo_class() == "Label":
+            child.event_generate("<Button-1>")
+    widget.update()
+
+
+class TestFullscreenExpand:
+    def _open_fs(self, app):
+        """分析 REPEAT_LOG 后打开列表全屏，返回窗口。"""
+        _run_paste_analysis(app, REPEAT_LOG)
+        app._open_list_fullscreen()
+        app.update()
+        wins = [w for w in app.winfo_children()
+                if isinstance(w, tk.Toplevel)
+                and "错误分类列表" in w.title()]
+        assert wins, "全屏窗口应已打开"
+        return wins[0]
+
+    def _find_toggles(self, win):
+        return [w for w in _all_widgets(win)
+                if isinstance(w, ctk.CTkLabel)
+                and "×12" in str(w.cget("text"))]
+
+    def test_toggle_button_exists_with_count(self, app):
+        """每簇有「▶ ×N」展开按钮（次数在按钮上可点击）。"""
+        win = self._open_fs(app)
+        try:
+            toggles = self._find_toggles(win)
+            assert toggles, "应有 ×12 展开按钮"
+            assert "▶" in str(toggles[0].cget("text")), "初始为收起态 ▶"
+        finally:
+            win.destroy()
+            app.update()
+
+    def test_expand_shows_all_instances(self, app):
+        """点击展开：显示全部 12 个实例（时间戳 + 摘要）。"""
+        win = self._open_fs(app)
+        try:
+            toggle = self._find_toggles(win)[0]
+            _click_ctk_label(toggle)
+            for _ in range(40):
+                app.update()
+                time.sleep(0.005)
+            assert "▼" in str(toggle.cget("text")), "展开后为 ▼"
+            # 实例行：含「  L行号  」模式的原生 label
+            inst_labels = [
+                w for w in _all_widgets(win)
+                if isinstance(w, tk.Label)
+                and "  L" in str(w.cget("text"))
+                and "connection refused" in str(w.cget("text"))]
+            assert len(inst_labels) == 12, \
+                f"应展开 12 个实例，实际 {len(inst_labels)}"
+        finally:
+            win.destroy()
+            app.update()
+
+    def test_instance_click_shows_detail(self, app):
+        """点击实例：右侧详情面板显示该实例原始日志与堆栈。"""
+        win = self._open_fs(app)
+        try:
+            toggle = self._find_toggles(win)[0]
+            _click_ctk_label(toggle)
+            for _ in range(40):
+                app.update()
+                time.sleep(0.005)
+            inst_labels = [
+                w for w in _all_widgets(win)
+                if isinstance(w, tk.Label)
+                and "  L" in str(w.cget("text"))]
+            assert inst_labels
+            inst_labels[0].event_generate("<Button-1>")
+            app.update()
+            boxes = [w for w in _all_widgets(win)
+                     if isinstance(w, ctk.CTkTextbox)]
+            assert boxes, "右侧应有详情面板"
+            text = boxes[0].get("1.0", "end")
+            assert "【实例详情】" in text, "应显示实例详情"
+            assert "原始日志" in text or "典型样例" in text
+            assert "connection refused" in text
+        finally:
+            win.destroy()
+            app.update()
+
+    def test_cluster_click_shows_cluster_detail(self, app):
+        """点击簇行：右侧显示簇详情（典型样例）。"""
+        win = self._open_fs(app)
+        try:
+            # 点击首个簇行头部（非 toggle）
+            heads = [w for w in _all_widgets(win)
+                     if isinstance(w, ctk.CTkLabel)
+                     and "ERROR" in str(w.cget("text"))
+                     and "×" not in str(w.cget("text"))]
+            assert heads, "应有簇行头部"
+            _click_ctk_label(heads[0])
+            app.update()
+            boxes = [w for w in _all_widgets(win)
+                     if isinstance(w, ctk.CTkTextbox)]
+            text = boxes[0].get("1.0", "end")
+            assert "【错误摘要】" in text, "应显示簇详情"
+        finally:
+            win.destroy()
+            app.update()
+
+    def test_collapse_after_expand(self, app):
+        """再次点击 toggle 收起实例列表（▼ → ▶）。"""
+        win = self._open_fs(app)
+        try:
+            toggle = self._find_toggles(win)[0]
+            _click_ctk_label(toggle)
+            for _ in range(40):
+                app.update()
+                time.sleep(0.005)
+            assert "▼" in str(toggle.cget("text"))
+            _click_ctk_label(toggle)
+            for _ in range(60):
+                app.update()
+                time.sleep(0.005)
+            assert "▶" in str(toggle.cget("text")), "收起后为 ▶"
+        finally:
+            win.destroy()
+            app.update()
+
+    def test_split_pane_layout(self, app):
+        """左右分栏：左簇列表 + 右详情面板。"""
+        win = self._open_fs(app)
+        try:
+            boxes = [w for w in _all_widgets(win)
+                     if isinstance(w, ctk.CTkTextbox)]
+            assert boxes, "右侧应有详情面板"
+            # 左侧滚动列表存在
+            from customtkinter import CTkScrollableFrame
+            scrollables = [w for w in _all_widgets(win)
+                           if isinstance(w, CTkScrollableFrame)]
+            assert scrollables, "左侧应有簇列表"
+        finally:
+            win.destroy()
+            app.update()
+
+    def test_instances_data_available(self, app):
+        """数据层：簇实例全量记录（count == len(instances)）。"""
+        _run_paste_analysis(app, REPEAT_LOG)
+        clusters = {c.summary[:30]: c for c in app._displayed}
+        db = max(app._displayed, key=lambda c: c.count)
+        assert db.count == 12
+        assert len(db.instances) == 12
+        assert db.instances[0].entry is not None
+        assert "connection refused" in db.instances[0].summary
+
+
 def _all_widgets(root):
     """递归收集窗口内全部控件。"""
     result = []
