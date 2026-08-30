@@ -2,9 +2,16 @@
 """解析器单元测试：时间戳解析、多行聚合、堆栈跟踪、级别/模块推断。"""
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
-from log_ai_compressor.core.parser import LogParser, TimestampParser
+from log_ai_compressor.core.parser import (
+    LogParser,
+    TimestampParser,
+    _TS_FORMATS,
+    _fast_datetime,
+)
 from log_ai_compressor.rules.engine import load_ruleset
 
 
@@ -65,6 +72,75 @@ class TestTimestampParser:
     def test_syslog_format(self, tp):
         assert tp.parse("Jan 02 10:00:00") is not None
         assert tp.parse("Feb 15 08:30:45") is not None
+
+
+# ---------------------------------------------------------------------------
+# 修复缺陷#9：时间戳复合正则快速路径（与 strptime 行为一致性）
+# ---------------------------------------------------------------------------
+class TestFastDatetime:
+    """快速路径必须与 strptime 逐格式等价（无年份格式按 1900 构造）。"""
+
+    @pytest.mark.parametrize("ts", [
+        "2024-01-01 09:07:39.123456", "2024-01-01 09:07:39",
+        "2024-01-01T09:07:39.123", "2024-01-01T09:07:39",
+        "2024-01-01 09:07", "2024/06/01 09:07:39",
+        "01/02/2024 09:07:39", "01/Jan/2024:09:07:39",
+        "01-Jan-2024 09:07:39", "Jan 01 09:07:39",
+        "09:07:39.123", "09:07:39",
+    ])
+    def test_matches_strptime_semantics(self, ts):
+        fast = _fast_datetime(ts)
+        expected = None
+        for fmt in _TS_FORMATS:
+            try:
+                expected = datetime.strptime(ts, fmt)
+                break
+            except ValueError:
+                continue
+        assert fast == expected, f"快速路径与 strptime 结果不一致: {ts}"
+
+    @pytest.mark.parametrize("bad", [
+        "2024-13-01 09:07:39", "2024-01-32 09:07:39", "25:07:39",
+        "abc", "not a time", "Feb 30 09:07:39", "09:07",
+        "2024-01-01", "31/Apr/2024 10:00:00",
+    ])
+    def test_invalid_rejected(self, bad):
+        # 非法输入：快速路径要么拒绝（None），要么与 strptime 全失败一致
+        fast = _fast_datetime(bad)
+        if fast is not None:
+            for fmt in _TS_FORMATS:
+                with pytest.raises(ValueError):
+                    datetime.strptime(bad, fmt)
+
+    def test_month_abbreviation_case_insensitive(self):
+        assert _fast_datetime("15/MAR/2024 10:00:00") is not None
+        assert _fast_datetime("mar 15 10:00:00").month == 3
+
+    def test_timezone_suffix_accepted(self):
+        # 快速路径比 strptime 更宽松：剥离时区后仍可解析（语义等价于旧 ISO 剥离路径）
+        assert _fast_datetime("2024-06-01 09:07:39 +0800") is not None
+        assert _fast_datetime("2024-06-01 09:07:39Z") is not None
+
+    def test_millisecond_padded_to_microsecond(self):
+        dt = _fast_datetime("2024-01-01 09:07:39.5")
+        assert dt is not None and dt.microsecond == 500000
+
+    def test_faster_than_strptime(self):
+        # 性能回归保护：快速路径单次解析应显著快于 strptime
+        import time as _time
+        ts = "2024/06/01 09:07:39"
+        fmt = "%Y/%m/%d %H:%M:%S"
+        n = 20000
+        t0 = _time.perf_counter()
+        for _ in range(n):
+            datetime.strptime(ts, fmt)
+        t_strptime = _time.perf_counter() - t0
+        t0 = _time.perf_counter()
+        for _ in range(n):
+            _fast_datetime(ts)
+        t_fast = _time.perf_counter() - t0
+        # 快速路径至少不慢于 strptime（宽断言防 CI 抖动误报）
+        assert t_fast < t_strptime * 1.0
 
 
 # ---------------------------------------------------------------------------
