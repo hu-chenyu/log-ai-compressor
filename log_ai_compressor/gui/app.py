@@ -159,12 +159,32 @@ class Tooltip:
     修复缺陷#6/#8：GUI 关键选项与标题缺少解释性说明，用户无法
     理解「典型样例」「解析规则」等术语的含义。
 
+    修复缺陷R3：原实现字体 10 号过小、定位固定在控件右下方，
+    悬停主窗口右上角的 ⓘ 时文本框溢出屏幕右边界看不到完整内容。
+    现改为：字体 12 号、宽 420px 自动换行、弹出位置智能判断
+    （近右边缘向左弹 / 近下边缘向上弹）、白底深字 + 圆角阴影
+    （Windows 平台 transparentcolor 实现真圆角，其他平台退化为
+    白底描边矩形）。
+
     实现：Enter 后延迟显示无边框 Toplevel（不抢焦点、不挡操作），
-    Leave / 按下时立即销毁；配色随明暗主题自适应。
+    Leave / 按下时立即销毁。
     """
 
+    # 修复缺陷R3：字号 12（原 10）；宽度 420（400~500 区间）
+    _FONT = ("Microsoft YaHei UI", 12)
+    _WRAP = 420
+    _BG = "#ffffff"          # 浅色背景
+    _FG = "#1f2937"          # 深色文字
+    _BORDER = "#c9d3de"      # 描边
+    _SHADOW1 = "#b9c3cf"     # 阴影内层
+    _SHADOW2 = "#98a5b3"     # 阴影外层
+    _CORNER = 10             # 圆角半径
+    _MAGIC = "#ff00ff"       # 透明色（Windows -transparentcolor）
+    _PAD = 12                # 文本内边距
+    _MARGIN = 5              # 阴影外溢边距
+
     def __init__(self, widget, text, delay: int = 400,
-                 wrap: int = 380):
+                 wrap: int = _WRAP):
         """text 支持静态字符串或返回字符串的可调用对象（动态提示）。
 
         修复缺陷#8：解析规则说明需跟随当前选中规则动态变化。
@@ -200,6 +220,15 @@ class Tooltip:
                 pass  # 控件已销毁
             self._after_id = None
 
+    @staticmethod
+    def _round_rect(canvas: tk.Canvas, x1: float, y1: float,
+                    x2: float, y2: float, r: float, **kw):
+        """平滑多边形近似圆角矩形（smooth 插值）。"""
+        pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+               x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+               x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+        return canvas.create_polygon(pts, smooth=True, **kw)
+
     def _show(self) -> None:
         if self._tip is not None:
             return
@@ -207,22 +236,77 @@ class Tooltip:
         if not text:
             return
         try:
-            x = self._widget.winfo_rootx() + 12
-            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+            wx = self._widget.winfo_rootx()
+            wy = self._widget.winfo_rooty()
+            wh = self._widget.winfo_height()
         except tk.TclError:
             return  # 控件已销毁
-        dark = LogCompressorApp._is_dark_mode() if hasattr(
-            LogCompressorApp, "_is_dark_mode") else True
-        bg = "#2b2b30" if dark else "#fffdf5"
-        fg = "#e8e8ec" if dark else "#2d333b"
         self._tip = tw = tk.Toplevel(self._widget)
         tw.wm_overrideredirect(True)   # 无边框
+        tw.withdraw()                  # 先测量后定位再显示（无闪烁）
+        try:
+            tw.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        # 圆角支持：Windows 透明色（其他平台捕获异常后走描边矩形）
+        rounded = self._enable_rounded(tw)
+        canvas = tk.Canvas(
+            tw, highlightthickness=0, bd=0,
+            bg=self._MAGIC if rounded else self._BG)
+        canvas.pack(fill="both", expand=True)
+        # 1) 先创建文本测尺寸（tag "text" 便于测试取用）
+        tip_id = canvas.create_text(
+            1 + self._PAD, 1 + self._PAD, text=text, anchor="nw",
+            justify="left", width=self._wrap, tags="text",
+            font=self._FONT, fill=self._FG)
+        tw.update_idletasks()
+        bx1, by1, bx2, by2 = canvas.bbox(tip_id)
+        w = (bx2 - bx1) + 2 * self._PAD + 2
+        h = (by2 - by1) + 2 * self._PAD + 2
+        W, H = w + self._MARGIN, h + self._MARGIN
+        # 2) 绘制圆角卡片 + 双层阴影（压到文本下方）
+        if rounded:
+            s2 = self._round_rect(canvas, 4, 4, w + 2, h + 2,
+                                  self._CORNER, fill=self._SHADOW2,
+                                  outline="")
+            s1 = self._round_rect(canvas, 2.5, 2.5, w + 0.5, h + 0.5,
+                                  self._CORNER, fill=self._SHADOW1,
+                                  outline="")
+            card = self._round_rect(canvas, 1, 1, w - 2, h - 2,
+                                    self._CORNER, fill=self._BG,
+                                    outline=self._BORDER)
+            canvas.tag_lower(card)
+            canvas.tag_lower(s1)
+            canvas.tag_lower(s2)
+        else:
+            card = canvas.create_rectangle(
+                1, 1, w - 1, h - 1, fill=self._BG,
+                outline=self._BORDER)
+            canvas.tag_lower(card)
+        canvas.configure(width=W, height=H)
+        # 3) 修复缺陷R3：智能定位（近右边缘向左弹 / 近下边缘向上弹）
+        sw = tw.winfo_screenwidth()
+        sh = tw.winfo_screenheight()
+        x = wx + 12
+        y = wy + wh + 8
+        if x + W > sw - 10:            # 靠近屏幕右边缘
+            x = wx - W - 10            # 向左弹出
+        if y + H > sh - 10:            # 靠近屏幕下边缘
+            y = wy - H - 10            # 向上弹出
+        # 最终钳制在屏幕内（任意方向都不溢出）
+        x = max(8, min(int(x), int(sw - W - 8)))
+        y = max(8, min(int(y), int(sh - H - 8)))
         tw.wm_geometry(f"+{x}+{y}")
-        tk.Label(
-            tw, text=text, justify="left", wraplength=self._wrap,
-            bg=bg, fg=fg, relief="solid", borderwidth=1,
-            font=("Microsoft YaHei UI", 10), padx=10, pady=6
-        ).pack(fill="both", expand=True)
+        tw.deiconify()
+
+    def _enable_rounded(self, tw: tk.Toplevel) -> bool:
+        """尝试启用透明色圆角（Windows），失败返回 False 走矩形降级。"""
+        try:
+            tw.configure(bg=self._MAGIC)
+            tw.attributes("-transparentcolor", self._MAGIC)
+            return True
+        except tk.TclError:
+            return False
 
     def _hide(self, _event=None) -> None:
         self._cancel()

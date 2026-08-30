@@ -511,10 +511,10 @@ class TestSampleHelpTooltip:
         app.update()
         assert tip._tip is not None
         assert tip._tip.winfo_exists()
-        # 窗口内文本正确
-        children = tip._tip.winfo_children()
-        assert children, "tooltip 应包含文本标签"
-        assert children[0].cget("text") == SAMPLE_HELP_TEXT
+        # 窗口内文本正确（Canvas 绘制的 text 项）
+        canvas = tip._tip.winfo_children()[0]
+        item = canvas.find_withtag("text")[0]
+        assert canvas.itemcget(item, "text") == SAMPLE_HELP_TEXT
         tip._hide()
         app.update()
         assert tip._tip is None
@@ -538,6 +538,137 @@ class TestSampleHelpTooltip:
         tip._hide()   # 常规销毁
         tip._hide()   # 二次销毁应幂等
         assert tip._tip is None
+
+
+# ---------------------------------------------------------------------------
+# 修复R3：Tooltip 字体放大 + 自动换行 + 智能定位（不溢出屏幕）
+# ---------------------------------------------------------------------------
+class TestTooltipR3:
+    """悬停说明的可读性与定位（典型样例说明 / 解析规则说明共用）。"""
+
+    def test_tooltip_font_size_enlarged(self, app):
+        """修复R3：tooltip 字体放大到 12~13 号（原 10 号过小）。"""
+        tip = app._sample_help_tooltip
+        tip._show()
+        app.update()
+        try:
+            canvas = tip._tip.winfo_children()[0]
+            item = canvas.find_withtag("text")[0]
+            font = str(canvas.itemcget(item, "font"))
+            assert "12" in font or "13" in font, f"字体应为 12/13 号，实际 {font}"
+        finally:
+            tip._hide()
+
+    def test_tooltip_wrap_width_in_range(self, app):
+        """修复R3：tooltip 宽度限制在 400~500px（长文本自动换行）。"""
+        from log_ai_compressor.gui.app import Tooltip
+        assert 400 <= Tooltip._WRAP <= 500
+        tip = app._sample_help_tooltip
+        tip._show()
+        app.update()
+        try:
+            canvas = tip._tip.winfo_children()[0]
+            item = canvas.find_withtag("text")[0]
+            assert 400 <= int(canvas.itemcget(item, "width")) <= 500
+            # 画布宽度不超 500 + 边距
+            assert canvas.winfo_width() <= 530
+        finally:
+            tip._hide()
+
+    def test_tooltip_light_bg_dark_text(self, app):
+        """修复R3：tooltip 白底深字（视觉清晰）。"""
+        from log_ai_compressor.gui.app import Tooltip
+        tip = app._sample_help_tooltip
+        tip._show()
+        app.update()
+        try:
+            canvas = tip._tip.winfo_children()[0]
+            item = canvas.find_withtag("text")[0]
+            # 深色文字（亮度低于 0.5）
+            fg = canvas.itemcget(item, "fill")
+            r, g, b = (int(fg[i:i + 2], 16) for i in (1, 3, 5))
+            assert (r + g + b) / 3 < 128, "文字应为深色"
+            # 圆角卡片为白色（rounded 路径）或画布白底（降级路径）
+            cards = canvas.find_enclosed(0, 0, canvas.winfo_width() + 5,
+                                         canvas.winfo_height() + 5)
+            fill_colors = {str(canvas.itemcget(c, "fill")) for c in cards}
+            assert "#ffffff" in fill_colors or str(canvas.cget("bg")) == "#ffffff"
+        finally:
+            tip._hide()
+
+    def test_tooltip_within_screen_bounds(self, app):
+        """修复R3：tooltip 完整可见（不溢出屏幕右/下边缘）。"""
+        tip = app._sample_help_tooltip
+        tip._show()
+        app.update()
+        try:
+            tw = tip._tip
+            sw, sh = tw.winfo_screenwidth(), tw.winfo_screenheight()
+            x, y = tw.winfo_x(), tw.winfo_y()
+            w, h = tw.winfo_width(), tw.winfo_height()
+            assert x >= 0, "左边缘溢出"
+            assert y >= 0, "上边缘溢出"
+            assert x + w <= sw + 2, f"右边缘溢出（{x + w} > {sw}）"
+            assert y + h <= sh + 2, f"下边缘溢出（{y + h} > {sh}）"
+        finally:
+            tip._hide()
+
+    def _tooltip_on_edge_widget(self, app, geometry: str):
+        """在指定屏幕位置创建宿主控件并显示 tooltip。"""
+        host = tk.Toplevel(app)
+        host.geometry(geometry)
+        host.geometry("+300+300")  # 先强制一次布局
+        host.geometry(geometry)
+        app.update()
+        lbl = tk.Label(host, text="ⓘ")
+        lbl.pack()
+        app.update()
+        return host, lbl
+
+    def test_tooltip_flips_left_near_right_edge(self, app):
+        """修复R3：宿主控件贴近屏幕右边缘时 tooltip 向左弹出。"""
+        from log_ai_compressor.gui.app import Tooltip
+        sw = app.winfo_screenwidth()
+        host, lbl = self._tooltip_on_edge_widget(
+            app, f"+{sw - 40}+240")
+        try:
+            assert lbl.winfo_rootx() > sw - 120, "测试前置：宿主应贴近右边缘"
+            tip = Tooltip(lbl, "较长的悬停说明文本 " * 10)
+            tip._show()
+            app.update()
+            try:
+                tw = tip._tip
+                # 完整可见且在宿主左侧（向左弹出）
+                assert tw.winfo_x() + tw.winfo_width() <= sw + 2
+                assert tw.winfo_x() < lbl.winfo_rootx(), \
+                    "右边缘情形应在控件左侧弹出"
+            finally:
+                tip._hide()
+        finally:
+            host.destroy()
+            app.update()
+
+    def test_tooltip_flips_up_near_bottom_edge(self, app):
+        """修复R3：宿主控件贴近屏幕下边缘时 tooltip 向上弹出。"""
+        from log_ai_compressor.gui.app import Tooltip
+        sh = app.winfo_screenheight()
+        host, lbl = self._tooltip_on_edge_widget(
+            app, f"+240+{sh - 50}")
+        try:
+            assert lbl.winfo_rooty() > sh - 150, "测试前置：宿主应贴近下边缘"
+            tip = Tooltip(lbl, "多行悬停说明\n" * 8)
+            tip._show()
+            app.update()
+            try:
+                tw = tip._tip
+                assert tw.winfo_y() + tw.winfo_height() <= sh + 2
+                assert tw.winfo_y() < lbl.winfo_rooty(), \
+                    "下边缘情形应在控件上方弹出"
+            finally:
+                tip._hide()
+        finally:
+            host.destroy()
+            app.update()
 
 
 # ---------------------------------------------------------------------------
@@ -776,8 +907,9 @@ class TestRuleTooltips:
         tip._show()
         app.update()
         assert tip._tip is not None
-        label = tip._tip.winfo_children()[0]
-        assert label.cget("text") == RULE_TOOLTIPS["embedded"]
+        canvas = tip._tip.winfo_children()[0]
+        item = canvas.find_withtag("text")[0]
+        assert canvas.itemcget(item, "text") == RULE_TOOLTIPS["embedded"]
         tip._hide()
 
     def test_all_rules_have_descriptions(self):
