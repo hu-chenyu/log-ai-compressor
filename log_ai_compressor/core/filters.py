@@ -10,7 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List
 
-from log_ai_compressor.constants import DEFAULT_CONTEXT_LINES, DEFAULT_TOP_N
+from log_ai_compressor.constants import (
+    DEFAULT_CONTEXT_LINES,
+    DEFAULT_TOP_N,
+    MAX_CONTEXT_LINES,
+)
 from log_ai_compressor.core.models import LogEntry
 
 
@@ -56,7 +60,9 @@ class FilterConfig:
         if isinstance(data.get("top_n"), int):
             cfg.top_n = max(1, data["top_n"])
         if isinstance(data.get("context_lines"), int):
-            cfg.context_lines = max(0, min(50, data["context_lines"]))
+            # 修复缺陷#5：上限从 50 放宽到 200（GUI 可调节范围 5~200）
+            cfg.context_lines = max(0, min(MAX_CONTEXT_LINES,
+                                           data["context_lines"]))
         return cfg
 
 

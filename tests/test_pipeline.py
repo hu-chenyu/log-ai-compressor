@@ -108,6 +108,30 @@ class TestAnalyzeText:
         assert c.sample.before == ["INFO ctx-1", "INFO ctx-2"]
         assert c.sample.after == ["INFO ctx-3", "INFO ctx-4", "INFO ctx-5"]
 
+    def test_default_context_lines_50(self):
+        """修复缺陷#5：不传 context_lines 时默认前后各 50 行。"""
+        before = [f"INFO pre-{i:02d}" for i in range(60)]
+        after = [f"INFO post-{i:02d}" for i in range(60)]
+        log = "\n".join(before + ["2024-01-01 09:00:00 ERROR [db] boom"] + after)
+        r = analyze_text(log)  # 不显式传 context_lines
+        sample = r.clusters[0].sample
+        # 前 50 行 + 后 50 行
+        assert len(sample.before) == 50
+        assert sample.before[0] == "INFO pre-10"
+        assert sample.before[-1] == "INFO pre-59"
+        assert len(sample.after) == 50
+        assert sample.after[0] == "INFO post-00"
+        assert sample.after[-1] == "INFO post-49"
+
+    def test_context_lines_config_range_up_to_200(self):
+        """修复缺陷#5：FilterConfig 反序列化上限放宽到 200。"""
+        from log_ai_compressor.constants import MAX_CONTEXT_LINES
+        cfg = FilterConfig.from_dict({"context_lines": 200})
+        assert cfg.context_lines == 200
+        # 超上限钳制
+        over = FilterConfig.from_dict({"context_lines": 500})
+        assert over.context_lines == MAX_CONTEXT_LINES
+
     def test_analyze_disabled_keeps_fields_default(self):
         r = analyze_text(SAMPLE_LOG, analyze=False)
         assert r.clusters[0].priority == 0.0

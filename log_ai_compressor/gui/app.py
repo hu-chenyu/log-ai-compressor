@@ -24,7 +24,13 @@ from typing import Dict, List, Optional
 import customtkinter as ctk
 
 from log_ai_compressor import __version__
-from log_ai_compressor.constants import DEFAULT_TOP_N, HUMAN_NAME
+from log_ai_compressor.constants import (
+    DEFAULT_CONTEXT_LINES,
+    DEFAULT_TOP_N,
+    HUMAN_NAME,
+    MAX_CONTEXT_LINES,
+    MIN_CONTEXT_LINES,
+)
 from log_ai_compressor.core.analysis import simplify_stack
 from log_ai_compressor.core.comparator import CompareResult, compare_files
 from log_ai_compressor.core.models import AnalysisResult, ErrorCluster, format_timestamp
@@ -246,6 +252,19 @@ class LogCompressorApp(_make_app_base()):
         self._topn_entry.grid(row=1, column=5, padx=(2, 12), pady=(6, 8),
                               sticky="w")
 
+        # 修复缺陷#5：上下文行数可调节输入框（5~200，默认 50）
+        ctk.CTkLabel(panel, text="上下文行数").grid(
+            row=2, column=0, padx=(12, 2), pady=(0, 8), sticky="e")
+        self._ctx_entry = ctk.CTkEntry(panel, width=60)
+        self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
+        self._ctx_entry.grid(row=2, column=1, padx=(2, 6), pady=(0, 8),
+                             sticky="w")
+        ctx_hint = ctk.CTkLabel(
+            panel, text="典型样例前后各保留的上下文行数（5~200）",
+            text_color="#8fa4b8")
+        ctx_hint.grid(row=2, column=2, columnspan=2, padx=(2, 6),
+                      pady=(0, 8), sticky="w")
+
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=6, padx=(6, 2),
                                                   sticky="e")
         self._rule_menu = ctk.CTkOptionMenu(panel, values=list(RULE_NAMES),
@@ -344,6 +363,10 @@ class LogCompressorApp(_make_app_base()):
         if isinstance(cfg.get("top_n"), int):
             self._topn_entry.delete(0, "end")
             self._topn_entry.insert(0, str(cfg["top_n"]))
+        # 修复缺陷#5：恢复上次设置的上下文行数
+        if isinstance(cfg.get("context_lines"), int):
+            self._ctx_entry.delete(0, "end")
+            self._ctx_entry.insert(0, str(cfg["context_lines"]))
         if cfg.get("rule") in RULE_NAMES:
             self._rule_menu.set(cfg["rule"])
         last = cfg.get("last_files") or []
@@ -359,6 +382,7 @@ class LogCompressorApp(_make_app_base()):
             "include": self._split_keywords(self._include_entry.get()),
             "exclude": self._split_keywords(self._exclude_entry.get()),
             "top_n": self._current_top_n(),
+            "context_lines": self._current_context_lines(),
             "rule": self._rule_menu.get(),
             "appearance": self._config.get("appearance", "dark"),
             "window": {"width": self.winfo_width(),
@@ -380,6 +404,18 @@ class LogCompressorApp(_make_app_base()):
             return max(1, int(self._topn_entry.get() or DEFAULT_TOP_N))
         except ValueError:
             return DEFAULT_TOP_N
+
+    def _current_context_lines(self) -> int:
+        """读取上下文行数（非法/越界输入自动钳制到 5~200）。
+
+        修复缺陷#5：原硬编码 5 行，现为 GUI 可调节项。
+        """
+        try:
+            value = int(self._ctx_entry.get() or DEFAULT_CONTEXT_LINES)
+        except ValueError:
+            return DEFAULT_CONTEXT_LINES
+        # 钳制到合法范围（上限防极端值拖慢流式解析）
+        return max(MIN_CONTEXT_LINES, min(MAX_CONTEXT_LINES, value))
 
     # ==================================================================
     # 文件选择 / 拖拽
@@ -463,7 +499,7 @@ class LogCompressorApp(_make_app_base()):
             include=self._split_keywords(self._include_entry.get()),
             exclude=self._split_keywords(self._exclude_entry.get()),
             top_n=self._current_top_n(),
-            context_lines=5,
+            context_lines=self._current_context_lines(),
             rule=self._rule_menu.get(),
         )
         if mode == "文件导入":
