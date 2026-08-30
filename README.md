@@ -2,7 +2,7 @@
 
 > 全场景通用日志分析前置处理器 —— 把海量日志压缩成一份 AI 可读的排查报告
 
-[![CI](https://github.com/yourname/log-ai-compressor/actions/workflows/ci.yml/badge.svg)](../../actions)
+[![CI](https://github.com/hu-chenyu/log-ai-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/log-ai-compressor/actions)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./pyproject.toml)
 
@@ -54,7 +54,7 @@
 ### 安装
 
 ```bash
-git clone https://github.com/yourname/log-ai-compressor.git
+git clone https://github.com/hu-chenyu/log-ai-compressor.git
 cd log-ai-compressor
 pip install -r requirements.txt
 ```
