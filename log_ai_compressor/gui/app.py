@@ -94,6 +94,13 @@ _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
 _DETAIL_TAG_COLORS = {"kw": "#ff6b6b", "bstack": "#ffd54f",
                       "meta": "#8fa4b8", "header": "#4dd0e1"}
 
+# 解析规则说明（悬停提示，修复缺陷#8）
+RULE_DESCRIPTIONS = {
+    "generic": "通用系统日志格式，适用于大多数标准应用日志、服务日志",
+    "embedded": "嵌入式/UT测试日志格式，适用于嵌入式设备、单元测试输出、编译日志",
+    "jenkins": "Jenkins控制台输出格式，适用于CI/CD流水线日志、构建日志",
+}
+
 
 def _rate_text(lps: float) -> str:
     if lps >= 10000:
@@ -111,8 +118,12 @@ class Tooltip:
     Leave / 按下时立即销毁；配色随明暗主题自适应。
     """
 
-    def __init__(self, widget, text: str, delay: int = 400,
+    def __init__(self, widget, text, delay: int = 400,
                  wrap: int = 380):
+        """text 支持静态字符串或返回字符串的可调用对象（动态提示）。
+
+        修复缺陷#8：解析规则说明需跟随当前选中规则动态变化。
+        """
         self._widget = widget
         self._text = text
         self._delay = delay
@@ -124,6 +135,14 @@ class Tooltip:
         widget.bind("<ButtonPress>", self._hide, add="+")
 
     # ------------------------------------------------------------------
+    def _current_text(self) -> str:
+        if callable(self._text):
+            try:
+                return str(self._text() or "")
+            except Exception:
+                return ""
+        return self._text or ""
+
     def _schedule(self, _event=None) -> None:
         self._cancel()
         self._after_id = self._widget.after(self._delay, self._show)
@@ -137,7 +156,10 @@ class Tooltip:
             self._after_id = None
 
     def _show(self) -> None:
-        if self._tip is not None or not self._text:
+        if self._tip is not None:
+            return
+        text = self._current_text()
+        if not text:
             return
         try:
             x = self._widget.winfo_rootx() + 12
@@ -152,7 +174,7 @@ class Tooltip:
         tw.wm_overrideredirect(True)   # 无边框
         tw.wm_geometry(f"+{x}+{y}")
         tk.Label(
-            tw, text=self._text, justify="left", wraplength=self._wrap,
+            tw, text=text, justify="left", wraplength=self._wrap,
             bg=bg, fg=fg, relief="solid", borderwidth=1,
             font=("Microsoft YaHei UI", 10), padx=10, pady=6
         ).pack(fill="both", expand=True)
@@ -338,8 +360,17 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=6, padx=(6, 2),
                                                   sticky="e")
         self._rule_menu = ctk.CTkOptionMenu(panel, values=list(RULE_NAMES),
-                                            width=130)
-        self._rule_menu.grid(row=0, column=7, padx=(2, 12), sticky="w")
+                                            width=130,
+                                            command=self._on_rule_changed)
+        self._rule_menu.grid(row=0, column=7, padx=(2, 0), sticky="w")
+        # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
+        rule_help = ctk.CTkLabel(
+            panel, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        rule_help.grid(row=0, column=8, padx=(4, 12), sticky="w")
+        self._rule_help_tooltip = Tooltip(
+            rule_help,
+            lambda: RULE_DESCRIPTIONS.get(self._rule_menu.get(), ""))
 
     def _build_action_panel(self) -> None:
         panel = ctk.CTkFrame(self)
@@ -509,6 +540,16 @@ class LogCompressorApp(_make_app_base()):
             return DEFAULT_CONTEXT_LINES
         # 钳制到合法范围（上限防极端值拖慢流式解析）
         return max(MIN_CONTEXT_LINES, min(MAX_CONTEXT_LINES, value))
+
+    def _on_rule_changed(self, choice: str) -> None:
+        """解析规则切换：状态栏即时展示该规则的适用场景说明。
+
+        修复缺陷#8：与悬停 tooltip 互补——切换规则时无需悬停
+        即可看到当前规则的含义。
+        """
+        desc = RULE_DESCRIPTIONS.get(choice)
+        if desc:
+            self._status_label.configure(text=f"解析规则 {choice}：{desc}")
 
     # ==================================================================
     # 文件选择 / 拖拽

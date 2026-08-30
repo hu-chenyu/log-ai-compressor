@@ -656,3 +656,58 @@ def _texts_in(root):
         except (tk.TclError, AttributeError, TypeError, ValueError):
             continue
     return [t for t in texts if t]
+
+
+# ---------------------------------------------------------------------------
+# 修复8：解析规则悬停说明（动态 tooltip + 状态栏说明）
+# ---------------------------------------------------------------------------
+RULE_TOOLTIPS = {
+    "generic": "通用系统日志格式，适用于大多数标准应用日志、服务日志",
+    "embedded": "嵌入式/UT测试日志格式，适用于嵌入式设备、单元测试输出、编译日志",
+    "jenkins": "Jenkins控制台输出格式，适用于CI/CD流水线日志、构建日志",
+}
+
+
+class TestRuleTooltips:
+    def test_rule_help_tooltip_exists(self, app):
+        """解析规则旁必须有 ⓘ 悬停说明。"""
+        assert app._rule_help_tooltip is not None
+
+    def test_rule_tooltip_dynamic_text(self, app):
+        """tooltip 文本必须跟随当前选中的解析规则动态变化。"""
+        tip = app._rule_help_tooltip
+        for rule, expected in RULE_TOOLTIPS.items():
+            app._rule_menu.set(rule)
+            assert tip._current_text() == expected, \
+                f"规则 {rule} 的悬停说明不正确"
+
+    def test_rule_tooltip_shows_current_rule_text(self, app):
+        """显示中的 tooltip 内容与当前规则一致。"""
+        tip = app._rule_help_tooltip
+        app._rule_menu.set("embedded")
+        tip._show()
+        app.update()
+        assert tip._tip is not None
+        label = tip._tip.winfo_children()[0]
+        assert label.cget("text") == RULE_TOOLTIPS["embedded"]
+        tip._hide()
+
+    def test_all_rules_have_descriptions(self):
+        """三个内置规则都必须有说明文本。"""
+        from log_ai_compressor.gui.app import RULE_DESCRIPTIONS, RULE_NAMES
+        for name in RULE_NAMES:
+            assert name in RULE_DESCRIPTIONS
+            assert len(RULE_DESCRIPTIONS[name]) >= 10
+
+    def test_rule_change_updates_status_bar(self, app):
+        """切换规则时状态栏即时展示适用场景说明。"""
+        app._on_rule_changed("generic")
+        assert "通用系统日志格式" in app._status_label.cget("text")
+        app._on_rule_changed("jenkins")
+        assert "Jenkins" in app._status_label.cget("text")
+
+    def test_unknown_rule_tooltip_empty(self, app):
+        """未知规则名时 tooltip 文本为空（不显示误导信息）。"""
+        tip = app._rule_help_tooltip
+        app._rule_menu.set("nonexistent-rule")
+        assert tip._current_text() == ""
