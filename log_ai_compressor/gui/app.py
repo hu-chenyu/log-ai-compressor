@@ -132,9 +132,11 @@ _THEME_ALIASES = {"dark": "dark", "light": "light", "blue": "blue",
 _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
                "Traceback")
 
-# 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7）
-_DETAIL_TAG_COLORS = {"kw": "#ff6b6b", "bstack": "#ffd54f",
-                      "meta": "#8fa4b8", "header": "#4dd0e1"}
+# 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7/R5）
+# 修复缺陷R5：业务栈帧提亮加粗更明显；系统库折叠提示独立配色更清晰
+_DETAIL_TAG_COLORS = {"kw": "#ff6b6b", "bstack": "#fbbf24",
+                      "meta": "#8fa4b8", "fold": "#a78bfa",
+                      "header": "#4dd0e1"}
 
 # 解析规则说明（悬停提示，修复缺陷#8）
 RULE_DESCRIPTIONS = {
@@ -648,12 +650,32 @@ class LogCompressorApp(_make_app_base()):
         self._setup_detail_tags()
 
     def _setup_detail_tags(self) -> None:
-        """详情文本高亮标签：关键字 / 业务栈帧 / 元信息 / 段落标题。"""
+        """主面板详情标签配置（转发共享方法）。"""
+        self._apply_detail_tags(self._detail_box)
+
+    def _apply_detail_tags(self, box: ctk.CTkTextbox) -> None:
+        """详情文本高亮标签：关键字 / 业务栈帧 / 元信息 / 折叠提示 / 段落标题。
+
+        修复缺陷R5：业务栈帧（bstack）琥珀色加粗，与普通日志行区分
+        更明显；系统库折叠提示（fold）独立紫色，视觉清晰。
+
+        说明：CTkTextbox.tag_config 禁用 font 选项（与 DPI 缩放不
+        兼容），加粗经内部 tk.Text 配置并手动缩放；失败时降级为
+        无高亮（不阻断渲染）。
+        """
         try:
             for tag, color in _DETAIL_TAG_COLORS.items():
-                self._detail_box.tag_config(tag, foreground=color)
+                box.tag_config(tag, foreground=color)
+            # 业务栈帧加粗（内部 tk.Text 支持 tag font）
+            inner = getattr(box, "_textbox", None)
+            if inner is not None:
+                font = ("Consolas", 13, "bold")
+                scaler = getattr(box, "_apply_font_scaling", None)
+                if callable(scaler):
+                    font = scaler(font)
+                inner.tag_config("bstack", font=font)
         except (tk.TclError, AttributeError):
-            pass  # 标签配置失败时降级为无高亮
+            pass
 
     def _build_status_bar(self) -> None:
         bar = ctk.CTkFrame(self, corner_radius=0)
@@ -1375,7 +1397,8 @@ class LogCompressorApp(_make_app_base()):
             header(f"──── 堆栈（业务帧高亮，折叠噪声帧 {simplified.noise_count} 行）────")
             for line in simplified.lines:
                 if "已折叠" in line:
-                    meta(line)
+                    # 修复缺陷R5：折叠提示独立配色（清晰可辨）
+                    box.insert("end", line + "\n", "fold")
                 else:
                     box.insert("end", line + "\n", "bstack")
 
@@ -1425,7 +1448,8 @@ class LogCompressorApp(_make_app_base()):
             header(f"──── 堆栈（业务帧高亮，折叠噪声帧 {simplified.noise_count} 行）────")
             for line in simplified.lines:
                 if "已折叠" in line:
-                    meta(line)
+                    # 修复缺陷R5：折叠提示独立配色（清晰可辨）
+                    box.insert("end", line + "\n", "fold")
                 else:
                     box.insert("end", line + "\n", "bstack")
         box.configure(state="disabled")
@@ -1785,12 +1809,8 @@ class LogCompressorApp(_make_app_base()):
             wrap="none")
         fs_detail.grid(row=0, column=1, sticky="nsew", padx=(3, 6),
                        pady=(26, 0))
-        # 详情高亮标签（与主面板同一套配色）
-        try:
-            for tag, color in _DETAIL_TAG_COLORS.items():
-                fs_detail.tag_config(tag, foreground=color)
-        except (tk.TclError, AttributeError):
-            pass
+        # 详情高亮标签（与主面板同一套配色，修复缺陷R5）
+        self._apply_detail_tags(fs_detail)
 
         fs_rows: List[dict] = []
         expanded: Dict[int, dict] = {}     # idx -> 展开状态（实例标签等）
@@ -1985,7 +2005,7 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
                       command=win.destroy).pack(side="right", padx=12, pady=8)
         box = ctk.CTkTextbox(win, font=ctk.CTkFont(family="Consolas",
-                                                   size=12), wrap="none")
+                                                   size=13), wrap="none")
         # 水平滚动条（垂直滚动条 CTkTextbox 自带）
         xbar = tk.Scrollbar(win, orient="horizontal", command=box.xview)
         box.configure(xscrollcommand=xbar.set)

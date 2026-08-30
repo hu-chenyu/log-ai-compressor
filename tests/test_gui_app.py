@@ -1018,6 +1018,73 @@ class TestFullscreenExpand:
         assert "connection refused" in db.instances[0].summary
 
 
+# ---------------------------------------------------------------------------
+# 修复R5：详情面板字体与高亮（Tooltip 已由 R3 统一修复）
+# ---------------------------------------------------------------------------
+class TestDetailPanelR5:
+    def _select_db_cluster(self, app):
+        """选中带堆栈的 db 簇（含系统库噪声帧 -> 有折叠行）。"""
+        idx = next(i for i, c in enumerate(app._displayed)
+                   if "connection refused" in c.summary)
+        app._select_cluster(idx)
+        app.update()
+        return idx
+
+    def test_main_detail_font_13(self, app):
+        """修复R5：主面板详情字体 13 号（摘要/堆栈/上下文可读）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        self._select_db_cluster(app)
+        font = app._detail_box.cget("font")
+        size = font.cget("size") if hasattr(font, "cget") else font
+        assert int(size) in (12, 13), f"详情字体应为 12~13 号，实际 {size}"
+
+    def test_bstack_bold_and_distinct(self, app):
+        """修复R5：业务栈帧琥珀色加粗（与普通行区分更明显）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        self._select_db_cluster(app)
+        box = app._detail_box
+        # 有业务栈帧（at com.app... 行）
+        assert box.tag_ranges("bstack"), "应有业务栈帧高亮"
+        fg = str(box.tag_cget("bstack", "foreground"))
+        assert fg == "#fbbf24", f"业务栈帧应为琥珀色，实际 {fg}"
+        font = str(box.tag_cget("bstack", "font"))
+        assert "bold" in font, f"业务栈帧应加粗，实际 {font}"
+
+    def test_fold_line_distinct_tag(self, app):
+        """修复R5：系统库折叠提示独立配色（清晰可辨）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        self._select_db_cluster(app)
+        box = app._detail_box
+        assert box.tag_ranges("fold"), "java.base 噪声帧应生成折叠行"
+        fg = str(box.tag_cget("fold", "foreground"))
+        assert fg == "#a78bfa", f"折叠提示应为紫色，实际 {fg}"
+        # 折叠行文本确实包含「已折叠」
+        text = box.get("1.0", "end")
+        assert "已折叠" in text
+
+    def test_detail_fullscreen_font_13(self, app):
+        """修复R5：详情全屏窗口字体 13 号。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        self._select_db_cluster(app)
+        app._open_detail_fullscreen()
+        app.update()
+        try:
+            wins = [w for w in app.winfo_children()
+                    if isinstance(w, tk.Toplevel)
+                    and "错误详情" in w.title()]
+            assert wins
+            boxes = [w for w in _all_widgets(wins[0])
+                     if isinstance(w, ctk.CTkTextbox)]
+            font = boxes[0].cget("font")
+            size = font.cget("size") if hasattr(font, "cget") else font
+            assert int(size) in (12, 13), f"全屏详情字体应 12~13 号，实际 {size}"
+        finally:
+            for w in [w for w in app.winfo_children()
+                      if isinstance(w, tk.Toplevel)]:
+                w.destroy()
+            app.update()
+
+
 def _all_widgets(root):
     """递归收集窗口内全部控件。"""
     result = []
