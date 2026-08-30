@@ -2,6 +2,5 @@
 customtkinter>=5.2.0
 matplotlib>=3.5.0
 PyYAML>=6.0
-
-# 可选依赖：启用 GUI 文件拖拽导入（不安装则自动退化为点击选择，功能不受影响）
-# tkinterdnd2>=0.4.2
+# GUI 文件拖拽导入支持（缺失时自动退化为点击选择）
+tkinterdnd2>=0.4.2
