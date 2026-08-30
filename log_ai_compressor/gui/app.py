@@ -1033,6 +1033,7 @@ class LogCompressorApp(_make_app_base()):
         # 先赋值再切换按钮状态：状态机依据结果判断可用性
         self._compare_results = results
         self._result = None
+        self._displayed = []
         self._set_running(False)
         self._progress_bar.stop()
         self._progress_bar.set(1.0)
@@ -1042,6 +1043,11 @@ class LogCompressorApp(_make_app_base()):
         box.configure(state="normal")
         box.delete("1.0", "end")
         box.insert("end", "【多文件对比结果】\n", "header")
+        # 修复缺陷#10：对比符号图例说明（顶部一次性展示）
+        box.insert("end", "图例：", "header")
+        box.insert("end", "+ 新增错误（对比文件中新出现的）\n")
+        box.insert("end", "        - 消失错误（基准文件中有但对比文件中没有的）\n")
+        box.insert("end", "        = 共同错误（两个文件中都存在的）\n", "meta")
         for cmp in results:
             box.insert("end", f"\n基准 {cmp.base_name} vs {cmp.other_name}\n",
                        "header")
@@ -1058,17 +1064,77 @@ class LogCompressorApp(_make_app_base()):
                 box.insert("end",
                            f"  = [{i.level} {i.count_a}->{i.count_b} "
                            f"{i.change_text}] {i.summary}\n")
-        box.insert("end", "\n提示：点击「导出报告」保存完整对比差异报告\n", "meta")
+        box.insert("end", "\n提示：点击「导出报告」保存完整对比差异报告；"
+                           "「统计图表」查看两文件错误对比图\n", "meta")
         box.configure(state="disabled")
+        # 修复缺陷#10：左侧渲染对比差异列表（支持全屏查看）
+        self._render_compare_list()
+        self._status_label.configure(
+            text=f"对比完成：{' vs '.join([cmp.other_name for cmp in results])}")
+        self._save_config()
+
+    # 对比行符号与配色
+    _CMP_SYMBOL = {"new": "+", "gone": "-", "common": "="}
+    _CMP_COLOR = {"new": "#66bb6a", "gone": "#ef5350", "common": "#4dd0e1"}
+
+    def _iter_compare_rows(self):
+        """按「新增 → 消失 → 共同」顺序产出 (kind, 对比对, 差异项)。"""
+        for cmp in self._compare_results:
+            for i in cmp.new_items:
+                yield "new", cmp, i
+            for i in cmp.gone_items:
+                yield "gone", cmp, i
+            for i in cmp.common_items:
+                yield "common", cmp, i
+
+    def _make_compare_row(self, parent, kind: str, cmp: CompareResult,
+                          item) -> dict:
+        """构建单条对比差异行：符号 + 级别 + 次数变化 + 摘要（自动换行）。"""
+        frame = ctk.CTkFrame(parent, corner_radius=4,
+                             fg_color=_ROW_BG_DEFAULT)
+        frame.pack(fill="x", padx=4, pady=1)
+        if kind == "new":
+            count_text = f"×{item.count_b} 次"
+        elif kind == "gone":
+            count_text = f"×{item.count_a} 次"
+        else:
+            count_text = f"{item.count_a} -> {item.count_b}（{item.change_text}）"
+        head = ctk.CTkLabel(
+            frame,
+            text=(f"{self._CMP_SYMBOL[kind]} [{item.level}] {count_text}"
+                  f"   {cmp.base_name} vs {cmp.other_name}"),
+            anchor="w", text_color=self._CMP_COLOR[kind],
+            font=self._font_row_head)
+        head.pack(fill="x", padx=(8, 8), pady=(3, 0))
+        summary = tk.Label(
+            frame, text=item.summary, anchor="w", justify="left",
+            wraplength=360, font=self._font_row_summary,
+            bg=self._resolve_row_color(_ROW_BG_DEFAULT),
+            fg=_ROW_TEXT_DARK if self._is_dark_mode() else _ROW_TEXT_LIGHT)
+        summary.pack(fill="x", padx=(8, 2), pady=(0, 4))
+        return {"frame": frame, "summary": summary, "kind": kind,
+                "item": item, "text": f"{item.summary} {item.level} "
+                                      f"{self._CMP_SYMBOL[kind]}"}
+
+    def _render_compare_list(self) -> None:
+        """左侧对比差异列表（新增/消失/共同 全量渲染）。"""
         for child in self._cluster_list.winfo_children():
             child.destroy()
         self._cluster_rows = []
         self._selected_row = -1
-        ctk.CTkLabel(self._cluster_list, text="对比模式：差异摘要见右侧详情",
-                     text_color="#8fa4b8").pack(pady=20)
-        self._status_label.configure(
-            text=f"对比完成：{' vs '.join([cmp.other_name for cmp in results])}")
-        self._save_config()
+        if not self._compare_results:
+            ctk.CTkLabel(self._cluster_list,
+                         text="对比模式：差异摘要见右侧详情",
+                         text_color="#8fa4b8").pack(pady=20)
+            return
+        rows = list(self._iter_compare_rows())
+        if not rows:
+            ctk.CTkLabel(self._cluster_list,
+                         text="两文件错误完全一致（无差异项）",
+                         text_color="#8fa4b8").pack(pady=20)
+            return
+        for kind, cmp, item in rows[:200]:   # 上限保护（超长列表性能）
+            self._make_compare_row(self._cluster_list, kind, cmp, item)
 
     # ==================================================================
     # 导出 / 复制 / 图表
@@ -1110,19 +1176,28 @@ class LogCompressorApp(_make_app_base()):
             text="摘要已复制到剪贴板，可直接粘贴投喂 AI 助手")
 
     def _show_charts(self) -> None:
-        if self._result is None:
+        if self._result is None and not self._compare_results:
             return
         if self._chart_window is not None and self._chart_window.winfo_exists():
             self._chart_window.destroy()
         # 懒加载：首次点击图表时才导入 matplotlib（修复缺陷#9）
-        from log_ai_compressor.gui.charts import ChartsPanel
+        from log_ai_compressor.gui.charts import (
+            ChartsPanel,
+            CompareChartsPanel,
+        )
         self._chart_window = ctk.CTkToplevel(self)
-        self._chart_window.title("错误统计图表")
-        self._chart_window.geometry("1150x430")
-        ChartsPanel(
-            self._chart_window, self._result,
-            on_select_level=self._select_by_level,
-            on_select_module=self._select_by_module)
+        if self._compare_results:
+            # 修复缺陷#10：对比模式展示两文件错误对比图表
+            self._chart_window.title("错误对比图表")
+            self._chart_window.geometry("1150x460")
+            CompareChartsPanel(self._chart_window, self._compare_results)
+        else:
+            self._chart_window.title("错误统计图表")
+            self._chart_window.geometry("1150x430")
+            ChartsPanel(
+                self._chart_window, self._result,
+                on_select_level=self._select_by_level,
+                on_select_module=self._select_by_module)
 
     def _select_by_level(self, level: str) -> None:
         for i, c in enumerate(self._displayed):
@@ -1152,11 +1227,16 @@ class LogCompressorApp(_make_app_base()):
         return win
 
     def _open_list_fullscreen(self) -> None:
-        """错误分类列表全屏：搜索过滤 + 滚动，点击行联动主界面详情。"""
-        if not self._displayed:
+        """错误分类列表全屏：搜索过滤 + 滚动，点击行联动主界面详情。
+
+        修复缺陷#10：对比模式下展示差异列表（+ 新增 / - 消失 / = 共同）。
+        """
+        compare_mode = bool(self._compare_results) and not self._displayed
+        if not self._displayed and not compare_mode:
             messagebox.showinfo("提示", "请先完成一次分析再使用全屏")
             return
-        win = self._make_fullscreen_window("错误分类列表")
+        win = self._make_fullscreen_window("错误分类列表" if not compare_mode
+                                           else "对比差异列表")
         bar = ctk.CTkFrame(win, corner_radius=0)
         bar.pack(fill="x")
         ctk.CTkLabel(bar, text="搜索：").pack(side="left", padx=(12, 4))
@@ -1168,6 +1248,11 @@ class LogCompressorApp(_make_app_base()):
         count_label.pack(side="right", padx=12)
         ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
                       command=win.destroy).pack(side="right", padx=(0, 12))
+        if compare_mode:
+            # 图例常驻顶栏（对比模式）
+            ctk.CTkLabel(bar,
+                         text="+ 新增  - 消失  = 共同",
+                         text_color="#8fa4b8").pack(side="right", padx=12)
         list_area = ctk.CTkScrollableFrame(win)
         list_area.pack(fill="both", expand=True)
         fs_rows: List[dict] = []
@@ -1195,6 +1280,22 @@ class LogCompressorApp(_make_app_base()):
                 child.destroy()
             fs_rows.clear()
             shown = 0
+            if compare_mode:
+                total = 0
+                for kind, cmp, item in self._iter_compare_rows():
+                    total += 1
+                    hay = (f"{item.summary} {item.level} {item.module} "
+                           f"{self._CMP_SYMBOL[kind]}").lower()
+                    if kw and kw not in hay:
+                        continue
+                    if total > 500:
+                        continue
+                    shown += 1
+                    fs_rows.append(
+                        self._make_compare_row(list_area, kind, cmp, item))
+                count_label.configure(
+                    text=f"显示 {shown} / {total} 条")
+                return
             for idx, cluster in enumerate(self._displayed):
                 hay = (f"{cluster.summary} {cluster.module} "
                        f"{cluster.level} {cluster.priority_label}").lower()
@@ -1275,10 +1376,11 @@ class LogCompressorApp(_make_app_base()):
             state="normal" if has_any else "disabled")
         self._export_btn.configure(
             state="normal" if has_any else "disabled")
-        # 复制摘要 / 统计图表面向单次分析结果（对比模式的支持见对比功能）
-        self._copy_btn.configure(
-            state="normal" if has_result else "disabled")
+        # 修复缺陷#10：统计图表在对比模式下也可用（展示两文件错误对比图）
         self._chart_btn.configure(
+            state="normal" if has_any else "disabled")
+        # 复制摘要面向单次分析结果（对比模式导出报告即可）
+        self._copy_btn.configure(
             state="normal" if has_result else "disabled")
 
     def _on_close(self) -> None:
