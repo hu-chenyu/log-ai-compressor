@@ -79,13 +79,58 @@ _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
 _CLUSTER_ICON = {"fatal": "\u25c6", "root": "\u25b2", "burst": "\u25cf",
                  "rare": "\u25cb", "normal": "\u2022"}
 
-# 错误行背景（元组自动适配明暗主题）
+# 错误行背景（元组自动适配明暗主题；主列表旧配色，四态主题下优先取 palette）
 _ROW_BG_DEFAULT = ("gray88", "gray22")
 _ROW_BG_HOVER = ("gray80", "gray30")
 _ROW_BG_SELECTED = ("gray74", "gray38")
 # 摘要文字颜色（明 / 暗）
 _ROW_TEXT_DARK = "#c8cdd4"
 _ROW_TEXT_LIGHT = "#2d333b"
+
+# ---------------------------------------------------------------------------
+# 修复缺陷R1：四态主题体系（亮色 → 暗色 → 蓝调 → 绿调 循环）
+# ---------------------------------------------------------------------------
+# 主色调 #3B82F6（舒适蓝）；蓝调/绿调为柔和浅色渐变近似（Tk 无原生渐变，
+# 以「窗口层浅色 + 卡片层更浅」双层色营造层次）。
+# - window: 根/边栏背景   card: 卡片/输入区背景   header: 标题栏
+# - accent: 主按钮底色 / accent_text: 主按钮文字 / accent_hover: 悬停
+# - muted: 次要文字（提示/说明）
+# - row_*: 错误列表行 背景/悬停/选中/文字
+THEMES: Dict[str, Dict[str, str]] = {
+    "light": {
+        "name": "☀️ 亮色", "window": "#eef1f6", "card": "#ffffff",
+        "header": "#ffffff", "text": "#1f2937", "muted": "#6b7280",
+        "accent": "#3B82F6", "accent_hover": "#2563EB", "accent_text": "#ffffff",
+        "row_bg": "#ffffff", "row_hover": "#eff6ff", "row_selected": "#bfdbfe",
+        "row_text": "#2d333b", "is_dark": "0",
+    },
+    "dark": {
+        "name": "🌙 暗色", "window": "#111827", "card": "#1c2433",
+        "header": "#161e2d", "text": "#e5e7eb", "muted": "#94a3b8",
+        "accent": "#3B82F6", "accent_hover": "#60a5fa", "accent_text": "#ffffff",
+        "row_bg": "#1c2433", "row_hover": "#2a3547", "row_selected": "#1d4ed8",
+        "row_text": "#c8cdd4", "is_dark": "1",
+    },
+    "blue": {
+        "name": "🔵 蓝调", "window": "#cfe3fa", "card": "#e8f1fd",
+        "header": "#bcd6f5", "text": "#173a63", "muted": "#486e9c",
+        "accent": "#ffffff", "accent_hover": "#f4f9ff", "accent_text": "#1d4ed8",
+        "row_bg": "#e8f1fd", "row_hover": "#cfe0f5", "row_selected": "#8cbaf0",
+        "row_text": "#173a63", "is_dark": "0",
+    },
+    "green": {
+        "name": "🟢 绿调", "window": "#cdeeda", "card": "#e6f7ec",
+        "header": "#b7e3c8", "text": "#14432a", "muted": "#3f7d59",
+        "accent": "#ffffff", "accent_hover": "#f2fbf6", "accent_text": "#15803d",
+        "row_bg": "#e6f7ec", "row_hover": "#cdecd9", "row_selected": "#8fdcab",
+        "row_text": "#14432a", "is_dark": "0",
+    },
+}
+# 主题循环顺序（点击依次切换）
+THEME_ORDER = ("light", "dark", "blue", "green")
+# 兼容别名（旧配置 appearance 值）
+_THEME_ALIASES = {"dark": "dark", "light": "light", "blue": "blue",
+                  "green": "green"}
 
 _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
                "Traceback")
@@ -106,6 +151,14 @@ def _rate_text(lps: float) -> str:
     if lps >= 10000:
         return f"{lps / 10000:.1f} 万行/秒"
     return f"{lps:.0f} 行/秒"
+
+
+def _widget_alive(widget) -> bool:
+    """控件是否仍存活（destroy 后登记表清理用）。"""
+    try:
+        return bool(widget.winfo_exists())
+    except (tk.TclError, AttributeError):
+        return False
 
 
 class Tooltip:
@@ -195,7 +248,10 @@ class LogCompressorApp(_make_app_base()):
     def __init__(self):
         self._store = ConfigStore()
         self._config = self._store.load()
-        ctk.set_appearance_mode(self._config.get("appearance", "dark"))
+        # 修复缺陷R1：四态主题（兼容旧配置的 light/dark 值）
+        raw_theme = str(self._config.get("appearance", "dark")).lower()
+        self._theme = _THEME_ALIASES.get(raw_theme, "dark")
+        ctk.set_appearance_mode("dark" if self._theme_is_dark() else "light")
         super().__init__()
 
         window = self._config.get("window", {})
@@ -214,18 +270,37 @@ class LogCompressorApp(_make_app_base()):
         self._queue: "queue.Queue" = queue.Queue()
         # 共享字体：行级字体必须复用（每行新建 CTkFont 会被 GC 在
         # 任意线程析构，tkinter.Font.__del__ 跨线程调用 Tk 造成死锁）
-        self._font_row_head = ctk.CTkFont(family="Consolas", size=12)
-        self._font_row_summary = ctk.CTkFont(size=11)
-        self._font_hint = ctk.CTkFont(size=11)
+        # 修复缺陷R2：列表字体放大（级别/次数 15 bold，摘要 13）
+        self._font_row_head = ctk.CTkFont(family="Consolas", size=15,
+                                          weight="bold")
+        self._font_row_summary = ctk.CTkFont(size=13)
+        self._font_hint = ctk.CTkFont(size=12)
         self._cancel_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._chart_window: Optional[ctk.CTkToplevel] = None
 
+        # 修复缺陷R1：主题调色板登记表（切换时按角色批量刷新）
+        self._bg_widgets: List[tuple] = []       # (控件, "window"/"card"/"header")
+        self._muted_labels: List = []            # 次要文字标签
+        self._accent_buttons: List[tuple] = []   # (按钮, "accent"/"danger")
+
         self._build_ui()
+        self._apply_palette()
         self._setup_drag_and_drop()
         self._restore_config()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(80, self._poll_queue)
+
+    # ------------------------------------------------------------------
+    # 主题调色板
+    # ------------------------------------------------------------------
+    def _palette(self) -> Dict[str, str]:
+        """当前主题调色板。"""
+        return THEMES.get(self._theme, THEMES["dark"])
+
+    def _theme_is_dark(self) -> bool:
+        """当前主题是否为暗色系（blue/green 视为亮色系）。"""
+        return THEMES.get(self._theme, THEMES["dark"])["is_dark"] == "1"
 
     # ==================================================================
     # UI 构建
@@ -242,22 +317,27 @@ class LogCompressorApp(_make_app_base()):
         self._build_status_bar()
 
     def _build_header(self) -> None:
-        bar = ctk.CTkFrame(self, corner_radius=0, fg_color=("gray90", "gray17"))
+        # 修复缺陷R1：标题栏升级 —— 项目图标 + 大号加粗标题 + 主题角色登记
+        bar = ctk.CTkFrame(self, corner_radius=0)
         bar.grid(row=0, column=0, sticky="ew")
         bar.grid_columnconfigure(1, weight=1)
+        self._bg_widgets.append((bar, "header"))
+        icon = ctk.CTkLabel(bar, text="🗂️", font=ctk.CTkFont(size=26))
+        icon.grid(row=0, column=0, padx=(16, 4), pady=10, sticky="w")
         title = ctk.CTkLabel(
             bar, text=f"{HUMAN_NAME}  v{__version__}",
-            font=ctk.CTkFont(size=17, weight="bold"))
-        title.grid(row=0, column=0, padx=14, pady=8, sticky="w")
+            font=ctk.CTkFont(size=20, weight="bold"))
+        title.grid(row=0, column=1, padx=(2, 6), pady=10, sticky="w")
         subtitle = ctk.CTkLabel(
             bar, text="海量日志压缩投喂大模型 · 快速故障排查",
-            text_color="#8fa4b8")
-        subtitle.grid(row=0, column=1, padx=6, sticky="w")
-        # 修复缺陷#12：主题按钮显示当前主题状态（🌙 暗色 / ☀️ 亮色）
-        self._theme_btn = ctk.CTkButton(bar, text="🌙 暗色", width=86,
+            font=ctk.CTkFont(size=12))
+        subtitle.grid(row=0, column=2, padx=6, sticky="w")
+        self._muted_labels.append(subtitle)
+        # 修复缺陷#12/R1：主题按钮显示当前主题（四态循环）
+        self._theme_btn = ctk.CTkButton(bar, text="🌙 暗色", width=96,
                                         command=self._toggle_theme)
-        self._theme_btn.grid(row=0, column=2, padx=10)
-        self._update_theme_button()
+        self._theme_btn.grid(row=0, column=3, padx=(6, 16))
+        self._accent_buttons.append((self._theme_btn, "accent"))
 
     # ------------------------------------------------------------------
     def _build_tabs(self) -> None:
@@ -276,35 +356,39 @@ class LogCompressorApp(_make_app_base()):
                      "UTF-8/GBK 自动适配）")
         if not _HAS_DND:
             hint_text += "  |  拖拽未启用：pip install tkinterdnd2 后重启"
-        hint = ctk.CTkLabel(tab, text=hint_text, text_color="#8fa4b8")
+        hint = ctk.CTkLabel(tab, text=hint_text)
         hint.grid(row=0, column=0, sticky="w", pady=(2, 4))
+        self._muted_labels.append(hint)
         self._file_entry = ctk.CTkEntry(tab, placeholder_text="日志文件路径…")
         self._file_entry.grid(row=1, column=0, sticky="ew", padx=(0, 6))
         browse = ctk.CTkButton(tab, text="选择文件", width=90,
                                command=self._browse_file)
         browse.grid(row=1, column=1)
+        self._accent_buttons.append((browse, "accent"))
 
     def _build_text_tab(self) -> None:
         tab = self._tabview.tab("文本粘贴")
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=1)
         hint = ctk.CTkLabel(
-            tab, text="直接粘贴日志片段（适合几万行以内的快速排查，无需存为文件）",
-            text_color="#8fa4b8")
+            tab, text="直接粘贴日志片段（适合几万行以内的快速排查，无需存为文件）")
         hint.grid(row=0, column=0, sticky="w", pady=(2, 4))
+        self._muted_labels.append(hint)
         # 修复缺陷#11：undo=False —— 大段粘贴时 undo 栈与 autoseparator
         # 会随粘贴体量膨胀（几万行日志可达数百 MB），关闭撤销换取内存稳定
         self._paste_box = ctk.CTkTextbox(tab, height=170, undo=False,
                                          font=ctk.CTkFont(family="Consolas",
                                                           size=12))
         self._paste_box.grid(row=1, column=0, sticky="ew")
+        self._bg_widgets.append((self._paste_box, "card"))
 
     def _build_compare_tab(self) -> None:
         tab = self._tabview.tab("多文件对比")
         tab.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(tab, text="2~3 个日志文件对比（第一个为基准；适配版本对比 / 修复前后对比）",
-                     text_color="#8fa4b8").grid(row=0, column=0, columnspan=3,
-                                                sticky="w", pady=(2, 6))
+        cmp_hint = ctk.CTkLabel(
+            tab, text="2~3 个日志文件对比（第一个为基准；适配版本对比 / 修复前后对比）")
+        cmp_hint.grid(row=0, column=0, columnspan=3, sticky="w", pady=(2, 6))
+        self._muted_labels.append(cmp_hint)
         self._compare_entries = []
         for i, label in enumerate(("基准文件 A", "对比文件 B", "对比文件 C（可选）")):
             ctk.CTkLabel(tab, text=label, width=110, anchor="w").grid(
@@ -314,12 +398,14 @@ class LogCompressorApp(_make_app_base()):
             btn = ctk.CTkButton(tab, text="选择", width=64,
                                 command=lambda e=entry: self._browse_file(e))
             btn.grid(row=i + 1, column=2)
+            self._accent_buttons.append((btn, "accent"))
             self._compare_entries.append(entry)
 
     # ------------------------------------------------------------------
     def _build_config_panel(self) -> None:
         panel = ctk.CTkFrame(self)
         panel.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
+        self._bg_widgets.append((panel, "card"))
         for col in range(6):
             panel.grid_columnconfigure(col, weight=1)
 
@@ -356,10 +442,10 @@ class LogCompressorApp(_make_app_base()):
         self._ctx_entry.grid(row=2, column=1, padx=(2, 6), pady=(0, 8),
                              sticky="w")
         ctx_hint = ctk.CTkLabel(
-            panel, text="典型样例前后各保留的上下文行数（5~200）",
-            text_color="#8fa4b8")
+            panel, text="典型样例前后各保留的上下文行数（5~200）")
         ctx_hint.grid(row=2, column=2, columnspan=2, padx=(2, 6),
                       pady=(0, 8), sticky="w")
+        self._muted_labels.append(ctx_hint)
 
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=6, padx=(6, 2),
                                                   sticky="e")
@@ -379,43 +465,51 @@ class LogCompressorApp(_make_app_base()):
     def _build_action_panel(self) -> None:
         panel = ctk.CTkFrame(self)
         panel.grid(row=3, column=0, sticky="ew", padx=10, pady=4)
+        self._bg_widgets.append((panel, "card"))
         for col in range(7):
             panel.grid_columnconfigure(col, weight=1)
 
         self._start_btn = ctk.CTkButton(
-            panel, text="开始分析", font=ctk.CTkFont(weight="bold"),
-            command=self._on_start)
+            panel, text="开始分析", font=ctk.CTkFont(size=14, weight="bold"),
+            height=34, command=self._on_start)
         self._start_btn.grid(row=0, column=0, padx=6, pady=8, sticky="ew")
         self._cancel_btn = ctk.CTkButton(
             panel, text="取消", state="disabled", fg_color="#7b3535",
-            hover_color="#94424a", command=self._on_cancel)
+            hover_color="#94424a", command=self._on_cancel, height=34)
         self._cancel_btn.grid(row=0, column=1, padx=6, sticky="ew")
         self._export_btn = ctk.CTkButton(panel, text="导出报告",
-                                         state="disabled",
+                                         state="disabled", height=34,
                                          command=self._on_export)
         self._export_btn.grid(row=0, column=2, padx=6, sticky="ew")
         self._copy_btn = ctk.CTkButton(panel, text="复制摘要", state="disabled",
-                                       command=self._on_copy_summary)
+                                       height=34, command=self._on_copy_summary)
         self._copy_btn.grid(row=0, column=3, padx=6, sticky="ew")
         self._chart_btn = ctk.CTkButton(panel, text="统计图表", state="disabled",
-                                        command=self._show_charts)
+                                        height=34, command=self._show_charts)
         self._chart_btn.grid(row=0, column=4, padx=6, sticky="ew")
+        self._accent_buttons.append((self._start_btn, "accent"))
+        self._accent_buttons.append((self._export_btn, "accent"))
+        self._accent_buttons.append((self._copy_btn, "accent"))
+        self._accent_buttons.append((self._chart_btn, "accent"))
+        self._accent_buttons.append((self._cancel_btn, "danger"))
 
         progress_frame = ctk.CTkFrame(panel, fg_color="transparent")
         progress_frame.grid(row=0, column=5, columnspan=2, padx=10,
                             sticky="ew")
         progress_frame.grid_columnconfigure(0, weight=1)
         self._progress_label = ctk.CTkLabel(progress_frame, text="就绪",
-                                            text_color="#8fa4b8",
                                             anchor="w")
         self._progress_label.grid(row=0, column=0, sticky="ew")
-        self._progress_bar = ctk.CTkProgressBar(progress_frame)
+        self._muted_labels.append(self._progress_label)
+        self._progress_bar = ctk.CTkProgressBar(progress_frame,
+                                                progress_color="#3B82F6")
         self._progress_bar.grid(row=1, column=0, sticky="ew", pady=(2, 6))
         self._progress_bar.set(0)
 
     def _build_result_panel(self) -> None:
         panel = ctk.CTkFrame(self)
         panel.grid(row=4, column=0, sticky="nsew", padx=10, pady=(4, 2))
+        self._bg_widgets.append((panel, "card"))
         panel.grid_columnconfigure(0, weight=2)
         panel.grid_columnconfigure(1, weight=3)
         panel.grid_rowconfigure(1, weight=1)
@@ -425,23 +519,24 @@ class LogCompressorApp(_make_app_base()):
         list_head.grid(row=0, column=0, padx=10, pady=(8, 2), sticky="ew")
         list_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(list_head, text="错误分类列表（按优先级降序）",
-                     font=ctk.CTkFont(weight="bold")).grid(
+                     font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=0, column=0, sticky="w")
         self._list_fs_btn = ctk.CTkButton(list_head, text="⛶ 全屏", width=84,
                                           height=26,
                                           command=self._open_list_fullscreen)
         self._list_fs_btn.grid(row=0, column=1, padx=(6, 0), sticky="e")
+        self._accent_buttons.append((self._list_fs_btn, "accent"))
 
         # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
         detail_head = ctk.CTkFrame(panel, fg_color="transparent")
         detail_head.grid(row=0, column=1, padx=10, pady=(8, 2), sticky="ew")
         detail_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(detail_head, text="详情（典型样例 · 上下文 · 降噪堆栈）",
-                     font=ctk.CTkFont(weight="bold")).grid(
+                     font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=0, column=0, sticky="w")
         sample_help = ctk.CTkLabel(
-            detail_head, text="ⓘ", text_color="#4dd0e1",
-            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+            detail_head, text="ⓘ", text_color="#3B82F6",
+            font=ctk.CTkFont(size=14, weight="bold"), cursor="question_arrow")
         sample_help.grid(row=0, column=1, padx=(4, 0), sticky="w")
         self._sample_help_tooltip = Tooltip(
             sample_help,
@@ -451,14 +546,19 @@ class LogCompressorApp(_make_app_base()):
                                             height=26,
                                             command=self._open_detail_fullscreen)
         self._detail_fs_btn.grid(row=0, column=2, padx=(6, 0), sticky="e")
+        self._accent_buttons.append((self._detail_fs_btn, "accent"))
 
-        self._cluster_list = ctk.CTkScrollableFrame(panel, width=430)
+        # 修复缺陷R2：列表宽度加大（更大字体需要更宽可视区）
+        self._cluster_list = ctk.CTkScrollableFrame(panel, width=470)
         self._cluster_list.grid(row=1, column=0, sticky="nsw", padx=(10, 4),
                                 pady=(2, 8))
+        self._bg_widgets.append((self._cluster_list, "window"))
+        # 修复缺陷R5：详情字体放大到 13（摘要/堆栈/上下文更易读）
         self._detail_box = ctk.CTkTextbox(
-            panel, font=ctk.CTkFont(family="Consolas", size=12), wrap="none")
+            panel, font=ctk.CTkFont(family="Consolas", size=13), wrap="none")
         self._detail_box.grid(row=1, column=1, sticky="nsew", padx=(4, 10),
                               pady=(2, 8))
+        self._bg_widgets.append((self._detail_box, "card"))
         self._setup_detail_tags()
 
     def _setup_detail_tags(self) -> None:
@@ -470,12 +570,14 @@ class LogCompressorApp(_make_app_base()):
             pass  # 标签配置失败时降级为无高亮
 
     def _build_status_bar(self) -> None:
-        bar = ctk.CTkFrame(self, corner_radius=0, fg_color=("gray90", "gray17"))
+        bar = ctk.CTkFrame(self, corner_radius=0)
         bar.grid(row=5, column=0, sticky="ew")
+        self._bg_widgets.append((bar, "header"))
         bar.grid_columnconfigure(0, weight=1)
         self._status_label = ctk.CTkLabel(bar, text="就绪 · 支持文件导入 / 文本粘贴 / 多文件对比",
-                                          anchor="w", text_color="#8fa4b8")
+                                          anchor="w")
         self._status_label.grid(row=0, column=0, padx=12, pady=5, sticky="w")
+        self._muted_labels.append(self._status_label)
 
     # ==================================================================
     # 配置持久化
@@ -512,7 +614,8 @@ class LogCompressorApp(_make_app_base()):
             "top_n": self._current_top_n(),
             "context_lines": self._current_context_lines(),
             "rule": self._rule_menu.get(),
-            "appearance": self._config.get("appearance", "dark"),
+            # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
+            "appearance": self._theme,
             "window": {"width": self.winfo_width(),
                        "height": self.winfo_height()},
             "last_files": [self._file_entry.get()] +
@@ -617,9 +720,12 @@ class LogCompressorApp(_make_app_base()):
                     text=f"已拖入文件：{paths[0]}（点击开始分析）")
 
     def _toggle_theme(self) -> None:
-        """主题切换入口：淡出 -> 切换 -> 淡入（平滑过渡）。"""
-        current = ctk.get_appearance_mode().lower()
-        target = "light" if current == "dark" else "dark"
+        """主题切换入口：四态循环 + 淡出 -> 切换 -> 淡入（平滑过渡）。
+
+        修复缺陷R1：亮色 → 暗色 → 蓝调 → 绿调 依次循环。
+        """
+        idx = THEME_ORDER.index(self._theme) if self._theme in THEME_ORDER else 0
+        target = THEME_ORDER[(idx + 1) % len(THEME_ORDER)]
         self._fade_out(target, 0)
 
     # 主题过渡帧序列（窗口透明度）
@@ -635,7 +741,7 @@ class LogCompressorApp(_make_app_base()):
             return False
 
     def _fade_out(self, target: str, step: int) -> None:
-        """过渡第一阶段：窗口渐隐（8 帧后于谷底切换主题）。"""
+        """过渡第一阶段：窗口渐隐（4 帧后于谷底切换主题）。"""
         if step >= len(self._FADE_OUT_STEPS):
             self._apply_theme_switch(target)
             self._fade_in(0)
@@ -656,36 +762,73 @@ class LogCompressorApp(_make_app_base()):
         self.after(28, lambda: self._fade_in(step + 1))
 
     def _apply_theme_switch(self, target: str) -> None:
-        """实际执行主题切换（配色 / 按钮标识 / 行颜色 / 持久化）。"""
-        ctk.set_appearance_mode(target)
-        self._config["appearance"] = target
-        self._update_theme_button()
-        self._refresh_row_colors()
-        # 修复缺陷#12：切换立即持久化（不等关闭/下次分析）
+        """实际执行主题切换（调色板 / 按钮标识 / 行颜色 / 持久化）。"""
+        self._theme = target
+        self._apply_palette()
+        # 修复缺陷#12/R1：切换立即持久化（不等关闭/下次分析）
         self._store.save(self._current_config_dict())
 
+    def _apply_palette(self) -> None:
+        """把当前主题调色板应用到全部登记控件（修复缺陷R1）。
+
+        CTk 的 appearance mode 只有两态，蓝调/绿调在 light 基础上
+        按登记角色批量覆盖颜色实现。
+        """
+        p = self._palette()
+        ctk.set_appearance_mode("dark" if p["is_dark"] == "1" else "light")
+        try:
+            self.configure(fg_color=p["window"])
+        except (tk.TclError, ValueError):
+            pass
+        # 背景类容器（部分控件已销毁时跳过）
+        for widget, role in self._bg_widgets:
+            try:
+                widget.configure(fg_color=p[role])
+            except (tk.TclError, ValueError, AttributeError):
+                continue
+        # 次要文字
+        for label in self._muted_labels:
+            try:
+                label.configure(text_color=p["muted"])
+            except (tk.TclError, ValueError, AttributeError):
+                continue
+        # 主按钮（accent 蓝系 / 蓝调绿调下白底深字）与危险按钮（红系）
+        for btn, kind in self._accent_buttons:
+            try:
+                if kind == "danger":
+                    btn.configure(text_color="#ffffff")
+                else:
+                    btn.configure(fg_color=p["accent"],
+                                  hover_color=p["accent_hover"],
+                                  text_color=p["accent_text"])
+            except (tk.TclError, ValueError, AttributeError):
+                continue
+        self._refresh_row_colors()
+        self._update_theme_button()
+
     def _update_theme_button(self) -> None:
-        """主题按钮显示当前主题状态。"""
+        """主题按钮显示当前主题状态（四态）。"""
         if getattr(self, "_theme_btn", None) is None:
             return
-        dark = self._is_dark_mode()
-        self._theme_btn.configure(
-            text="🌙 暗色" if dark else "☀️ 亮色")
+        self._theme_btn.configure(text=self._palette()["name"])
 
     def _refresh_row_colors(self) -> None:
-        """主题切换后刷新列表行的明暗配色（原生 tk.Label 不随 CTk 主题）。"""
+        """主题切换后刷新列表行配色（原生 tk.Label 不随 CTk 主题）。"""
         rows = getattr(self, "_cluster_rows", ())
         if not rows:
             return
-        fg = _ROW_TEXT_DARK if self._is_dark_mode() else _ROW_TEXT_LIGHT
-        default_bg = self._resolve_row_color(_ROW_BG_DEFAULT)
-        for row in rows:
-            row["summary"].configure(fg=fg, bg=default_bg)
-            row["frame"].configure(fg_color=_ROW_BG_DEFAULT)
-        # 恢复选中行高亮（主列表模式下）
+        p = self._palette()
+        fg = p["row_text"]
         selected = getattr(self, "_selected_row", -1)
-        if 0 <= selected < len(rows) and "idx" in rows[selected]:
-            self._apply_row_bg(selected, _ROW_BG_SELECTED)
+        for i, row in enumerate(rows):
+            # 选中行保持选中色（主列表模式）
+            bg = p["row_selected"] if i == selected and "idx" in row \
+                else p["row_bg"]
+            try:
+                row["summary"].configure(fg=fg, bg=bg)
+                row["frame"].configure(fg_color=bg)
+            except (tk.TclError, ValueError, KeyError):
+                continue
 
     # ==================================================================
     # 任务调度（后台线程 + 队列轮询）
@@ -861,20 +1004,27 @@ class LogCompressorApp(_make_app_base()):
         self._displayed = self._result.clusters[:n]
         for child in self._cluster_list.winfo_children():
             child.destroy()
+        # 清理随列表销毁的动态 muted 标签（防登记表无限累积）
+        self._muted_labels = [
+            w for w in self._muted_labels
+            if not hasattr(w, "winfo_exists") or _widget_alive(w)]
         self._cluster_rows = []
         self._selected_row = -1
         if not self._displayed:
-            ctk.CTkLabel(self._cluster_list, text="未发现符合条件的错误",
-                         text_color="#8fa4b8").pack(pady=20)
+            empty = ctk.CTkLabel(self._cluster_list, text="未发现符合条件的错误")
+            empty.pack(pady=20)
+            self._muted_labels.append(empty)
             return
         for idx, cluster in enumerate(self._displayed):
             self._make_cluster_row(self._cluster_list, idx, cluster)
         total = len(self._result.clusters)
         if total > n:
-            ctk.CTkLabel(self._cluster_list,
-                         text=f"…… 其余 {total - n} 种错误可通过调大 Top N 查看",
-                         text_color="#8fa4b8",
-                         font=self._font_hint).pack(pady=6)
+            more = ctk.CTkLabel(
+                self._cluster_list,
+                text=f"…… 其余 {total - n} 种错误可通过调大 Top N 查看",
+                font=self._font_hint)
+            more.pack(pady=6)
+            self._muted_labels.append(more)
         # 列表宽度变化时刷新换行宽度
         self._cluster_list.unbind("<Configure>")
         self._cluster_list.bind("<Configure>", self._on_list_resize)
@@ -884,6 +1034,9 @@ class LogCompressorApp(_make_app_base()):
                           on_select=None, on_hover=None) -> dict:
         """构建单条错误行（主列表与全屏列表复用，修复缺陷#7）。
 
+        修复缺陷R2：字体放大（头部 15 加粗 / 摘要 13）、行距加大、
+        选中态蓝色高亮（palette row_selected）。
+
         摘要使用原生 tk.Label：wraplength 超限即折行（含超长
         单词的字符级折行），长 token（超长路径 / 哈希串）完整可见。
 
@@ -891,21 +1044,21 @@ class LogCompressorApp(_make_app_base()):
             register: 登记进 self._cluster_rows（主列表选中态管理）
             on_select / on_hover: 自定义回调（全屏窗口联动高亮用）
         """
-        frame = ctk.CTkFrame(parent, corner_radius=4,
-                             fg_color=_ROW_BG_DEFAULT)
-        frame.pack(fill="x", padx=4, pady=1)
+        p = self._palette()
+        frame = ctk.CTkFrame(parent, corner_radius=6,
+                             fg_color=p["row_bg"])
+        frame.pack(fill="x", padx=5, pady=2)
         head = ctk.CTkLabel(
             frame, text=self._row_text(cluster), anchor="w",
             text_color=self._row_color(cluster) or None,
             font=self._font_row_head)
-        head.pack(fill="x", padx=(8, 8), pady=(3, 0))
+        head.pack(fill="x", padx=(10, 10), pady=(6, 0))
         summary = tk.Label(
             frame, text=cluster.summary, anchor="w", justify="left",
-            wraplength=360,
+            wraplength=400,
             font=self._font_row_summary,
-            bg=self._resolve_row_color(_ROW_BG_DEFAULT),
-            fg=_ROW_TEXT_DARK if self._is_dark_mode() else _ROW_TEXT_LIGHT)
-        summary.pack(fill="x", padx=(8, 2), pady=(0, 4))
+            bg=p["row_bg"], fg=p["row_text"])
+        summary.pack(fill="x", padx=(10, 4), pady=(0, 7))
         select_cb = on_select or (lambda: self._select_cluster(idx))
         hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
         for widget in (frame, head, summary):
@@ -919,6 +1072,11 @@ class LogCompressorApp(_make_app_base()):
 
     @staticmethod
     def _is_dark_mode() -> bool:
+        """兼容旧接口：CTk appearance 模式是否为 dark。
+
+        修复缺陷R1：四态下 blue/green 映射到 light 基础，
+        此方法仅反映 CTk 底层模式（供 Tooltip 等外部类使用）。
+        """
         return ctk.get_appearance_mode().lower() == "dark"
 
     @staticmethod
@@ -928,6 +1086,12 @@ class LogCompressorApp(_make_app_base()):
             return color[1] if LogCompressorApp._is_dark_mode() else color[0]
         return color
 
+    def _row_states(self) -> Dict[str, str]:
+        """行三态配色（背景/悬停/选中），随主题切换。"""
+        p = self._palette()
+        return {"bg": p["row_bg"], "hover": p["row_hover"],
+                "selected": p["row_selected"]}
+
     def _apply_row_bg(self, idx: int, color) -> None:
         """统一更新行背景（CTkFrame + 原生摘要标签同步）。"""
         row = self._cluster_rows[idx]
@@ -936,7 +1100,7 @@ class LogCompressorApp(_make_app_base()):
 
     def _on_list_resize(self, event) -> None:
         """列表宽度变化 -> 自适应摘要换行宽度（保持内容完整可见）。"""
-        wrap = max(240, event.width - 60)
+        wrap = max(280, event.width - 60)
         for row in getattr(self, "_cluster_rows", ()):
             row["summary"].configure(wraplength=wrap)
 
@@ -946,16 +1110,18 @@ class LogCompressorApp(_make_app_base()):
             return
         if idx == self._selected_row:
             return
+        states = self._row_states()
         self._apply_row_bg(
-            idx, _ROW_BG_HOVER if hovered else _ROW_BG_DEFAULT)
+            idx, states["hover"] if hovered else states["bg"])
 
     def _mark_selected_row(self, idx: int) -> None:
-        """更新选中行高亮（清除旧选中，标记新选中）。"""
+        """更新选中行高亮（清除旧选中，标记新选中；蓝色选中态）。"""
         previous = getattr(self, "_selected_row", -1)
+        states = self._row_states()
         if 0 <= previous < len(self._cluster_rows):
-            self._apply_row_bg(previous, _ROW_BG_DEFAULT)
+            self._apply_row_bg(previous, states["bg"])
         if 0 <= idx < len(self._cluster_rows):
-            self._apply_row_bg(idx, _ROW_BG_SELECTED)
+            self._apply_row_bg(idx, states["selected"])
         self._selected_row = idx
 
     @staticmethod
@@ -1164,10 +1330,14 @@ class LogCompressorApp(_make_app_base()):
 
     def _make_compare_row(self, parent, kind: str, cmp: CompareResult,
                           item) -> dict:
-        """构建单条对比差异行：符号 + 级别 + 次数变化 + 摘要（自动换行）。"""
-        frame = ctk.CTkFrame(parent, corner_radius=4,
-                             fg_color=_ROW_BG_DEFAULT)
-        frame.pack(fill="x", padx=4, pady=1)
+        """构建单条对比差异行：符号 + 级别 + 次数变化 + 摘要（自动换行）。
+
+        修复缺陷R2：字体/行距随主列表放大（头部 15 加粗 / 摘要 13）。
+        """
+        p = self._palette()
+        frame = ctk.CTkFrame(parent, corner_radius=6,
+                             fg_color=p["row_bg"])
+        frame.pack(fill="x", padx=5, pady=2)
         if kind == "new":
             count_text = f"×{item.count_b} 次"
         elif kind == "gone":
@@ -1180,13 +1350,12 @@ class LogCompressorApp(_make_app_base()):
                   f"   {cmp.base_name} vs {cmp.other_name}"),
             anchor="w", text_color=self._CMP_COLOR[kind],
             font=self._font_row_head)
-        head.pack(fill="x", padx=(8, 8), pady=(3, 0))
+        head.pack(fill="x", padx=(10, 10), pady=(6, 0))
         summary = tk.Label(
             frame, text=item.summary, anchor="w", justify="left",
-            wraplength=360, font=self._font_row_summary,
-            bg=self._resolve_row_color(_ROW_BG_DEFAULT),
-            fg=_ROW_TEXT_DARK if self._is_dark_mode() else _ROW_TEXT_LIGHT)
-        summary.pack(fill="x", padx=(8, 2), pady=(0, 4))
+            wraplength=400, font=self._font_row_summary,
+            bg=p["row_bg"], fg=p["row_text"])
+        summary.pack(fill="x", padx=(10, 4), pady=(0, 7))
         return {"frame": frame, "summary": summary, "kind": kind,
                 "item": item, "text": f"{item.summary} {item.level} "
                                       f"{self._CMP_SYMBOL[kind]}"}
