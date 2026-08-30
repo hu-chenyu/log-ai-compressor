@@ -836,3 +836,119 @@ class TestCompareMode:
                      if isinstance(w, tk.Toplevel)
                      and "对比差异列表" in w.title()]
         assert not remaining
+
+
+# ---------------------------------------------------------------------------
+# 修复11：文本粘贴模式排查（大文本 / 中文特殊字符 / Tab 切换 / 编码）
+# ---------------------------------------------------------------------------
+PASTE_CN_LOG = "\n".join([
+    "2024-01-01 09:00:00 INFO [认证] 用户登录成功",
+    "",   # 空行
+    "2024-01-01 09:00:01 ERROR [数据库] 连接失败：无法连接到 db-primary:5432",
+    "Caused by: java.net.ConnectException: Connection refused",
+    "\tat com.app.db.Pool.init(Pool.java:42)",
+    "2024-01-01 09:00:02 FATAL [核心] 内存不足 worker 3 退出",
+    "2024-01-01 09:00:03 WARN [缓存] \"key=abc\"\ttoken 过期 \U0001f6a8",
+    "   ",  # 纯空白行
+    "2024-01-01 09:00:04 ERROR [数据库] 连接失败：无法连接到 db-secondary:5432",
+])
+
+
+class TestPasteMode:
+    def test_paste_large_text_analysis(self, app):
+        """粘贴 1 万行文本：正常解析（总行数 / 错误数正确）。"""
+        lines = []
+        for i in range(10000):
+            if i % 20 == 0:
+                lines.append(f"2024-01-01 09:{i // 60 % 60:02d}:{i % 60:02d} "
+                             f"ERROR [db] connection refused to host {i % 3}")
+            else:
+                lines.append(f"2024-01-01 09:{i // 60 % 60:02d}:{i % 60:02d} "
+                             f"INFO [core] heartbeat ok")
+        _run_paste_analysis(app, "\n".join(lines), timeout=60)
+        assert app._result.stats.total_lines == 10000
+        assert app._result.stats.error_entries == 500
+
+    def test_paste_chinese_and_special_chars(self, app):
+        """中文 / emoji / 引号 / 制表符 / 空行混合日志正常解析。"""
+        _run_paste_analysis(app, PASTE_CN_LOG)
+        r = app._result
+        # 空行与纯空白行不计入总行数？—— splitlines 计入空行
+        assert r.stats.total_lines == 9
+        # 中文错误聚为 2 簇（db-primary/db-secondary 掩码后同模板 + FATAL）
+        assert len(r.clusters) >= 2
+        summaries = " ".join(c.summary for c in r.clusters)
+        assert "连接失败" in summaries
+
+    def test_paste_tab_switch_content_preserved(self, app):
+        """粘贴后切换 Tab 再切回：内容不丢失。"""
+        app._tabview.set("文本粘贴")
+        app._paste_box.delete("1.0", "end")
+        app._paste_box.insert("1.0", SAMPLE_PASTE)
+        original = app._paste_box.get("1.0", "end").strip()
+        # 切走再切回
+        app._tabview.set("文件导入")
+        app.update()
+        app._tabview.set("多文件对比")
+        app.update()
+        app._tabview.set("文本粘贴")
+        app.update()
+        restored = app._paste_box.get("1.0", "end").strip()
+        assert restored == original, "切换 Tab 后粘贴内容丢失"
+
+    def test_paste_bom_text_parsed(self, app):
+        """BOM 开头的粘贴文本：首行仍能正常规则解析（修复缺陷#11）。"""
+        text = ("\ufeff2024-01-01 09:00:00 ERROR [db] connection refused\n"
+                "2024-01-01 09:00:01 INFO [core] heartbeat ok\n")
+        _run_paste_analysis(app, text)
+        r = app._result
+        # 首行应被解析为 ERROR 错误条目（而非无结构 INFO 行）
+        assert r.stats.error_entries == 1
+        assert any("connection refused" in c.summary for c in r.clusters)
+
+    def test_paste_crlf_text_parsed(self, app):
+        """CRLF / CR 混合换行的粘贴文本：行数与条目正确。"""
+        text = ("2024-01-01 09:00:00 ERROR [db] boom\r\n"
+                "2024-01-01 09:00:01 INFO [core] ok\r"
+                "2024-01-01 09:00:02 FATAL [core] dead\n")
+        _run_paste_analysis(app, text)
+        assert app._result.stats.total_lines == 3
+        assert app._result.stats.error_lines == 2
+
+    def test_paste_blank_only_warns(self, app, monkeypatch):
+        """纯空白粘贴：提示「请先粘贴日志文本」且不启动分析。"""
+        import log_ai_compressor.gui.app as app_mod
+        warned = []
+        monkeypatch.setattr(app_mod.messagebox, "showwarning",
+                            lambda title, msg: warned.append(msg))
+        app._tabview.set("文本粘贴")
+        app._paste_box.delete("1.0", "end")
+        app._paste_box.insert("1.0", "\n   \n\t\n")
+        app._on_start()
+        app.update()
+        assert warned and "粘贴" in warned[0]
+        assert app._worker is None or not app._worker.is_alive()
+
+    def test_paste_text_undo_disabled(self, app):
+        """粘贴框 undo 应关闭（大文本粘贴的 undo 栈内存保护）。"""
+        # CTkTextbox 底层 tk Text 的 undo 选项
+        try:
+            undo = app._paste_box.cget("undo")
+        except (ValueError, tk.TclError):
+            undo = None
+        if undo is not None:
+            assert str(undo) in ("False", "0", "false")
+
+    def test_paste_trailing_newlines_stripped(self, app):
+        """粘贴框恒有的尾部换行被正确去除（不产生空错误条目）。"""
+        text = ("2024-01-01 09:00:00 ERROR [db] connection refused\n\n\n\n")
+        _run_paste_analysis(app, text)
+        assert app._result.stats.error_entries == 1
+        # 尾部空行不计入解析行数（strip 后消除）
+        assert app._result.stats.total_lines == 1
+
+    def test_paste_result_encoding_label(self, app):
+        """粘贴文本分析结果编码标注为 utf-8（Unicode 直通无转换）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        assert app._result.stats.encoding == "utf-8"
+        assert app._result.stats.source == "<粘贴文本>"
