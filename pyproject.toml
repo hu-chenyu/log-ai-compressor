@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "log-ai-compressor"
+version = "1.0.0"
+description = "全场景通用日志分析前置处理器：日志压缩投喂大模型 + 快速故障排查"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["log", "analyzer", "llm", "compressor", "troubleshooting"]
+dependencies = [
+    "PyYAML>=6.0",
+    "matplotlib>=3.5",
+    "customtkinter>=5.2",
+]
+
+[project.optional-dependencies]
+gui = ["tkinterdnd2>=0.4.2"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.4"]
+
+[project.scripts]
+log-ai-compressor = "log_ai_compressor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["log_ai_compressor*"]
+
+[tool.setuptools.package-data]
+"log_ai_compressor.rules" = ["presets/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W6"]
+ignore = ["E741"]
+
+[tool.coverage.run]
+# 覆盖率门槛面向核心逻辑（GUI 依赖显示环境，CLI 属薄封装）
+omit = ["log_ai_compressor/gui/*", "log_ai_compressor/cli.py"]
+
+[tool.coverage.report]
+show_missing = true

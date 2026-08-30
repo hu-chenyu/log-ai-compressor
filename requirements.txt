@@ -1,0 +1,7 @@
+# 核心依赖（安装后即可运行 GUI 与 CLI，保持极少三方依赖）
+customtkinter>=5.2.0
+matplotlib>=3.5.0
+PyYAML>=6.0
+
+# 可选依赖：启用 GUI 文件拖拽导入（不安装则自动退化为点击选择，功能不受影响）
+# tkinterdnd2>=0.4.2
