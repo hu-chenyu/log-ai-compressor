@@ -257,6 +257,57 @@ class TestClusterListWrap:
         app.update()
         assert app._selected_row == 1
 
+    def test_row_head_internal_click_selects(self, app):
+        """修复R2：真实点击命中 CTkLabel 内部子控件也触发选中。
+
+        Tk 事件不冒泡：CTkLabel 是容器（内部 Canvas + tk.Label），
+        只绑容器时点击头部行（级别/次数行）不生效——此为
+        「点其他项不生效、只能默认选中第一行」的根因。
+        """
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app._select_cluster(0)
+        app.update()
+        head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        assert isinstance(head, ctk.CTkLabel)
+        # 取 CTkLabel 内部的真实子控件（Canvas / tk.Label）
+        internals = head.winfo_children()
+        assert internals, "CTkLabel 应有内部子控件"
+        # 改点行 1 的头部内部子控件验证选中切换
+        head1 = app._cluster_rows[1]["frame"].winfo_children()[0]
+        for child in head1.winfo_children():
+            child.event_generate("<Button-1>")
+        app.update()
+        assert app._selected_row == 1, \
+            "点击行 1 头部（CTkLabel 内部子控件）应选中行 1"
+        # 详情面板同步更新
+        detail = app._detail_box.get("1.0", "end")
+        assert "错误摘要" in detail
+
+    def test_row_click_detail_updates(self, app):
+        """修复R2：点击任意行右侧详情同步切换。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app._select_cluster(0)
+        app.update()
+        before = app._detail_box.get("1.0", "end")
+        # 点击行 1 的摘要标签
+        app._cluster_rows[1]["summary"].event_generate("<Button-1>")
+        app.update()
+        after = app._detail_box.get("1.0", "end")
+        assert app._selected_row == 1
+        assert before != after, "详情应随点击切换"
+
+    def test_selected_row_blue_highlight(self, app):
+        """修复R2：选中态与未选中态背景色明显区分（蓝色高亮）。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app._select_cluster(1)
+        app.update()
+        states = app._row_states()
+        selected = app._cluster_rows[1]["frame"].cget("fg_color")
+        normal = app._cluster_rows[0]["frame"].cget("fg_color")
+        # CTk 颜色可能返回 hex 或元组字符串，统一转字符串比较
+        assert str(selected) != str(normal), "选中/未选中应明显区分"
+        assert str(states["selected"]) not in ("", "None")
+
     def test_hover_highlight(self, app):
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         # 行 0 在结果渲染后自动选中，悬停测试使用未选中的行 1
@@ -511,6 +562,33 @@ class TestFullscreenView:
         """主界面必须有列表 / 详情两个全屏按钮。"""
         assert app._list_fs_btn is not None
         assert app._detail_fs_btn is not None
+
+    def test_fullscreen_window_centered_and_large(self, app):
+        """修复R2：全屏窗口位于屏幕正中央且尺寸 ≥80%。
+
+        zoomed 生效时窗口为整屏（同样满足 ≥80%）；zoomed 不可用时
+        退回显式居中几何（85% × 88%）。两种情形均校验。
+        """
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        win = app._make_fullscreen_window("测试全屏")
+        app.update()
+        try:
+            sw = win.winfo_screenwidth()
+            sh = win.winfo_screenheight()
+            # zoomed 状态：窗口即整屏，视为通过
+            if str(win.state()) == "zoomed":
+                return
+            w, h = win.winfo_width(), win.winfo_height()
+            assert w >= sw * 0.8, f"宽度 {w} 应 ≥ 屏幕 80%（{sw * 0.8:.0f}）"
+            assert h >= sh * 0.8, f"高度 {h} 应 ≥ 屏幕 80%（{sh * 0.8:.0f}）"
+            # 居中：窗口中心与屏幕中心偏差 ≤ 5%
+            cx_off = abs((w / 2 + win.winfo_x()) - sw / 2)
+            cy_off = abs((h / 2 + win.winfo_y()) - sh / 2)
+            assert cx_off <= sw * 0.05, f"水平中心偏差 {cx_off}px 过大"
+            assert cy_off <= sh * 0.05, f"垂直中心偏差 {cy_off}px 过大"
+        finally:
+            win.destroy()
+            app.update()
 
     def test_list_fullscreen_opens_with_rows(self, app):
         """列表全屏：窗口打开且包含全部错误行 + 搜索框。"""
