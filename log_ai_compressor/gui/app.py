@@ -90,6 +90,10 @@ _ROW_TEXT_LIGHT = "#2d333b"
 _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
                "Traceback")
 
+# 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7）
+_DETAIL_TAG_COLORS = {"kw": "#ff6b6b", "bstack": "#ffd54f",
+                      "meta": "#8fa4b8", "header": "#4dd0e1"}
+
 
 def _rate_text(lps: float) -> str:
     if lps >= 10000:
@@ -381,22 +385,37 @@ class LogCompressorApp(_make_app_base()):
         panel.grid_columnconfigure(1, weight=3)
         panel.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(panel, text="错误分类列表（按优先级降序）",
+        # 修复缺陷#7：列表 / 详情标题行增加「全屏」按钮（独立最大化窗口）
+        list_head = ctk.CTkFrame(panel, fg_color="transparent")
+        list_head.grid(row=0, column=0, padx=10, pady=(8, 2), sticky="ew")
+        list_head.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(list_head, text="错误分类列表（按优先级降序）",
                      font=ctk.CTkFont(weight="bold")).grid(
-            row=0, column=0, padx=10, pady=(8, 2), sticky="w")
+            row=0, column=0, sticky="w")
+        self._list_fs_btn = ctk.CTkButton(list_head, text="⛶ 全屏", width=84,
+                                          height=26,
+                                          command=self._open_list_fullscreen)
+        self._list_fs_btn.grid(row=0, column=1, padx=(6, 0), sticky="e")
+
         # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
         detail_head = ctk.CTkFrame(panel, fg_color="transparent")
-        detail_head.grid(row=0, column=1, padx=10, pady=(8, 2), sticky="w")
+        detail_head.grid(row=0, column=1, padx=10, pady=(8, 2), sticky="ew")
+        detail_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(detail_head, text="详情（典型样例 · 上下文 · 降噪堆栈）",
-                     font=ctk.CTkFont(weight="bold")).pack(side="left")
+                     font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, sticky="w")
         sample_help = ctk.CTkLabel(
-            detail_head, text="  ⓘ", text_color="#4dd0e1",
+            detail_head, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        sample_help.pack(side="left", padx=(4, 0))
+        sample_help.grid(row=0, column=1, padx=(4, 0), sticky="w")
         self._sample_help_tooltip = Tooltip(
             sample_help,
             "该错误类型的代表性日志样例，包含完整的错误信息、堆栈跟踪"
             "和前后上下文，用于快速定位问题")
+        self._detail_fs_btn = ctk.CTkButton(detail_head, text="⛶ 全屏", width=84,
+                                            height=26,
+                                            command=self._open_detail_fullscreen)
+        self._detail_fs_btn.grid(row=0, column=2, padx=(6, 0), sticky="e")
 
         self._cluster_list = ctk.CTkScrollableFrame(panel, width=430)
         self._cluster_list.grid(row=1, column=0, sticky="nsw", padx=(10, 4),
@@ -410,10 +429,8 @@ class LogCompressorApp(_make_app_base()):
     def _setup_detail_tags(self) -> None:
         """详情文本高亮标签：关键字 / 业务栈帧 / 元信息 / 段落标题。"""
         try:
-            self._detail_box.tag_config("kw", foreground="#ff6b6b")
-            self._detail_box.tag_config("bstack", foreground="#ffd54f")
-            self._detail_box.tag_config("meta", foreground="#8fa4b8")
-            self._detail_box.tag_config("header", foreground="#4dd0e1")
+            for tag, color in _DETAIL_TAG_COLORS.items():
+                self._detail_box.tag_config(tag, foreground=color)
         except (tk.TclError, AttributeError):
             pass  # 标签配置失败时降级为无高亮
 
@@ -746,11 +763,17 @@ class LogCompressorApp(_make_app_base()):
         self._cluster_list.unbind("<Configure>")
         self._cluster_list.bind("<Configure>", self._on_list_resize)
 
-    def _make_cluster_row(self, parent, idx: int, cluster: ErrorCluster) -> None:
-        """构建单条错误行（供主列表与全屏列表复用）。
+    def _make_cluster_row(self, parent, idx: int, cluster: ErrorCluster,
+                          register: bool = True,
+                          on_select=None, on_hover=None) -> dict:
+        """构建单条错误行（主列表与全屏列表复用，修复缺陷#7）。
 
         摘要使用原生 tk.Label：wraplength 超限即折行（含超长
         单词的字符级折行），长 token（超长路径 / 哈希串）完整可见。
+
+        参数：
+            register: 登记进 self._cluster_rows（主列表选中态管理）
+            on_select / on_hover: 自定义回调（全屏窗口联动高亮用）
         """
         frame = ctk.CTkFrame(parent, corner_radius=4,
                              fg_color=_ROW_BG_DEFAULT)
@@ -767,13 +790,16 @@ class LogCompressorApp(_make_app_base()):
             bg=self._resolve_row_color(_ROW_BG_DEFAULT),
             fg=_ROW_TEXT_DARK if self._is_dark_mode() else _ROW_TEXT_LIGHT)
         summary.pack(fill="x", padx=(8, 2), pady=(0, 4))
+        select_cb = on_select or (lambda: self._select_cluster(idx))
+        hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
         for widget in (frame, head, summary):
-            widget.bind("<Button-1>",
-                        lambda e, i=idx: self._select_cluster(i))
-            widget.bind("<Enter>", lambda e, i=idx: self._hover_row(i, True))
-            widget.bind("<Leave>", lambda e, i=idx: self._hover_row(i, False))
-        self._cluster_rows.append(
-            {"frame": frame, "summary": summary, "idx": idx})
+            widget.bind("<Button-1>", lambda e: select_cb())
+            widget.bind("<Enter>", lambda e: hover_cb(True))
+            widget.bind("<Leave>", lambda e: hover_cb(False))
+        row = {"frame": frame, "summary": summary, "idx": idx}
+        if register:
+            self._cluster_rows.append(row)
+        return row
 
     @staticmethod
     def _is_dark_mode() -> bool:
@@ -1068,6 +1094,122 @@ class LogCompressorApp(_make_app_base()):
             if c.module == module or (module == "(未知)" and not c.module):
                 self._select_cluster(i)
                 return
+
+    # ==================================================================
+    # 全屏查看（修复缺陷#7：列表 / 详情独立最大化窗口）
+    # ==================================================================
+    def _make_fullscreen_window(self, title: str) -> ctk.CTkToplevel:
+        """创建最大化全屏窗口（ESC 键 / 关闭按钮返回主界面）。"""
+        win = ctk.CTkToplevel(self)
+        win.title(f"{title}（全屏 · ESC 返回）")
+        try:
+            win.state("zoomed")            # Windows / macOS
+        except tk.TclError:
+            win.attributes("-fullscreen", True)   # Linux 回退
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.after(60, win.focus_set)       # 抢焦点以接收 ESC
+        return win
+
+    def _open_list_fullscreen(self) -> None:
+        """错误分类列表全屏：搜索过滤 + 滚动，点击行联动主界面详情。"""
+        if not self._displayed:
+            messagebox.showinfo("提示", "请先完成一次分析再使用全屏")
+            return
+        win = self._make_fullscreen_window("错误分类列表")
+        bar = ctk.CTkFrame(win, corner_radius=0)
+        bar.pack(fill="x")
+        ctk.CTkLabel(bar, text="搜索：").pack(side="left", padx=(12, 4))
+        search_var = tk.StringVar()
+        search = ctk.CTkEntry(bar, textvariable=search_var,
+                              placeholder_text="按摘要 / 模块 / 级别过滤…")
+        search.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
+        count_label = ctk.CTkLabel(bar, text="", text_color="#8fa4b8")
+        count_label.pack(side="right", padx=12)
+        ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
+                      command=win.destroy).pack(side="right", padx=(0, 12))
+        list_area = ctk.CTkScrollableFrame(win)
+        list_area.pack(fill="both", expand=True)
+        fs_rows: List[dict] = []
+
+        def paint_row(idx: int, color) -> None:
+            for row in fs_rows:
+                if row["idx"] == idx:
+                    row["frame"].configure(fg_color=color)
+                    row["summary"].configure(
+                        bg=self._resolve_row_color(color))
+
+        def fs_select(idx: int) -> None:
+            # 联动主界面详情 + 全屏窗口内高亮
+            self._select_cluster(idx)
+            for row in fs_rows:
+                color = (_ROW_BG_SELECTED if row["idx"] == idx
+                         else _ROW_BG_DEFAULT)
+                row["frame"].configure(fg_color=color)
+                row["summary"].configure(
+                    bg=self._resolve_row_color(color))
+
+        def render(keyword: str = "") -> None:
+            kw = keyword.strip().lower()
+            for child in list_area.winfo_children():
+                child.destroy()
+            fs_rows.clear()
+            shown = 0
+            for idx, cluster in enumerate(self._displayed):
+                hay = (f"{cluster.summary} {cluster.module} "
+                       f"{cluster.level} {cluster.priority_label}").lower()
+                if kw and kw not in hay:
+                    continue
+                shown += 1
+                fs_rows.append(
+                    self._make_cluster_row(
+                        list_area, idx, cluster, register=False,
+                        on_select=lambda i=idx: fs_select(i),
+                        on_hover=lambda hovered, i=idx: paint_row(
+                            i, _ROW_BG_HOVER if hovered else _ROW_BG_DEFAULT)))
+            count_label.configure(
+                text=f"显示 {shown} / {len(self._displayed)} 条")
+
+        def on_resize(event) -> None:
+            wrap = max(240, event.width - 60)
+            for row in fs_rows:
+                row["summary"].configure(wraplength=wrap)
+
+        # 文本变化即过滤（trace 不依赖键盘事件，无焦点也可靠触发）
+        search_var.trace_add("write", lambda *a: render(search_var.get()))
+        list_area.bind("<Configure>", on_resize)
+        render()
+
+    def _open_detail_fullscreen(self) -> None:
+        """详情面板全屏：完整详情 + 上下左右滚动（高亮一并复制）。"""
+        content = self._detail_box.get("1.0", "end").rstrip("\n")
+        if not content:
+            messagebox.showinfo("提示", "请先选择一个错误查看详情")
+            return
+        win = self._make_fullscreen_window("错误详情")
+        bar = ctk.CTkFrame(win, corner_radius=0)
+        bar.pack(fill="x")
+        ctk.CTkLabel(bar, text="错误详情（典型样例 · 上下文 · 降噪堆栈 · "
+                               "支持上下左右滚动）").pack(side="left", padx=12)
+        ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
+                      command=win.destroy).pack(side="right", padx=12, pady=8)
+        box = ctk.CTkTextbox(win, font=ctk.CTkFont(family="Consolas",
+                                                   size=12), wrap="none")
+        # 水平滚动条（垂直滚动条 CTkTextbox 自带）
+        xbar = tk.Scrollbar(win, orient="horizontal", command=box.xview)
+        box.configure(xscrollcommand=xbar.set)
+        xbar.pack(side="bottom", fill="x")
+        box.pack(fill="both", expand=True, pady=(0, 4))
+        box.insert("1.0", content)
+        # 复制主面板的高亮标签配置与范围（内容一致 -> 索引一致）
+        for tag, color in _DETAIL_TAG_COLORS.items():
+            try:
+                box.tag_config(tag, foreground=color)
+                ranges = self._detail_box.tag_ranges(tag)
+                for i in range(0, len(ranges) - 1, 2):
+                    box.tag_add(tag, str(ranges[i]), str(ranges[i + 1]))
+            except (tk.TclError, AttributeError):
+                pass
+        box.configure(state="disabled")
 
     # ==================================================================
     # 状态切换 / 退出

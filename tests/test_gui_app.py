@@ -477,3 +477,182 @@ class TestSampleHelpTooltip:
         tip._hide()   # 常规销毁
         tip._hide()   # 二次销毁应幂等
         assert tip._tip is None
+
+
+# ---------------------------------------------------------------------------
+# 修复7：全屏查看（列表 / 详情独立最大化窗口 + ESC 返回）
+# ---------------------------------------------------------------------------
+class TestFullscreenView:
+    def _open_fs_windows(self, app):
+        """打开两个全屏窗口并返回（列表窗, 详情窗）。"""
+        app._open_list_fullscreen()
+        app.update()
+        list_win = [w for w in app.winfo_children()
+                    if isinstance(w, tk.Toplevel)
+                    and "错误分类列表" in w.title()]
+        app._open_detail_fullscreen()
+        app.update()
+        detail_win = [w for w in app.winfo_children()
+                      if isinstance(w, tk.Toplevel)
+                      and "错误详情" in w.title()]
+        return list_win, detail_win
+
+    def test_fullscreen_buttons_exist(self, app):
+        """主界面必须有列表 / 详情两个全屏按钮。"""
+        assert app._list_fs_btn is not None
+        assert app._detail_fs_btn is not None
+
+    def test_list_fullscreen_opens_with_rows(self, app):
+        """列表全屏：窗口打开且包含全部错误行 + 搜索框。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app._open_list_fullscreen()
+        app.update()
+        fs_windows = [w for w in app.winfo_children()
+                      if isinstance(w, tk.Toplevel)
+                      and "错误分类列表" in w.title()]
+        assert fs_windows, "列表全屏窗口应已打开"
+        win = fs_windows[0]
+        # 窗口内应有滚动列表 + 搜索框 + 关闭按钮
+        # （CTk 控件 winfo_class 均为 Frame，直接取 text 属性判定）
+        texts = _texts_in(win)
+        assert any("关闭" in t for t in texts), "应有关闭按钮"
+        assert any("搜索" in t for t in texts), "应有搜索框"
+
+    def test_list_fullscreen_search_filters(self, app):
+        """全屏搜索：关键字过滤行数。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app._open_list_fullscreen()
+        app.update()
+        win = [w for w in app.winfo_children()
+               if isinstance(w, tk.Toplevel)
+               and "错误分类列表" in w.title()][0]
+        entries = [w for w in _all_widgets(win)
+                   if isinstance(w, ctk.CTkEntry)]
+        assert entries, "全屏窗口应有搜索输入框"
+        search = entries[0]
+        # 输入 fatal：仅 FATAL"short fatal" 行匹配（trace 实时过滤）
+        search.insert(0, "fatal")
+        app.update()
+        labels = [w for w in _all_widgets(win)
+                  if isinstance(w, ctk.CTkLabel)
+                  and "显示" in str(w.cget("text"))]
+        assert labels, "应有过滤计数标签"
+        assert "1 /" in str(labels[0].cget("text")), \
+            f"过滤后应只剩 1 行，实际: {labels[0].cget('text')}"
+
+    def test_detail_fullscreen_shows_content(self, app):
+        """详情全屏：内容与主面板一致且支持横向滚动。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._open_detail_fullscreen()
+        app.update()
+        wins = [w for w in app.winfo_children()
+                if isinstance(w, tk.Toplevel) and "错误详情" in w.title()]
+        assert wins, "详情全屏窗口应已打开"
+        win = wins[0]
+        # 全屏文本内容 = 主面板内容
+        boxes = [w for w in _all_widgets(win)
+                 if isinstance(w, ctk.CTkTextbox)]
+        assert boxes
+        fs_text = boxes[0].get("1.0", "end")
+        main_text = app._detail_box.get("1.0", "end")
+        assert fs_text.strip() == main_text.strip()
+        # 水平滚动条存在（wrap=none + xscrollbar）
+        xbars = [w for w in _all_widgets(win)
+                 if isinstance(w, tk.Scrollbar)
+                 and str(w.cget("orient")).endswith("horizontal")]
+        assert xbars, "详情全屏应配置水平滚动条"
+
+    def test_fullscreen_esc_closes(self, app):
+        """ESC 键应关闭全屏窗口（返回主界面）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app._open_list_fullscreen()
+        app.update()
+        wins = [w for w in app.winfo_children()
+                if isinstance(w, tk.Toplevel)
+                and "错误分类列表" in w.title()]
+        assert wins
+        win = wins[0]
+        win.event_generate("<Escape>")
+        app.update()
+        remaining = [w for w in app.winfo_children()
+                     if isinstance(w, tk.Toplevel)
+                     and "错误分类列表" in w.title()]
+        assert not remaining, "ESC 后窗口应关闭"
+        # 主界面仍存活
+        assert app.winfo_exists()
+
+    def test_fullscreen_click_links_main_detail(self, app):
+        """全屏列表点击行 -> 主界面详情同步切换。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app._select_cluster(0)
+        before = app._detail_box.get("1.0", "end")
+        app._open_list_fullscreen()
+        app.update()
+        win = [w for w in app.winfo_children()
+               if isinstance(w, tk.Toplevel)
+               and "错误分类列表" in w.title()][0]
+        # 找到行 frame 并点击（行 1 的 frame）
+        rows = [w for w in _all_widgets(win)
+                if isinstance(w, ctk.CTkFrame) and w.winfo_children()]
+        # 触发行 1 的点击（通过事件绑定）——直接调用绑定回调
+        canvases = [w for w in _all_widgets(win) if w.winfo_class() == "Canvas"]
+        # 行 frame 的第一个可点击子控件
+        clickables = []
+        for f in rows:
+            for sub in _all_widgets(f):
+                if sub.winfo_class() in ("CTkLabel", "Label", "Frame"):
+                    clickables.append(sub)
+        target = None
+        for w in clickables:
+            binds = w.bind("<Button-1>")
+            if binds:
+                target = w
+                break
+        assert target is not None, "行控件应有点击绑定"
+        target.event_generate("<Button-1>")
+        app.update()
+        after = app._detail_box.get("1.0", "end")
+        assert after != before or len(app._displayed) == 1, \
+            "点击全屏行应联动主界面详情（或仅 1 行无法切换）"
+
+    def test_fullscreen_without_analysis_is_safe(self, app):
+        """未分析时点击全屏按钮不崩溃（提示后返回）。"""
+        # displayed 为空 -> 直接返回不弹窗（messagebox 需要交互，跳过）
+        app._displayed = []
+        app._detail_box.delete("1.0", "end")
+        # monkeypatch 掉 messagebox 避免阻塞
+        import log_ai_compressor.gui.app as app_mod
+        original = app_mod.messagebox.showinfo
+        app_mod.messagebox.showinfo = lambda *a, **k: None
+        try:
+            app._open_list_fullscreen()
+            app._open_detail_fullscreen()
+            app.update()
+        finally:
+            app_mod.messagebox.showinfo = original
+
+
+def _all_widgets(root):
+    """递归收集窗口内全部控件。"""
+    result = []
+    stack = [root]
+    while stack:
+        w = stack.pop()
+        result.append(w)
+        try:
+            stack.extend(w.winfo_children())
+        except tk.TclError:
+            pass
+    return result
+
+
+def _texts_in(root):
+    """收集窗口内全部控件的 text 属性（无 text 的控件跳过）。"""
+    texts = []
+    for w in _all_widgets(root):
+        try:
+            texts.append(str(w.cget("text")))
+        except (tk.TclError, AttributeError, TypeError, ValueError):
+            continue
+    return [t for t in texts if t]
