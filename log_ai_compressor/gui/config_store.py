@@ -20,7 +20,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "include": [],
     "exclude": [],
     "top_n": 20,
-    "context_lines": 5,
+    # 修复缺陷#5：默认上下文行数 5 -> 50（详情可看内容太少）
+    "context_lines": 50,
     "rule": "generic",
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},

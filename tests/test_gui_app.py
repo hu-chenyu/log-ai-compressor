@@ -329,6 +329,7 @@ class TestPerformanceOptimizations:
 
         def spy_analyze(text, **kwargs):
             observed["thread"] = threading.current_thread()
+            observed["context_lines"] = kwargs.get("context_lines")
             from log_ai_compressor.core.models import RunStats, AnalysisResult
             return AnalysisResult(stats=RunStats(source="<t>", total_lines=1),
                                   clusters=[])
@@ -347,3 +348,78 @@ class TestPerformanceOptimizations:
         assert app._result is not None
         # 工作线程必须不是主线程
         assert observed["thread"] is not threading.main_thread()
+
+
+# ---------------------------------------------------------------------------
+# 修复5：上下文行数（默认 50 + GUI 可调节 5~200）
+# ---------------------------------------------------------------------------
+class TestContextLines:
+    def test_default_context_lines_is_50(self):
+        """全局默认值必须为 50（原 5 行太少）。"""
+        from log_ai_compressor.constants import DEFAULT_CONTEXT_LINES
+        assert DEFAULT_CONTEXT_LINES == 50
+
+    def test_context_entry_exists_with_default(self, app):
+        """配置区必须有「上下文行数」输入框，默认值 50。"""
+        assert app._ctx_entry is not None
+        assert app._ctx_entry.get() == "50"
+
+    def test_context_lines_clamped_to_range(self, app):
+        """非法/越界输入自动钳制到 5~200。"""
+        for raw, expected in [("1", 5), ("0", 5), ("-3", 5), ("999", 200),
+                              ("abc", 50), ("", 50), ("8", 8), ("120", 120)]:
+            app._ctx_entry.delete(0, "end")
+            app._ctx_entry.insert(0, raw)
+            assert app._current_context_lines() == expected, \
+                f"输入 {raw!r} 应钳制为 {expected}"
+
+    def test_context_lines_passed_to_pipeline(self, app, monkeypatch):
+        """GUI 配置的上下文行数必须传给分析管线。"""
+        import log_ai_compressor.gui.app as app_mod
+        captured = {}
+
+        def spy_analyze(text, **kwargs):
+            captured["context_lines"] = kwargs.get("context_lines")
+            from log_ai_compressor.core.models import RunStats, AnalysisResult
+            return AnalysisResult(stats=RunStats(source="<t>", total_lines=1),
+                                  clusters=[])
+
+        monkeypatch.setattr(app_mod, "analyze_text", spy_analyze)
+        app._ctx_entry.delete(0, "end")
+        app._ctx_entry.insert(0, "30")
+        app._tabview.set("文本粘贴")
+        app._paste_box.delete("1.0", "end")
+        app._paste_box.insert("1.0", SAMPLE_PASTE)
+        app._on_start()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            app.update()
+            if app._result is not None:
+                break
+            time.sleep(0.02)
+        assert captured["context_lines"] == 30
+
+    def test_context_lines_persisted(self, app, tmp_path):
+        """用户调整的上下文行数必须持久化，重启后恢复。"""
+        app._ctx_entry.delete(0, "end")
+        app._ctx_entry.insert(0, "100")
+        app._save_config()
+        saved = app._store.load()
+        assert saved.get("context_lines") == 100
+
+    def test_context_lines_restored_from_config(self, app, monkeypatch):
+        """配置文件中的 context_lines 启动时恢复到输入框。"""
+        app._ctx_entry.delete(0, "end")
+        app._ctx_entry.insert(0, "77")
+        app._save_config()
+        from log_ai_compressor.gui.app import LogCompressorApp
+        # 新实例读取同一配置文件
+        new_app = LogCompressorApp()
+        try:
+            new_app.update()
+            assert new_app._ctx_entry.get() == "77"
+        finally:
+            try:
+                new_app._on_close()
+            except Exception:
+                pass
