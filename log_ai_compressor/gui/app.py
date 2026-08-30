@@ -71,6 +71,14 @@ _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
 _CLUSTER_ICON = {"fatal": "\u25c6", "root": "\u25b2", "burst": "\u25cf",
                  "rare": "\u25cb", "normal": "\u2022"}
 
+# 错误行背景（元组自动适配明暗主题）
+_ROW_BG_DEFAULT = ("gray88", "gray22")
+_ROW_BG_HOVER = ("gray80", "gray30")
+_ROW_BG_SELECTED = ("gray74", "gray38")
+# 摘要文字颜色（明 / 暗）
+_ROW_TEXT_DARK = "#c8cdd4"
+_ROW_TEXT_LIGHT = "#2d333b"
+
 _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
                "Traceback")
 
@@ -101,6 +109,8 @@ class LogCompressorApp(_make_app_base()):
         self._result: Optional[AnalysisResult] = None
         self._compare_results: List[CompareResult] = []
         self._displayed: List[ErrorCluster] = []
+        self._cluster_rows: List[dict] = []
+        self._selected_row: int = -1
         self._queue: "queue.Queue" = queue.Queue()
         self._cancel_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
@@ -579,35 +589,107 @@ class LogCompressorApp(_make_app_base()):
             self._select_cluster(0)
 
     def _render_cluster_list(self) -> None:
-        """左侧错误列表：Top N 行（图标 + 优先级 + 次数 + 摘要）。"""
+        """左侧错误列表：Top N 行（图标/优先级/次数行 + 自动换行摘要行）。
+
+        修复缺陷：原单行 CTkButton 长文本溢出右侧且无横向滚动能力，
+        改为摘要自动换行（wraplength 随列表宽度自适应），内容完整可见。
+        """
         assert self._result is not None
         n = self._current_top_n()
         self._displayed = self._result.clusters[:n]
         for child in self._cluster_list.winfo_children():
             child.destroy()
+        self._cluster_rows = []
+        self._selected_row = -1
         if not self._displayed:
             ctk.CTkLabel(self._cluster_list, text="未发现符合条件的错误",
                          text_color="#8fa4b8").pack(pady=20)
             return
         for idx, cluster in enumerate(self._displayed):
-            row = ctk.CTkButton(
-                self._cluster_list, anchor="w", height=30, corner_radius=4,
-                text=self._row_text(cluster),
-                text_color=self._row_color(cluster),
-                font=ctk.CTkFont(family="Consolas", size=12),
-                fg_color=("gray86", "gray22"),
-                hover_color=("gray78", "gray30"),
-                command=lambda i=idx: self._select_cluster(i))
-            row.pack(fill="x", padx=4, pady=1)
+            self._make_cluster_row(self._cluster_list, idx, cluster)
         total = len(self._result.clusters)
         if total > n:
             ctk.CTkLabel(self._cluster_list,
                          text=f"…… 其余 {total - n} 种错误可通过调大 Top N 查看",
                          text_color="#8fa4b8", font=ctk.CTkFont(size=11)
                          ).pack(pady=6)
+        # 列表宽度变化时刷新换行宽度
+        self._cluster_list.unbind("<Configure>")
+        self._cluster_list.bind("<Configure>", self._on_list_resize)
+
+    def _make_cluster_row(self, parent, idx: int, cluster: ErrorCluster) -> None:
+        """构建单条错误行（供主列表与全屏列表复用）。
+
+        摘要使用原生 tk.Label：wraplength 超限即折行（含超长
+        单词的字符级折行），长 token（超长路径 / 哈希串）完整可见。
+        """
+        frame = ctk.CTkFrame(parent, corner_radius=4,
+                             fg_color=_ROW_BG_DEFAULT)
+        frame.pack(fill="x", padx=4, pady=1)
+        head = ctk.CTkLabel(
+            frame, text=self._row_text(cluster), anchor="w",
+            text_color=self._row_color(cluster) or None,
+            font=ctk.CTkFont(family="Consolas", size=12))
+        head.pack(fill="x", padx=(8, 8), pady=(3, 0))
+        summary = tk.Label(
+            frame, text=cluster.summary, anchor="w", justify="left",
+            wraplength=360,
+            font=ctk.CTkFont(size=11),
+            bg=self._resolve_row_color(_ROW_BG_DEFAULT),
+            fg=_ROW_TEXT_DARK if self._is_dark_mode() else _ROW_TEXT_LIGHT)
+        summary.pack(fill="x", padx=(8, 2), pady=(0, 4))
+        for widget in (frame, head, summary):
+            widget.bind("<Button-1>",
+                        lambda e, i=idx: self._select_cluster(i))
+            widget.bind("<Enter>", lambda e, i=idx: self._hover_row(i, True))
+            widget.bind("<Leave>", lambda e, i=idx: self._hover_row(i, False))
+        self._cluster_rows.append(
+            {"frame": frame, "summary": summary, "idx": idx})
+
+    @staticmethod
+    def _is_dark_mode() -> bool:
+        return ctk.get_appearance_mode().lower() == "dark"
+
+    @staticmethod
+    def _resolve_row_color(color) -> str:
+        """主题色元组 -> 当前模式下的实际颜色值。"""
+        if isinstance(color, (tuple, list)):
+            return color[1] if LogCompressorApp._is_dark_mode() else color[0]
+        return color
+
+    def _apply_row_bg(self, idx: int, color) -> None:
+        """统一更新行背景（CTkFrame + 原生摘要标签同步）。"""
+        row = self._cluster_rows[idx]
+        row["frame"].configure(fg_color=color)
+        row["summary"].configure(bg=self._resolve_row_color(color))
+
+    def _on_list_resize(self, event) -> None:
+        """列表宽度变化 -> 自适应摘要换行宽度（保持内容完整可见）。"""
+        wrap = max(240, event.width - 60)
+        for row in getattr(self, "_cluster_rows", ()):
+            row["summary"].configure(wraplength=wrap)
+
+    def _hover_row(self, idx: int, hovered: bool) -> None:
+        """行悬停高亮（选中行保持选中色）。"""
+        if not (0 <= idx < len(self._cluster_rows)):
+            return
+        if idx == self._selected_row:
+            return
+        self._apply_row_bg(
+            idx, _ROW_BG_HOVER if hovered else _ROW_BG_DEFAULT)
+
+    def _mark_selected_row(self, idx: int) -> None:
+        """更新选中行高亮（清除旧选中，标记新选中）。"""
+        previous = getattr(self, "_selected_row", -1)
+        if 0 <= previous < len(self._cluster_rows):
+            self._apply_row_bg(previous, _ROW_BG_DEFAULT)
+        if 0 <= idx < len(self._cluster_rows):
+            self._apply_row_bg(idx, _ROW_BG_SELECTED)
+        self._selected_row = idx
 
     @staticmethod
     def _row_text(cluster: ErrorCluster) -> str:
+        """行首元信息：图标 + 优先级 + 级别 + 次数 + 模块（不含摘要）。"""
         if cluster.level == "FATAL":
             icon = _CLUSTER_ICON["fatal"]
         elif cluster.is_root_cause:
@@ -618,9 +700,9 @@ class LogCompressorApp(_make_app_base()):
             icon = _CLUSTER_ICON["rare"]
         else:
             icon = _CLUSTER_ICON["normal"]
+        module = f"  {cluster.module}" if cluster.module else ""
         return (f"{icon} {cluster.priority_label} {cluster.level:<5} "
-                f"\u00d7{cluster.count:<4} "
-                f"{LogCompressorApp._clip(cluster.summary, 52)}")
+                f"\u00d7{cluster.count:<4}{module}")
 
     @staticmethod
     def _clip(text: str, width: int) -> str:
@@ -640,6 +722,7 @@ class LogCompressorApp(_make_app_base()):
     def _select_cluster(self, idx: int) -> None:
         if not (0 <= idx < len(self._displayed)):
             return
+        self._mark_selected_row(idx)
         self._show_cluster_detail(self._displayed[idx])
 
     def _show_cluster_detail(self, cluster: ErrorCluster) -> None:
@@ -783,6 +866,8 @@ class LogCompressorApp(_make_app_base()):
         box.configure(state="disabled")
         for child in self._cluster_list.winfo_children():
             child.destroy()
+        self._cluster_rows = []
+        self._selected_row = -1
         ctk.CTkLabel(self._cluster_list, text="对比模式：差异摘要见右侧详情",
                      text_color="#8fa4b8").pack(pady=20)
         self._status_label.configure(

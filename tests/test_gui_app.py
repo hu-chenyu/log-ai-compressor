@@ -177,3 +177,81 @@ class TestButtonStates:
                 time.sleep(0.02)
         assert app._result is not None
         assert app._start_btn.cget("state") == "normal"
+
+
+# ---------------------------------------------------------------------------
+# 修复4：错误列表换行布局（长摘要完整可见）
+# ---------------------------------------------------------------------------
+LONG_SUMMARY_LOG = (
+    "2024-01-01 09:00:00 ERROR [db] " + "x" * 140 + " 尾部可见标记TAIL\n"
+    "2024-01-01 09:00:01 FATAL [core] short fatal\n"
+)
+
+
+class TestClusterListWrap:
+    def test_rows_rendered_with_summary_label(self, app):
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        # 两行错误 -> 两行记录（FATAL 排序在前）
+        assert len(app._cluster_rows) == 2
+        # 长摘要在行 1（FATAL"short fatal"置顶）：完整未截断
+        first_summary = str(app._cluster_rows[1]["summary"].cget("text"))
+        assert "TAIL" in first_summary
+        assert len(first_summary) > 100
+        # 行首元信息不包含摘要
+        head_text = str(app._cluster_rows[1]["frame"]
+                        .winfo_children()[0].cget("text"))
+        assert "TAIL" not in head_text
+
+    def test_wraplength_adapts_to_width(self, app):
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app.update()
+        width = app._cluster_list.winfo_width()
+        if width > 100:  # 窗口已布局
+            for row in app._cluster_rows:
+                assert int(row["summary"].cget("wraplength")) >= 240
+
+    def test_row_content_not_clipped(self, app):
+        """修复验证：摘要标签请求宽度不超列表可视宽度（不再溢出裁剪）。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app.update()
+        # 换行后摘要的请求宽度应受 wraplength 约束
+        for row in app._cluster_rows:
+            assert row["summary"].winfo_reqwidth() <= \
+                int(row["summary"].cget("wraplength")) + 40
+
+    def test_selection_highlight(self, app):
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app._select_cluster(1)
+        assert app._selected_row == 1
+        app.update()
+        selected_color = app._cluster_rows[1]["frame"].cget("fg_color")
+        default_color = app._cluster_rows[0]["frame"].cget("fg_color")
+        assert selected_color != default_color
+
+    def test_row_click_selects(self, app):
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        summary_label = app._cluster_rows[1]["summary"]
+        summary_label.event_generate("<Button-1>")
+        app.update()
+        assert app._selected_row == 1
+
+    def test_hover_highlight(self, app):
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        # 行 0 在结果渲染后自动选中，悬停测试使用未选中的行 1
+        frame = app._cluster_rows[1]["frame"]
+        base = frame.cget("fg_color")
+        app._hover_row(1, True)
+        app.update()
+        hovered = frame.cget("fg_color")
+        app._hover_row(1, False)
+        app.update()
+        restored = frame.cget("fg_color")
+        assert hovered != base and restored == base
+
+    def test_long_word_wraps_not_overflow(self, app):
+        """超长无空格 token（哈希/路径）也按字符折行，不横向溢出。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app.update()
+        row = app._cluster_rows[1]
+        assert row["summary"].winfo_reqwidth() <= \
+            int(row["summary"].cget("wraplength")) + 40
