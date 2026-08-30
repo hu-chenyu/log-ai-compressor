@@ -973,10 +973,13 @@ class TestPasteMode:
 # 修复12：主题切换体验（状态标识 + 平滑过渡 + 持久化 + 对比度）
 # ---------------------------------------------------------------------------
 class TestThemeSwitch:
+    # 四态主题名（修复R1：亮色 → 暗色 → 蓝调 → 绿调 循环）
+    THEME_NAMES = ("☀️ 亮色", "🌙 暗色", "🔵 蓝调", "🟢 绿调")
+
     def test_theme_button_shows_current_mode(self, app):
-        """主题按钮必须显示当前主题（🌙 暗色 / ☀️ 亮色）。"""
+        """主题按钮必须显示当前主题（四态之一）。"""
         text = str(app._theme_btn.cget("text"))
-        assert text in ("🌙 暗色", "☀️ 亮色"), \
+        assert text in self.THEME_NAMES, \
             f"按钮应显示当前主题状态，实际: {text}"
 
     def test_toggle_updates_button_text(self, app):
@@ -986,7 +989,51 @@ class TestThemeSwitch:
         app.update()
         after = str(app._theme_btn.cget("text"))
         assert before != after
-        assert {before, after} == {"🌙 暗色", "☀️ 亮色"}
+        assert {before, after} <= set(self.THEME_NAMES)
+
+    def test_toggle_cycles_through_four_themes(self, app):
+        """修复R1：_toggle_theme 应按 亮色→暗色→蓝调→绿调→亮色 循环。"""
+        from log_ai_compressor.gui.app import THEME_ORDER
+        app._apply_theme_switch("light")
+        app.update()
+        for expected in ("dark", "blue", "green", "light"):
+            app._toggle_theme()
+            # 推进过渡动画帧（淡出4帧+谷底切换+淡入4帧，28ms/帧）
+            for _ in range(30):
+                app.update()
+                time.sleep(0.005)
+            deadline = time.time() + 3
+            while time.time() < deadline and app._theme != expected:
+                app.update()
+                time.sleep(0.02)
+            assert app._theme == expected, \
+                f"切换后应为 {expected}，实际 {app._theme}"
+            assert str(app._theme_btn.cget("text")) == \
+                dict(zip(THEME_ORDER, self.THEME_NAMES))[expected]
+        app._apply_theme_switch("dark")
+
+    def test_palette_roles_complete(self, app):
+        """修复R1：每个主题调色板字段齐全（缺角色会导致刷新异常）。"""
+        from log_ai_compressor.gui.app import THEMES
+        required = {"name", "window", "card", "header", "text", "muted",
+                    "accent", "accent_hover", "accent_text",
+                    "row_bg", "row_hover", "row_selected", "row_text",
+                    "is_dark"}
+        for key, palette in THEMES.items():
+            assert required <= set(palette), f"{key} 缺字段: {required - set(palette)}"
+
+    def test_blue_green_themes_button_white(self, app):
+        """修复R1：蓝调/绿调主题下主按钮为白底深色字（accent 白色）。"""
+        from log_ai_compressor.gui.app import THEMES
+        for key in ("blue", "green"):
+            app._apply_theme_switch(key)
+            app.update()
+            assert THEMES[key]["accent"] == "#ffffff"
+            # 实际按钮 fg_color 应用为白色（CTk 返回元组 (r,g,b) 或 hex）
+            color = str(app._theme_btn.cget("fg_color"))
+            assert "255, 255, 255" in color or color == "#ffffff", \
+                f"{key} 主题按钮应为白色，实际 {color}"
+        app._apply_theme_switch("dark")
 
     def test_theme_persisted_immediately(self, app):
         """切换主题立即写盘（不等关闭窗口）。"""
