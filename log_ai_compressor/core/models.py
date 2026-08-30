@@ -164,6 +164,24 @@ class ClusterSample:
 
 
 @dataclass
+class ClusterInstance:
+    """簇内单个错误实例（修复缺陷R4：全屏簇展开查看全部实例）。
+
+    内存有界设计：
+    - 前 MAX_CLUSTER_INSTANCES_DETAILED 个实例保留完整条目与
+      前上下文（可查看原始日志、堆栈与上下文）；
+    - 后续实例仅记录时间戳/行号/摘要（元数据）；
+    - 超出全局上限后不再记录（instances_truncated 标记）。
+    """
+    timestamp: Optional[float] = None
+    line_no: int = 0
+    last_line_no: int = 0
+    summary: str = ""                        # 展示用摘要（截断 160）
+    entry: Optional[LogEntry] = None         # 完整条目（详情用，可为 None）
+    before: List[str] = field(default_factory=list)   # 前上下文（详情用）
+
+
+@dataclass
 class ErrorCluster:
     """同类错误簇：模糊指纹聚合后的错误类别。"""
 
@@ -180,6 +198,10 @@ class ErrorCluster:
     last_seen: Optional[float] = None
     sample: Optional[ClusterSample] = None
     hist: TimeHistogram = field(default_factory=TimeHistogram)
+    # 修复缺陷R4：全部实例记录（展开查看；count 与 len(instances)
+    # 在超出保留上限时不一致，以 count 为准）
+    instances: List[ClusterInstance] = field(default_factory=list)
+    instances_truncated: bool = False    # 实例记录超出上限（未全量保留）
 
     # ---- 智能分析结果（analysis 模块填充）----
     is_root_cause: bool = False

@@ -33,7 +33,12 @@ from log_ai_compressor.constants import (
 )
 from log_ai_compressor.core.analysis import simplify_stack
 from log_ai_compressor.core.comparator import CompareResult, compare_files
-from log_ai_compressor.core.models import AnalysisResult, ErrorCluster, format_timestamp
+from log_ai_compressor.core.models import (
+    AnalysisResult,
+    ClusterInstance,
+    ErrorCluster,
+    format_timestamp,
+)
 from log_ai_compressor.core.pipeline import analyze_file, analyze_text
 from log_ai_compressor.export.reporters import (
     brief_summary,
@@ -351,6 +356,11 @@ class LogCompressorApp(_make_app_base()):
                                           weight="bold")
         self._font_row_summary = ctk.CTkFont(size=13)
         self._font_hint = ctk.CTkFont(size=12)
+        # 修复缺陷R4：全屏窗口字体（级别/次数 16 加粗，摘要 14）
+        self._font_fs_head = ctk.CTkFont(family="Consolas", size=16,
+                                         weight="bold")
+        self._font_fs_summary = ctk.CTkFont(size=14)
+        self._font_fs_inst = ctk.CTkFont(size=13)
         self._cancel_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._chart_window: Optional[ctk.CTkToplevel] = None
@@ -1107,11 +1117,16 @@ class LogCompressorApp(_make_app_base()):
 
     def _make_cluster_row(self, parent, idx: int, cluster: ErrorCluster,
                           register: bool = True,
-                          on_select=None, on_hover=None) -> dict:
+                          on_select=None, on_hover=None,
+                          font_head=None, font_summary=None,
+                          on_toggle=None) -> dict:
         """构建单条错误行（主列表与全屏列表复用，修复缺陷#7）。
 
         修复缺陷R2：字体放大（头部 15 加粗 / 摘要 13）、行距加大、
         选中态蓝色高亮（palette row_selected）。
+        修复缺陷R4：font_head/font_summary 覆盖字体（全屏 16/14）；
+        on_toggle 提供时行首渲染「▶ ×N」可点击展开按钮（次数从
+        行首元信息移入按钮）。
 
         摘要使用原生 tk.Label：wraplength 超限即折行（含超长
         单词的字符级折行），长 token（超长路径 / 哈希串）完整可见。
@@ -1125,15 +1140,36 @@ class LogCompressorApp(_make_app_base()):
         frame = ctk.CTkFrame(parent, corner_radius=6,
                              fg_color=p["row_bg"])
         frame.pack(fill="x", padx=5, pady=4)
-        head = ctk.CTkLabel(
-            frame, text=self._row_text(cluster), anchor="w",
-            text_color=self._row_color(cluster) or None,
-            font=self._font_row_head)
-        head.pack(fill="x", padx=(10, 10), pady=(8, 2))
+        toggle = None
+        if on_toggle is not None:
+            # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
+            link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
+            line = ctk.CTkFrame(frame, fg_color="transparent")
+            line.pack(fill="x", padx=(10, 10), pady=(8, 2))
+            toggle = ctk.CTkLabel(
+                line, text=f"\u25b6 \u00d7{cluster.count}",
+                font=font_head or self._font_row_head,
+                text_color=link, cursor="hand2")
+            toggle.pack(side="left", padx=(0, 10))
+            head = ctk.CTkLabel(
+                line, text=self._row_text(cluster, with_count=False),
+                anchor="w",
+                text_color=self._row_color(cluster) or None,
+                font=font_head or self._font_row_head)
+            head.pack(side="left", fill="x", expand=True)
+            # 展开按钮独立绑定（不触发行选中）
+            self._bind_row_events((toggle,), on_toggle,
+                                  lambda hovered: None)
+        else:
+            head = ctk.CTkLabel(
+                frame, text=self._row_text(cluster), anchor="w",
+                text_color=self._row_color(cluster) or None,
+                font=font_head or self._font_row_head)
+            head.pack(fill="x", padx=(10, 10), pady=(8, 2))
         summary = tk.Label(
             frame, text=cluster.summary, anchor="w", justify="left",
             wraplength=400,
-            font=self._font_row_summary,
+            font=font_summary or self._font_row_summary,
             bg=p["row_bg"], fg=p["row_text"])
         summary.pack(fill="x", padx=(10, 4), pady=(2, 9))
         select_cb = on_select or (lambda: self._select_cluster(idx))
@@ -1141,6 +1177,8 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
         self._bind_row_events((frame, head, summary), select_cb, hover_cb)
         row = {"frame": frame, "summary": summary, "idx": idx}
+        if toggle is not None:
+            row["toggle"] = toggle
         if register:
             self._cluster_rows.append(row)
         return row
@@ -1229,8 +1267,12 @@ class LogCompressorApp(_make_app_base()):
         self._selected_row = idx
 
     @staticmethod
-    def _row_text(cluster: ErrorCluster) -> str:
-        """行首元信息：图标 + 优先级 + 级别 + 次数 + 模块（不含摘要）。"""
+    def _row_text(cluster: ErrorCluster, with_count: bool = True) -> str:
+        """行首元信息：图标 + 优先级 + 级别 + （次数） + 模块（不含摘要）。
+
+        修复缺陷R4：with_count=False 时次数移至独立的「▶ ×N」展开
+        按钮（全屏窗口用），行首不再重复显示。
+        """
         if cluster.level == "FATAL":
             icon = _CLUSTER_ICON["fatal"]
         elif cluster.is_root_cause:
@@ -1242,8 +1284,10 @@ class LogCompressorApp(_make_app_base()):
         else:
             icon = _CLUSTER_ICON["normal"]
         module = f"  {cluster.module}" if cluster.module else ""
-        return (f"{icon} {cluster.priority_label} {cluster.level:<5} "
-                f"\u00d7{cluster.count:<4}{module}")
+        if with_count:
+            return (f"{icon} {cluster.priority_label} {cluster.level:<5} "
+                    f"\u00d7{cluster.count:<4}{module}")
+        return f"{icon} {cluster.priority_label} {cluster.level:<5}{module}"
 
     @staticmethod
     def _clip(text: str, width: int) -> str:
@@ -1267,10 +1311,12 @@ class LogCompressorApp(_make_app_base()):
         self._show_cluster_detail(self._displayed[idx])
 
     def _show_cluster_detail(self, cluster: ErrorCluster) -> None:
-        box = self._detail_box
-        box.configure(state="normal")
-        box.delete("1.0", "end")
+        """主界面详情面板渲染（转发到通用填充函数）。"""
+        self._fill_cluster_detail(self._detail_box, cluster)
 
+    @staticmethod
+    def _detail_writer(box: ctk.CTkTextbox):
+        """详情文本写入三件套（段标题 / 元信息 / 普通行）。"""
         def header(text: str) -> None:
             box.insert("end", text + "\n", "header")
 
@@ -1279,6 +1325,14 @@ class LogCompressorApp(_make_app_base()):
 
         def plain(text: str = "") -> None:
             box.insert("end", text + "\n")
+        return header, meta, plain
+
+    def _fill_cluster_detail(self, box: ctk.CTkTextbox,
+                             cluster: ErrorCluster) -> None:
+        """簇详情渲染（主面板与全屏详情面板共用，修复缺陷R4）。"""
+        header, meta, plain = self._detail_writer(box)
+        box.configure(state="normal")
+        box.delete("1.0", "end")
 
         header(f"【错误摘要】{cluster.summary}")
         meta(f"出现 {cluster.count} 次 | 级别 {cluster.level} | "
@@ -1330,6 +1384,50 @@ class LogCompressorApp(_make_app_base()):
             header("──── 后上下文 ────")
             for line in sample.after:
                 plain(line)
+        box.configure(state="disabled")
+        self._highlight_keywords(box)
+
+    def _fill_instance_detail(self, box: ctk.CTkTextbox,
+                              cluster: ErrorCluster,
+                              instance: "ClusterInstance") -> None:
+        """单个错误实例详情（修复缺陷R4：全屏展开实例点击查看）。
+
+        展示该实例自身的前上下文、原始日志与堆栈（区别于簇的
+        典型样例）；超岀详情保留上限的实例仅有元数据（提示降级）。
+        """
+        header, meta, plain = self._detail_writer(box)
+        box.configure(state="normal")
+        box.delete("1.0", "end")
+        header(f"【实例详情】{instance.summary}")
+        meta(f"时间 {format_timestamp(instance.timestamp)} | "
+             f"行 {instance.line_no}~{instance.last_line_no} | "
+             f"所属簇 ×{cluster.count}（{cluster.level}）")
+        if instance.entry is None:
+            plain()
+            meta("该实例超出详情保留上限（仅记录时间与摘要）。"
+                 "完整堆栈与上下文请查看该簇的「典型样例」。")
+            box.configure(state="disabled")
+            return
+        entry = instance.entry
+        if instance.before:
+            plain()
+            header("──── 前上下文 ────")
+            for line in instance.before:
+                plain(line)
+        plain()
+        header("──── 原始日志 ────")
+        plain(entry.raw)
+        for extra in entry.message_extra:
+            plain(extra)
+        if entry.stack:
+            simplified = simplify_stack(entry.stack)
+            plain()
+            header(f"──── 堆栈（业务帧高亮，折叠噪声帧 {simplified.noise_count} 行）────")
+            for line in simplified.lines:
+                if "已折叠" in line:
+                    meta(line)
+                else:
+                    box.insert("end", line + "\n", "bstack")
         box.configure(state="disabled")
         self._highlight_keywords(box)
 
@@ -1593,9 +1691,18 @@ class LogCompressorApp(_make_app_base()):
         return win
 
     def _open_list_fullscreen(self) -> None:
-        """错误分类列表全屏：搜索过滤 + 滚动，点击行联动主界面详情。
+        """错误分类列表全屏：左右分栏 + 簇展开 + 实例详情联动。
 
         修复缺陷#10：对比模式下展示差异列表（+ 新增 / - 消失 / = 共同）。
+        修复缺陷R4（核心功能）：
+        - 左侧错误簇列表，每簇「▶ ×N」可点击展开全部 N 个实例
+          （时间戳 + 摘要；展开 ▼ / 收起 ▶，批量渐进动画）；
+        - 展开的实例可点击，右侧详情面板显示该实例的前上下文、
+          原始日志与堆栈；
+        - 点击簇行，右侧显示簇详情（典型样例/上下文/降噪堆栈），
+          同时联动主界面选中；
+        - 实例行用原生 tk.Label 复用（不为每实例建独立 CTkFrame），
+          展开按 25 条/帧批量创建（大簇不卡顿）。
         """
         compare_mode = bool(self._compare_results) and not self._displayed
         if not self._displayed and not compare_mode:
@@ -1619,36 +1726,19 @@ class LogCompressorApp(_make_app_base()):
             ctk.CTkLabel(bar,
                          text="+ 新增  - 消失  = 共同",
                          text_color="#8fa4b8").pack(side="right", padx=12)
-        list_area = ctk.CTkScrollableFrame(win)
-        list_area.pack(fill="both", expand=True)
-        fs_rows: List[dict] = []
 
-        def paint_row(idx: int, color) -> None:
-            for row in fs_rows:
-                if row["idx"] == idx:
-                    row["frame"].configure(fg_color=color)
-                    row["summary"].configure(
-                        bg=self._resolve_row_color(color))
+        if compare_mode:
+            # 对比模式：保持原单栏差异列表（无簇/实例概念）
+            list_area = ctk.CTkScrollableFrame(win)
+            list_area.pack(fill="both", expand=True)
+            fs_rows: List[dict] = []
 
-        def fs_select(idx: int) -> None:
-            # 联动主界面详情 + 全屏窗口内高亮（主题调色板配色，
-            # 修复缺陷R2：选中蓝色高亮、与未选中明显区分）
-            self._select_cluster(idx)
-            states = self._row_states()
-            for row in fs_rows:
-                color = (states["selected"] if row["idx"] == idx
-                         else states["bg"])
-                row["frame"].configure(fg_color=color)
-                row["summary"].configure(
-                    bg=self._resolve_row_color(color))
-
-        def render(keyword: str = "") -> None:
-            kw = keyword.strip().lower()
-            for child in list_area.winfo_children():
-                child.destroy()
-            fs_rows.clear()
-            shown = 0
-            if compare_mode:
+            def render_compare(keyword: str = "") -> None:
+                kw = keyword.strip().lower()
+                for child in list_area.winfo_children():
+                    child.destroy()
+                fs_rows.clear()
+                shown = 0
                 total = 0
                 for kind, cmp, item in self._iter_compare_rows():
                     total += 1
@@ -1661,9 +1751,197 @@ class LogCompressorApp(_make_app_base()):
                     shown += 1
                     fs_rows.append(
                         self._make_compare_row(list_area, kind, cmp, item))
-                count_label.configure(
-                    text=f"显示 {shown} / {total} 条")
+                count_label.configure(text=f"显示 {shown} / {total} 条")
+
+            def on_resize_cmp(event) -> None:
+                wrap = max(240, event.width - 60)
+                for row in fs_rows:
+                    row["summary"].configure(wraplength=wrap)
+
+            search_var.trace_add(
+                "write", lambda *a: render_compare(search_var.get()))
+            list_area.bind("<Configure>", on_resize_cmp)
+            render_compare()
+            return
+
+        # ---------------- 常规模式：左右分栏 ----------------
+        body = ctk.CTkFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        body.grid_columnconfigure(0, weight=2)
+        body.grid_columnconfigure(1, weight=3)
+        body.grid_rowconfigure(0, weight=1)
+
+        list_area = ctk.CTkScrollableFrame(body, width=520)
+        list_area.grid(row=0, column=0, sticky="nsw", padx=(6, 3))
+
+        # 右侧详情面板（修复缺陷R4：点击簇/实例即时联动）
+        detail_head = ctk.CTkFrame(body, fg_color="transparent")
+        detail_head.grid(row=0, column=1, sticky="new", padx=(3, 6))
+        ctk.CTkLabel(detail_head, text="详情（簇典型样例 / 实例原始日志）",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(
+            side="left", pady=(4, 2))
+        fs_detail = ctk.CTkTextbox(
+            body, font=ctk.CTkFont(family="Consolas", size=13),
+            wrap="none")
+        fs_detail.grid(row=0, column=1, sticky="nsew", padx=(3, 6),
+                       pady=(26, 0))
+        # 详情高亮标签（与主面板同一套配色）
+        try:
+            for tag, color in _DETAIL_TAG_COLORS.items():
+                fs_detail.tag_config(tag, foreground=color)
+        except (tk.TclError, AttributeError):
+            pass
+
+        fs_rows: List[dict] = []
+        expanded: Dict[int, dict] = {}     # idx -> 展开状态（实例标签等）
+        p = self._palette()
+        inst_bg = p["row_hover"]           # 实例行底色（与簇行区分）
+        selected_inst: Dict[str, object] = {"label": None}
+
+        def paint_row(idx: int, color) -> None:
+            for row in fs_rows:
+                if row["idx"] == idx:
+                    row["frame"].configure(fg_color=color)
+                    row["summary"].configure(
+                        bg=self._resolve_row_color(color))
+
+        def fs_select(idx: int) -> None:
+            # 联动主界面详情 + 全屏窗口内高亮（主题调色板配色）
+            self._select_cluster(idx)
+            states = self._row_states()
+            for row in fs_rows:
+                color = (states["selected"] if row["idx"] == idx
+                         else states["bg"])
+                row["frame"].configure(fg_color=color)
+                row["summary"].configure(
+                    bg=self._resolve_row_color(color))
+            _fill_fs_cluster(idx)
+
+        def _fill_fs_cluster(idx: int) -> None:
+            if 0 <= idx < len(self._displayed):
+                self._fill_cluster_detail(fs_detail, self._displayed[idx])
+
+        def _clear_inst_selection() -> None:
+            if selected_inst["label"] is not None:
+                try:
+                    selected_inst["label"].configure(bg=inst_bg)
+                except (tk.TclError, ValueError):
+                    pass
+                selected_inst["label"] = None
+
+        def select_instance(idx: int, inst: ClusterInstance,
+                            label) -> None:
+            """实例点击：高亮该行 + 右侧显示实例详情。"""
+            _clear_inst_selection()
+            selected_inst["label"] = label
+            try:
+                label.configure(bg=p["row_selected"])
+            except (tk.TclError, ValueError):
+                pass
+            self._fill_instance_detail(fs_detail, self._displayed[idx],
+                                       inst)
+
+        def _make_instance_label(parent, idx: int, inst: ClusterInstance):
+            """实例行：原生 tk.Label（控件复用，轻量批量创建）。"""
+            ts = format_timestamp(inst.timestamp)
+            text = f"{ts}  L{inst.line_no}  {inst.summary}"
+            lbl = tk.Label(parent, text=text, anchor="w", justify="left",
+                           font=self._font_fs_inst,
+                           bg=inst_bg, fg=p["row_text"],
+                           cursor="hand2", wraplength=440)
+            lbl.pack(fill="x", padx=(34, 8), pady=1)
+            lbl.bind("<Button-1>",
+                     lambda e, i=inst, l=lbl: select_instance(idx, i, l))
+            lbl.bind("<Enter>", lambda e, l=lbl: l.configure(
+                bg=p["row_selected"] if selected_inst["label"] is l
+                else p["row_hover"]))
+            lbl.bind("<Leave>", lambda e, l=lbl: l.configure(
+                bg=p["row_selected"] if selected_inst["label"] is l
+                else inst_bg))
+            return lbl
+
+        def toggle_expand(idx: int) -> None:
+            """展开 / 收起簇实例列表（▶ / ▼ 切换 + 批量渐进动画）。"""
+            cluster = self._displayed[idx]
+            row = next(r for r in fs_rows if r["idx"] == idx)
+            state = expanded.get(idx)
+            if state is not None:
+                # 收起：取消挂起的展开批次，逐批移除实例行
+                state["cancelled"] = True
+                if "job" in state:
+                    try:
+                        win.after_cancel(state["job"])
+                    except (tk.TclError, ValueError, KeyError):
+                        pass
+                expanded.pop(idx, None)
+                row["toggle"].configure(text=f"\u25b6 \u00d7{cluster.count}")
+                labels = state["labels"]
+
+                def remove_batch() -> None:
+                    if not labels:
+                        return
+                    for lbl in labels[-25:]:
+                        try:
+                            lbl.destroy()
+                        except tk.TclError:
+                            pass
+                    del labels[-25:]
+                    if labels:
+                        state["job"] = win.after(12, remove_batch)
+                    else:
+                        try:
+                            state["area"].destroy()
+                        except tk.TclError:
+                            pass
+                state["job"] = win.after(12, remove_batch)
                 return
+            # 展开：批量创建实例行（25 条/帧，大簇不冻结 UI）
+            area = tk.Frame(list_area, bg=inst_bg, bd=0,
+                            highlightthickness=0)
+            state = {"area": area, "labels": [], "cancelled": False,
+                     "pos": 0}
+            expanded[idx] = state
+            row["toggle"].configure(text=f"\u25bc \u00d7{cluster.count}")
+            # 实例区插入到本簇行之后、下一簇行之前（pack before 定位）
+            row_pos = next(i for i, r in enumerate(fs_rows)
+                           if r["idx"] == idx)
+            if row_pos + 1 < len(fs_rows):
+                area.pack(fill="x", padx=(12, 2),
+                          before=fs_rows[row_pos + 1]["frame"])
+            else:
+                area.pack(fill="x", padx=(12, 2))
+            insts = cluster.instances
+
+            def add_batch() -> None:
+                if state["cancelled"] or idx not in expanded:
+                    return
+                batch = insts[state["pos"]:state["pos"] + 25]
+                for inst in batch:
+                    state["labels"].append(
+                        _make_instance_label(area, idx, inst))
+                state["pos"] += len(batch)
+                if state["pos"] < len(insts):
+                    state["job"] = win.after(12, add_batch)
+                else:
+                    # 截断提示（实例超出保留上限时）
+                    if len(insts) < cluster.count:
+                        tk.Label(
+                            area,
+                            text=f"…… 共 {cluster.count} 次，"
+                                 f"仅展示前 {len(insts)} 条实例",
+                            font=self._font_fs_inst, bg=inst_bg,
+                            fg=p["muted"], anchor="w"
+                        ).pack(fill="x", padx=(34, 8), pady=(2, 4))
+            add_batch()
+
+        def render(keyword: str = "") -> None:
+            kw = keyword.strip().lower()
+            for child in list_area.winfo_children():
+                child.destroy()
+            fs_rows.clear()
+            expanded.clear()
+            _clear_inst_selection()
+            shown = 0
             for idx, cluster in enumerate(self._displayed):
                 hay = (f"{cluster.summary} {cluster.module} "
                        f"{cluster.level} {cluster.priority_label}").lower()
@@ -1676,12 +1954,15 @@ class LogCompressorApp(_make_app_base()):
                         list_area, idx, cluster, register=False,
                         on_select=lambda i=idx: fs_select(i),
                         on_hover=lambda hovered, i=idx: paint_row(
-                            i, states["hover"] if hovered else states["bg"])))
+                            i, states["hover"] if hovered else states["bg"]),
+                        font_head=self._font_fs_head,
+                        font_summary=self._font_fs_summary,
+                        on_toggle=lambda i=idx: toggle_expand(i)))
             count_label.configure(
                 text=f"显示 {shown} / {len(self._displayed)} 条")
 
         def on_resize(event) -> None:
-            wrap = max(240, event.width - 60)
+            wrap = max(240, event.width - 90)
             for row in fs_rows:
                 row["summary"].configure(wraplength=wrap)
 

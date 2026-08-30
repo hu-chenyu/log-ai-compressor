@@ -196,6 +196,14 @@ TIMESTAMP_CACHE_SIZE = 65536          # 时间戳解析缓存上限（防内存�
 PROGRESS_EVERY_LINES = 16384          # 进度回调触发行数间隔
 CANCEL_CHECK_EVERY_LINES = 4096       # 取消检测行数间隔
 
+# 修复缺陷R4：簇实例记录上限（三层有界，防大日志内存膨胀）
+# - 每簇前 N 个实例保留完整条目+前上下文（可展开查看堆栈详情）
+# - 每簇后续实例仅记时间戳/行号/摘要（元数据）
+# - 全局总实例数上限（超出后不再记录，count 仍准确）
+MAX_CLUSTER_INSTANCES_DETAILED = 200    # 每簇含完整详情的实例数上限
+MAX_CLUSTER_INSTANCES_META = 2000       # 每簇元数据实例数上限
+MAX_TOTAL_INSTANCES = 50000             # 全局实例记录总数上限
+
 # 时间直方图（自适应分桶）参数
 HIST_MAX_BUCKETS = 96                # 单簇直方图最大桶数，超出则扩宽桶宽
 GLOBAL_HIST_MAX_BUCKETS = 512        # 全局错误趋势直方图最大桶数
