@@ -711,3 +711,128 @@ class TestRuleTooltips:
         tip = app._rule_help_tooltip
         app._rule_menu.set("nonexistent-rule")
         assert tip._current_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# 修复10：多文件对比模式（按钮可用 + 图例 + 差异列表 + 对比图表）
+# ---------------------------------------------------------------------------
+BASE_LOG = "\n".join([
+    "2024-01-01 09:00:00 ERROR [db] connection refused to db-primary",
+    "2024-01-01 09:00:01 ERROR [api] request 123 failed",
+    "2024-01-01 09:00:02 FATAL [core] out of memory in worker",
+    "2024-01-01 09:00:03 WARN [db] pool nearly exhausted",
+]) + "\n"
+
+OTHER_LOG = "\n".join([
+    "2024-01-01 09:00:00 ERROR [db] connection refused to db-primary",
+    "2024-01-01 09:00:01 ERROR [api] request 123 failed",
+    "2024-01-01 09:00:02 ERROR [api] request 456 failed",
+    "2024-01-01 09:00:03 FATAL [net] handshake failed with peer",
+]) + "\n"
+
+
+def _run_compare_analysis(app, tmp_path):
+    """用两个临时日志文件执行一次对比分析并等待完成。"""
+    fa = tmp_path / "base.log"
+    fb = tmp_path / "other.log"
+    fa.write_text(BASE_LOG, encoding="utf-8")
+    fb.write_text(OTHER_LOG, encoding="utf-8")
+    app._tabview.set("多文件对比")
+    for i, path in enumerate((fa, fb)):
+        entry = app._compare_entries[i]
+        entry.delete(0, "end")
+        entry.insert(0, str(path))
+    app._on_start()
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        app.update()
+        if app._compare_results:
+            break
+        time.sleep(0.02)
+    assert app._compare_results, "对比分析未完成"
+    return app._compare_results
+
+
+class TestCompareMode:
+    def test_compare_buttons_enabled_after_analysis(self, app, tmp_path):
+        """对比完成后：导出报告 / 统计图表按钮应可用。"""
+        _run_compare_analysis(app, tmp_path)
+        assert app._export_btn.cget("state") == "normal", \
+            "对比模式下导出报告按钮应可用"
+        assert app._chart_btn.cget("state") == "normal", \
+            "对比模式下统计图表按钮应可用"
+
+    def test_compare_legend_in_detail(self, app, tmp_path):
+        """对比结果顶部必须有 +/-/= 图例说明。"""
+        _run_compare_analysis(app, tmp_path)
+        text = app._detail_box.get("1.0", "end")
+        assert "+ 新增错误（对比文件中新出现的）" in text
+        assert "- 消失错误（基准文件中有但对比文件中没有的）" in text
+        assert "= 共同错误（两个文件中都存在的）" in text
+
+    def test_compare_diff_rows_rendered(self, app, tmp_path):
+        """左侧列表应渲染差异行（含 + / - / = 符号与摘要）。"""
+        _run_compare_analysis(app, tmp_path)
+        app.update()
+        # 左侧列表应有差异行（不再是「对比模式：差异摘要见右侧详情」占位）
+        texts = _texts_in(app._cluster_list)
+        assert any(t.startswith("+") for t in texts), "应有新增行"
+        assert any(t.startswith("-") for t in texts), "应有消失行"
+        assert any(t.startswith("=") for t in texts), "应有共同行"
+
+    def test_compare_chart_window_opens(self, app, tmp_path):
+        """点击统计图表应弹出对比图表窗口。"""
+        _run_compare_analysis(app, tmp_path)
+        app._show_charts()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            app.update()
+            if app._chart_window is not None and app._chart_window.winfo_exists():
+                break
+            time.sleep(0.02)
+        assert app._chart_window is not None and app._chart_window.winfo_exists()
+        assert "对比" in app._chart_window.title()
+        app._chart_window.destroy()
+        app._chart_window = None
+
+    def test_compare_list_fullscreen(self, app, tmp_path):
+        """对比差异列表支持全屏查看（含搜索与图例）。"""
+        _run_compare_analysis(app, tmp_path)
+        app._open_list_fullscreen()
+        app.update()
+        wins = [w for w in app.winfo_children()
+                if isinstance(w, tk.Toplevel)
+                and "对比差异列表" in w.title()]
+        assert wins, "对比差异列表全屏窗口应打开"
+        win = wins[0]
+        texts = _texts_in(win)
+        assert any("关闭" in t for t in texts)
+        assert any("+ 新增" in t for t in texts), "全屏顶栏应有图例"
+
+    def test_compare_export_writes_report(self, app, tmp_path, monkeypatch):
+        """对比模式导出报告应保存对比差异报告文件。"""
+        _run_compare_analysis(app, tmp_path)
+        target = tmp_path / "compare_report.md"
+        monkeypatch.setattr(
+            "log_ai_compressor.gui.app.filedialog.asksaveasfilename",
+            lambda **kw: str(target))
+        app._on_export()
+        content = target.read_text(encoding="utf-8")
+        assert "base.log" in content and "other.log" in content
+        assert "新增" in content or "消失" in content
+
+    def test_compare_fullscreen_esc_closes(self, app, tmp_path):
+        """对比差异全屏窗口支持 ESC 关闭。"""
+        _run_compare_analysis(app, tmp_path)
+        app._open_list_fullscreen()
+        app.update()
+        wins = [w for w in app.winfo_children()
+                if isinstance(w, tk.Toplevel)
+                and "对比差异列表" in w.title()]
+        assert wins
+        wins[0].event_generate("<Escape>")
+        app.update()
+        remaining = [w for w in app.winfo_children()
+                     if isinstance(w, tk.Toplevel)
+                     and "对比差异列表" in w.title()]
+        assert not remaining

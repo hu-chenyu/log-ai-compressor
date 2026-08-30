@@ -16,6 +16,13 @@ from typing import Callable, List, Optional, Tuple
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+# 中文字体回退链（Windows/macOS/Linux 常见中文字体优先，缺字警告消除）
+from matplotlib import rcParams
+rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "PingFang SC",
+                               "Noto Sans CJK SC", "WenQuanYi Micro Hei",
+                               "DejaVu Sans"]
+rcParams["axes.unicode_minus"] = False   # 负号字形兼容
+
 from log_ai_compressor.core.models import AnalysisResult
 
 # 配色（暗色主题友好）
@@ -173,3 +180,115 @@ class ChartsPanel:
 
     def refresh(self) -> None:
         self.canvas.draw_idle()
+
+
+class CompareChartsPanel:
+    """多文件对比统计图（修复缺陷#10）。
+
+    左图：差异概览柱状图（新增 / 消失 / 共同的种类数，按对比对分组）；
+    右图：Top 差异项次数对比（横向双色条形，基准 A vs 对比 B）。
+    """
+
+    def __init__(self, parent, results: List):
+        self._results = results
+        self.figure = Figure(figsize=(11, 3.8), dpi=96,
+                              facecolor="#2b2b30")
+        self.canvas = FigureCanvasTkAgg(self.figure, master=parent)
+        self._build()
+        self.canvas.get_tk_widget().pack(fill="both", expand=True,
+                                         padx=4, pady=4)
+
+    # ------------------------------------------------------------------
+    def _style_axes(self, ax) -> None:
+        ax.set_facecolor("#2b2b30")
+        for spine in ax.spines.values():
+            spine.set_color("#55555c")
+        ax.tick_params(colors="#bdbdbd", labelsize=8)
+        ax.title.set_color("#e0e0e0")
+        ax.title.set_fontsize(10)
+
+    def _build(self) -> None:
+        gs = self.figure.add_gridspec(1, 2, wspace=0.30,
+                                      left=0.10, right=0.97,
+                                      top=0.86, bottom=0.22)
+        self._ax_overview = self.figure.add_subplot(gs[0, 0])
+        self._ax_items = self.figure.add_subplot(gs[0, 1])
+        self._draw_overview()
+        self._draw_items()
+        self.figure.suptitle("多文件错误对比（新增 + / 消失 - / 共同 =）",
+                             color="#e0e0e0", fontsize=11)
+
+    def _draw_overview(self) -> None:
+        """差异概览：每个对比对的新增/消失/共同错误种类数。"""
+        ax = self._ax_overview
+        self._style_axes(ax)
+        ax.set_title("差异概览（错误种类数）")
+        labels = [f"{r.base_name[:8]} vs\n{r.other_name[:8]}"
+                  for r in self._results]
+        new_counts = [len(r.new_items) for r in self._results]
+        gone_counts = [len(r.gone_items) for r in self._results]
+        common_counts = [len(r.common_items) for r in self._results]
+        if not labels:
+            ax.text(0.5, 0.5, "无对比数据", ha="center", va="center",
+                    color="#9e9e9e", transform=ax.transAxes)
+            return
+        width = 0.27 if len(labels) > 1 else 0.5
+        xs = range(len(labels))
+        b1 = ax.bar([x - width for x in xs], new_counts, width,
+                    color="#66bb6a", label="+ 新增")
+        b2 = ax.bar(list(xs), gone_counts, width,
+                    color="#ef5350", label="- 消失")
+        b3 = ax.bar([x + width for x in xs], common_counts, width,
+                    color="#78909c", label="= 共同")
+        # 柱顶数值标注
+        for bars in (b1, b2, b3):
+            for rect in bars:
+                h = rect.get_height()
+                if h > 0:
+                    ax.annotate(f"{int(h)}",
+                                xy=(rect.get_x() + rect.get_width() / 2, h),
+                                xytext=(0, 2), textcoords="offset points",
+                                ha="center", fontsize=7, color="#e0e0e0")
+        ax.set_xticks(list(xs))
+        ax.set_xticklabels(labels, fontsize=8)
+        ax.set_ylabel("错误种类数", fontsize=8)
+        ax.legend(fontsize=8, labelcolor="#e0e0e0", framealpha=0.2)
+        ax.grid(axis="y", color="#3a3a40", linewidth=0.6)
+
+    def _draw_items(self) -> None:
+        """Top 差异项次数对比：基准 A（橙） vs 对比 B（青）。"""
+        ax = self._ax_items
+        self._style_axes(ax)
+        ax.set_title("Top 差异项错误次数（基准 vs 对比）")
+        # 汇总第一个对比对的差异项（新增/消失/变化最大的共同项）
+        rows = []
+        if self._results:
+            cmp = self._results[0]
+            for i in cmp.new_items[:8]:
+                rows.append((i.summary[:26], i.count_a, i.count_b, "+"))
+            for i in cmp.gone_items[:8]:
+                rows.append((i.summary[:26], i.count_a, i.count_b, "-"))
+            # 共同项中变化最大的（按次数差排序）
+            changed = sorted(cmp.common_items,
+                             key=lambda i: abs(i.count_b - i.count_a),
+                             reverse=True)[:8]
+            for i in changed:
+                rows.append((i.summary[:26], i.count_a, i.count_b, "="))
+        if not rows:
+            ax.text(0.5, 0.5, "无差异项", ha="center", va="center",
+                    color="#9e9e9e", transform=ax.transAxes)
+            return
+        rows = rows[:12]  # 上限保护
+        names = [f"{sym} {s}" for s, _, _, sym in rows]
+        a_vals = [a for _, a, _, _ in rows]
+        b_vals = [b for _, _, b, _ in rows]
+        ys = range(len(rows))
+        ax.barh([y + 0.19 for y in ys], a_vals, height=0.36,
+                color="#ffa726", label=f"基准 {self._results[0].base_name[:10]}")
+        ax.barh([y - 0.19 for y in ys], b_vals, height=0.36,
+                color="#26c6da", label=f"对比 {self._results[0].other_name[:10]}")
+        ax.set_yticks(list(ys))
+        ax.set_yticklabels(names, fontsize=7)
+        ax.invert_yaxis()
+        ax.legend(fontsize=8, labelcolor="#e0e0e0", framealpha=0.2)
+        ax.grid(axis="x", color="#3a3a40", linewidth=0.6)
