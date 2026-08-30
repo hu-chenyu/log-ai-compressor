@@ -79,14 +79,6 @@ _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
 _CLUSTER_ICON = {"fatal": "\u25c6", "root": "\u25b2", "burst": "\u25cf",
                  "rare": "\u25cb", "normal": "\u2022"}
 
-# 错误行背景（元组自动适配明暗主题；主列表旧配色，四态主题下优先取 palette）
-_ROW_BG_DEFAULT = ("gray88", "gray22")
-_ROW_BG_HOVER = ("gray80", "gray30")
-_ROW_BG_SELECTED = ("gray74", "gray38")
-# 摘要文字颜色（明 / 暗）
-_ROW_TEXT_DARK = "#c8cdd4"
-_ROW_TEXT_LIGHT = "#2d333b"
-
 # ---------------------------------------------------------------------------
 # 修复缺陷R1：四态主题体系（亮色 → 暗色 → 蓝调 → 绿调 循环）
 # ---------------------------------------------------------------------------
@@ -1045,26 +1037,25 @@ class LogCompressorApp(_make_app_base()):
             on_select / on_hover: 自定义回调（全屏窗口联动高亮用）
         """
         p = self._palette()
+        # 修复缺陷R2：行距/内边距加大（大字体下行高充足不拥挤）
         frame = ctk.CTkFrame(parent, corner_radius=6,
                              fg_color=p["row_bg"])
-        frame.pack(fill="x", padx=5, pady=2)
+        frame.pack(fill="x", padx=5, pady=4)
         head = ctk.CTkLabel(
             frame, text=self._row_text(cluster), anchor="w",
             text_color=self._row_color(cluster) or None,
             font=self._font_row_head)
-        head.pack(fill="x", padx=(10, 10), pady=(6, 0))
+        head.pack(fill="x", padx=(10, 10), pady=(8, 2))
         summary = tk.Label(
             frame, text=cluster.summary, anchor="w", justify="left",
             wraplength=400,
             font=self._font_row_summary,
             bg=p["row_bg"], fg=p["row_text"])
-        summary.pack(fill="x", padx=(10, 4), pady=(0, 7))
+        summary.pack(fill="x", padx=(10, 4), pady=(2, 9))
         select_cb = on_select or (lambda: self._select_cluster(idx))
         hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
-        for widget in (frame, head, summary):
-            widget.bind("<Button-1>", lambda e: select_cb())
-            widget.bind("<Enter>", lambda e: hover_cb(True))
-            widget.bind("<Leave>", lambda e: hover_cb(False))
+        # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
+        self._bind_row_events((frame, head, summary), select_cb, hover_cb)
         row = {"frame": frame, "summary": summary, "idx": idx}
         if register:
             self._cluster_rows.append(row)
@@ -1091,6 +1082,35 @@ class LogCompressorApp(_make_app_base()):
         p = self._palette()
         return {"bg": p["row_bg"], "hover": p["row_hover"],
                 "selected": p["row_selected"]}
+
+    @staticmethod
+    def _bind_row_events(widgets, select_cb, hover_cb) -> None:
+        """行级点击 / 悬停事件绑定（修复缺陷R2）。
+
+        Tk 事件不冒泡：真实鼠标点击命中的是 CTk 复合控件内部的
+        子控件（CTkLabel 内部的 Canvas / tk.Label），仅绑定容器
+        会导致「点击头部行不生效、只能保持默认选中第一行」的缺陷。
+        此处把绑定同时挂到容器与其全部子控件上。
+
+        悬停态去重（state 字典）：指针在容器与子控件间移动会触发
+        成对的 Leave/Enter，直接透传会闪烁，先比对当前态再回调。
+        """
+        targets: list = []
+        for widget in widgets:
+            targets.append(widget)
+            targets.extend(widget.winfo_children())
+        state = {"hover": None}
+
+        def set_hover(hovered: bool) -> None:
+            if state["hover"] == hovered:
+                return
+            state["hover"] = hovered
+            hover_cb(hovered)
+
+        for target in targets:
+            target.bind("<Button-1>", lambda e: select_cb())
+            target.bind("<Enter>", lambda e: set_hover(True))
+            target.bind("<Leave>", lambda e: set_hover(False))
 
     def _apply_row_bg(self, idx: int, color) -> None:
         """统一更新行背景（CTkFrame + 原生摘要标签同步）。"""
@@ -1335,9 +1355,10 @@ class LogCompressorApp(_make_app_base()):
         修复缺陷R2：字体/行距随主列表放大（头部 15 加粗 / 摘要 13）。
         """
         p = self._palette()
+        # 修复缺陷R2：行距/内边距与主列表一致（大字体下行高充足）
         frame = ctk.CTkFrame(parent, corner_radius=6,
                              fg_color=p["row_bg"])
-        frame.pack(fill="x", padx=5, pady=2)
+        frame.pack(fill="x", padx=5, pady=4)
         if kind == "new":
             count_text = f"×{item.count_b} 次"
         elif kind == "gone":
@@ -1350,12 +1371,12 @@ class LogCompressorApp(_make_app_base()):
                   f"   {cmp.base_name} vs {cmp.other_name}"),
             anchor="w", text_color=self._CMP_COLOR[kind],
             font=self._font_row_head)
-        head.pack(fill="x", padx=(10, 10), pady=(6, 0))
+        head.pack(fill="x", padx=(10, 10), pady=(8, 2))
         summary = tk.Label(
             frame, text=item.summary, anchor="w", justify="left",
             wraplength=400, font=self._font_row_summary,
             bg=p["row_bg"], fg=p["row_text"])
-        summary.pack(fill="x", padx=(10, 4), pady=(0, 7))
+        summary.pack(fill="x", padx=(10, 4), pady=(2, 9))
         return {"frame": frame, "summary": summary, "kind": kind,
                 "item": item, "text": f"{item.summary} {item.level} "
                                       f"{self._CMP_SYMBOL[kind]}"}
@@ -1461,13 +1482,28 @@ class LogCompressorApp(_make_app_base()):
     # 全屏查看（修复缺陷#7：列表 / 详情独立最大化窗口）
     # ==================================================================
     def _make_fullscreen_window(self, title: str) -> ctk.CTkToplevel:
-        """创建最大化全屏窗口（ESC 键 / 关闭按钮返回主界面）。"""
+        """创建全屏窗口（屏幕正中央、尺寸 ≥80%、ESC 返回主界面）。
+
+        修复缺陷R2：原实现仅 state("zoomed")，在 zoomed 未生效的
+        环境下窗口落在系统默认偏移位置（左上角附近）。现先显式
+        计算居中几何（屏幕 85% × 88%，正中央），再尝试系统最大
+        化——最大化失败时仍保持居中大窗。
+        """
         win = ctk.CTkToplevel(self)
         win.title(f"{title}（全屏 · ESC 返回）")
         try:
-            win.state("zoomed")            # Windows / macOS
+            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            w, h = int(sw * 0.85), int(sh * 0.88)
+            win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
         except tk.TclError:
-            win.attributes("-fullscreen", True)   # Linux 回退
+            pass
+        try:
+            win.state("zoomed")            # Windows / macOS（100% 全屏）
+        except tk.TclError:
+            try:
+                win.attributes("-fullscreen", True)   # Linux 回退
+            except tk.TclError:
+                pass
         win.bind("<Escape>", lambda e: win.destroy())
         win.after(60, win.focus_set)       # 抢焦点以接收 ESC
         return win
@@ -1511,11 +1547,13 @@ class LogCompressorApp(_make_app_base()):
                         bg=self._resolve_row_color(color))
 
         def fs_select(idx: int) -> None:
-            # 联动主界面详情 + 全屏窗口内高亮
+            # 联动主界面详情 + 全屏窗口内高亮（主题调色板配色，
+            # 修复缺陷R2：选中蓝色高亮、与未选中明显区分）
             self._select_cluster(idx)
+            states = self._row_states()
             for row in fs_rows:
-                color = (_ROW_BG_SELECTED if row["idx"] == idx
-                         else _ROW_BG_DEFAULT)
+                color = (states["selected"] if row["idx"] == idx
+                         else states["bg"])
                 row["frame"].configure(fg_color=color)
                 row["summary"].configure(
                     bg=self._resolve_row_color(color))
@@ -1548,12 +1586,13 @@ class LogCompressorApp(_make_app_base()):
                 if kw and kw not in hay:
                     continue
                 shown += 1
+                states = self._row_states()
                 fs_rows.append(
                     self._make_cluster_row(
                         list_area, idx, cluster, register=False,
                         on_select=lambda i=idx: fs_select(i),
                         on_hover=lambda hovered, i=idx: paint_row(
-                            i, _ROW_BG_HOVER if hovered else _ROW_BG_DEFAULT)))
+                            i, states["hover"] if hovered else states["bg"])))
             count_label.configure(
                 text=f"显示 {shown} / {len(self._displayed)} 条")
 
