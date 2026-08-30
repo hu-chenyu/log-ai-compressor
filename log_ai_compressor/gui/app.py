@@ -97,6 +97,72 @@ def _rate_text(lps: float) -> str:
     return f"{lps:.0f} 行/秒"
 
 
+class Tooltip:
+    """鼠标悬停提示（CustomTkinter / 原生控件通用）。
+
+    修复缺陷#6/#8：GUI 关键选项与标题缺少解释性说明，用户无法
+    理解「典型样例」「解析规则」等术语的含义。
+
+    实现：Enter 后延迟显示无边框 Toplevel（不抢焦点、不挡操作），
+    Leave / 按下时立即销毁；配色随明暗主题自适应。
+    """
+
+    def __init__(self, widget, text: str, delay: int = 400,
+                 wrap: int = 380):
+        self._widget = widget
+        self._text = text
+        self._delay = delay
+        self._wrap = wrap
+        self._tip: Optional[tk.Toplevel] = None
+        self._after_id: Optional[str] = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    # ------------------------------------------------------------------
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after_id = self._widget.after(self._delay, self._show)
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self._widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass  # 控件已销毁
+            self._after_id = None
+
+    def _show(self) -> None:
+        if self._tip is not None or not self._text:
+            return
+        try:
+            x = self._widget.winfo_rootx() + 12
+            y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
+        except tk.TclError:
+            return  # 控件已销毁
+        dark = LogCompressorApp._is_dark_mode() if hasattr(
+            LogCompressorApp, "_is_dark_mode") else True
+        bg = "#2b2b30" if dark else "#fffdf5"
+        fg = "#e8e8ec" if dark else "#2d333b"
+        self._tip = tw = tk.Toplevel(self._widget)
+        tw.wm_overrideredirect(True)   # 无边框
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            tw, text=self._text, justify="left", wraplength=self._wrap,
+            bg=bg, fg=fg, relief="solid", borderwidth=1,
+            font=("Microsoft YaHei UI", 10), padx=10, pady=6
+        ).pack(fill="both", expand=True)
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
 class LogCompressorApp(_make_app_base()):
     """日志AI压缩器主窗口。"""
 
@@ -318,9 +384,19 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkLabel(panel, text="错误分类列表（按优先级降序）",
                      font=ctk.CTkFont(weight="bold")).grid(
             row=0, column=0, padx=10, pady=(8, 2), sticky="w")
-        ctk.CTkLabel(panel, text="详情（典型样例 · 上下文 · 降噪堆栈）",
-                     font=ctk.CTkFont(weight="bold")).grid(
-            row=0, column=1, padx=10, pady=(8, 2), sticky="w")
+        # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
+        detail_head = ctk.CTkFrame(panel, fg_color="transparent")
+        detail_head.grid(row=0, column=1, padx=10, pady=(8, 2), sticky="w")
+        ctk.CTkLabel(detail_head, text="详情（典型样例 · 上下文 · 降噪堆栈）",
+                     font=ctk.CTkFont(weight="bold")).pack(side="left")
+        sample_help = ctk.CTkLabel(
+            detail_head, text="  ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        sample_help.pack(side="left", padx=(4, 0))
+        self._sample_help_tooltip = Tooltip(
+            sample_help,
+            "该错误类型的代表性日志样例，包含完整的错误信息、堆栈跟踪"
+            "和前后上下文，用于快速定位问题")
 
         self._cluster_list = ctk.CTkScrollableFrame(panel, width=430)
         self._cluster_list.grid(row=1, column=0, sticky="nsw", padx=(10, 4),

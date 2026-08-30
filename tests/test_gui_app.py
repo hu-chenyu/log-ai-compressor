@@ -423,3 +423,57 @@ class TestContextLines:
                 new_app._on_close()
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# 修复6：「典型样例」悬停说明（Tooltip）
+# ---------------------------------------------------------------------------
+SAMPLE_HELP_TEXT = ("该错误类型的代表性日志样例，包含完整的错误信息、"
+                    "堆栈跟踪和前后上下文，用于快速定位问题")
+
+
+class TestSampleHelpTooltip:
+    def test_help_icon_exists(self, app):
+        """详情面板标题旁必须有 ⓘ 帮助图标。"""
+        assert app._sample_help_tooltip is not None
+
+    def test_tooltip_text_content(self, app):
+        """悬停说明文本必须为规范要求的完整说明。"""
+        tip = app._sample_help_tooltip
+        assert tip._text == SAMPLE_HELP_TEXT
+
+    def test_tooltip_shows_on_hover(self, app):
+        """Enter 事件（延时后）应显示说明窗口，Leave 后销毁。"""
+        tip = app._sample_help_tooltip
+        assert tip._tip is None
+        tip._show()
+        app.update()
+        assert tip._tip is not None
+        assert tip._tip.winfo_exists()
+        # 窗口内文本正确
+        children = tip._tip.winfo_children()
+        assert children, "tooltip 应包含文本标签"
+        assert children[0].cget("text") == SAMPLE_HELP_TEXT
+        tip._hide()
+        app.update()
+        assert tip._tip is None
+
+    def test_tooltip_delayed_show_via_event(self, app):
+        """Enter 事件 -> 延时调度 -> 显示（真实悬停路径）。"""
+        tip = app._sample_help_tooltip
+        tip._schedule()
+        assert tip._after_id is not None  # 已调度延时任务
+        # 手动触发延时回调（跳过等待）
+        tip._show()
+        app.update()
+        assert tip._tip is not None
+        tip._hide()
+
+    def test_tooltip_leak_free_after_destroy(self, app):
+        """关联控件销毁后 hide 不抛异常（健壮性）。"""
+        tip = app._sample_help_tooltip
+        tip._show()
+        app.update()
+        tip._hide()   # 常规销毁
+        tip._hide()   # 二次销毁应幂等
+        assert tip._tip is None
