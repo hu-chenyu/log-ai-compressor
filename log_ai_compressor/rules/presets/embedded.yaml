@@ -1,0 +1,60 @@
+# 嵌入式/单片机测试日志解析规则
+# 适配：[ 秒计时 ] [级别] [模块] 消息、UT PASS/FAIL 输出、模块.c:行号: 等格式
+name: embedded
+description: 嵌入式测试日志（RTT/串口输出、Unity/CMock 单测、编译构建日志）
+
+patterns:
+  - name: bracket_ts_level_module
+    # [  123.456] [ERR ] [im_pll] clk config failed
+    regex: '^\[\s*(?P<timestamp>\d+(?:\.\d+)?)\s*\]\s*\[\s*(?P<level>[A-Za-z]{1,10})\s*\]\s*(?:\[(?P<module>[^\]]{1,64})\]\s*)?(?P<message>.*)$'
+
+  - name: time_level_ut
+    # 12:00:01.123 FAIL/ERROR/PASS 测试用例描述
+    regex: '^(?P<timestamp>\d{2}:\d{2}:\d{2}(?:[.,]\d{1,3})?)\s+[\[(]?\s*(?P<level>{LEVEL}|PASS|OK)\s*[\])]?\s*[:\-]?\s*(?P<message>.*)$'
+
+  - name: gcc_style
+    # im_pll.c:253: FAIL: clock rate mismatch（含 gcc 风格小写 error/warning）
+    regex: '^(?P<module>\S+\.(?:c|h|cc|cpp|cxx|hpp|hh)):(?P<lineno>\d+)(?::\d+)?\s*:\s*(?:(?P<level>fatal error|error|warning|note|FAIL|ASSERT)\s*[:\s]*)?(?P<message>.*)$'
+    flags: [i]
+
+  - name: module_level_colon
+    # im_clk_a400 12:00:01 ERROR xxx 或 im_pll: ERROR: xxx
+    regex: '^(?P<module>[A-Za-z_][\w.\-]{0,63})\s+(?P<timestamp>\d{2}:\d{2}:\d{2}(?:[.,]\d{1,3})?)\s*[\[(]?\s*(?P<level>{LEVEL}|PASS)\s*[\])]?\s*[:\-]?\s*(?P<message>.*)$'
+
+  - name: level_first
+    # [ERR] message / FAIL: message
+    regex: '^[\[(]?\s*(?P<level>{LEVEL}|PASS|OK)\s*[\])]?\s*[:\-\|]?\s*(?P<message>\S.*)$'
+
+stack_indicators:
+  - '^\s*at\s+[\w$.]+\('
+  - '^\s*Caused by\s*:?'
+  - '^Traceback \(most recent call last\):'
+  - '^\s*File\s+"[^"]+".*,\s*line\s+\d+'
+  - '^\s*raise\s+\w'
+  - '^Backtrace:'
+  - '^\s*~?\$?\s*0x[0-9a-fA-F]{4,}\s*<'
+  - '^\s*#\d+\s+0x[0-9a-fA-F]+'          # gdb 帧编号
+  - '^.*\bat\s+[\w]+:\d+\s*$'            # C 断言常见 "at file:line"
+  - '^[A-Za-z_][\w.$]*(?:Exception|Error|Fault|Interrupt)\s*[:({]'
+
+level_hints:
+  FATAL:
+    - '\bHARDFAULT\b'
+    - '\bMEMFAULT\b'
+    - '\bBUSFAULT\b'
+    - '\bWatchdog\b'
+    - '\bstack overflow\b'
+    - '\bassert(?:ion)? failed\b'
+  ERROR:
+    - '\bERROR\b'
+    - '\bERR\b'
+    - '\berror\b'
+    - '\bException\b'
+  FAIL:
+    - '\bFAIL(?:ED|URE)?\b'
+    - '\bfail(?:ed|ure)?\b'
+    - '\bASSERT(?:ION)?\b'
+    - '\bPASS\b.*\bnot\b'                # 极少见组合，占位保持优先级结构
+  WARN:
+    - '\bWARN(?:ING)?\b'
+    - '\bwarning\b'

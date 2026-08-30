@@ -1,0 +1,67 @@
+# 通用系统/应用日志解析规则
+# 适配：ISO时间戳 + 级别(可带括号) + [模块] 的主流格式（log4j/logback/logging/自研日志等）
+# 说明：{LEVEL} 为引擎占位符，自动展开为标准级别令牌交替表
+name: generic
+description: 通用系统/应用日志（程序运行日志、访问日志、审计日志等主流格式）
+
+patterns:
+  - name: iso_level_module
+    # ISO 时间戳 + 级别(可带括号) + [模块] + 分隔符 + 内容
+    regex: '^(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)\s*[\[(]?\s*(?P<level>{LEVEL})\s*[\])]?:?\s*(?:[\[(](?P<module>[^()\]]{1,64})[)\]]\s*)?(?:[-:>|\u2014]\s*)?(?P<message>.*)$'
+
+  - name: iso_level_icase
+    # ISO 时间戳 + 小写级别 + 强制分隔符（避免消息首词误判为级别，如 gcc 的 error:/warning:）
+    regex: '^(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)\s*(?P<level>{LEVEL})\s*[:\-\|]\s*(?P<message>.*)$'
+    flags: [i]
+
+  - name: time_level_module
+    # HH:MM:SS[.fff] [模块] 级别 内容
+    regex: '^(?P<timestamp>\d{1,2}:\d{2}:\d{2}(?:[.,]\d{1,6})?)\s*(?:\[(?P<module>[^\]]{1,64})\]\s*)?[\[(]?\s*(?P<level>{LEVEL})\s*[\])]?:?\s*(?P<message>.*)$'
+
+  - name: level_first
+    # [级别] / 级别: 开头（pytest、maven、部分自研框架风格）
+    regex: '^[\[(]?\s*(?P<level>{LEVEL})\s*[\])]?\s*[:\-\|]?\s*(?P<message>\S.*)$'
+
+  - name: gcc_style
+    # 源文件:行号(:列号): 级别: 内容（gcc/clang/嵌入式单测输出）
+    regex: '^(?P<module>\S+\.(?:c|h|cc|cpp|cxx|hpp|hh)):(?P<lineno>\d+)(?::\d+)?\s*:\s*(?:(?P<level>fatal error|error|warning|note)\s*:\s*)?(?P<message>.*)$'
+    flags: [i]
+
+  - name: syslog
+    # syslog: 月 日 时间 主机/进程 消息
+    regex: '^(?P<timestamp>[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(?P<module>[\w.\-/]+)(?:\[\d+\])?:?\s*(?P<message>.*)$'
+
+# 堆栈行特征（缺省使用引擎默认值时无需配置；此处显式声明便于二次扩展）
+stack_indicators:
+  - '^\s*at\s+[\w$.]+\('
+  - '^\s*Caused by\s*:?'
+  - '^Traceback \(most recent call last\):'
+  - '^\s*File\s+"[^"]+".*,\s*line\s+\d+'
+  - '^\s*raise\s+\w'
+  - '^Backtrace:'
+  - '^\s*~?\$?\s*0x[0-9a-fA-F]{4,}\s*<'
+  - '^[A-Za-z_][\w.$]*(?:Exception|Error|Fault|Interrupt)\s*[:({]'
+
+# 无级别字段行的关键词级别提示（大小写不敏感）
+level_hints:
+  FATAL:
+    - '\bFATAL\b'
+    - '\bPANIC\b'
+    - '\bsegfault\b'
+    - '\bcore dumped\b'
+    - 'terminate called'
+  ERROR:
+    - '\bERROR\b'
+    - '\bERR\b'
+    - '\berror\b'
+    - '\bException\b'
+    - '\bexception\b'
+    - 'uncaught'
+  FAIL:
+    - '\bFAIL(?:ED|URE|URES)?\b'
+    - '\bfail(?:ed|ure)?\b'
+    - '\bASSERT(?:ION)?\b'
+    - '\bassert\b'
+  WARN:
+    - '\bWARN(?:ING)?\b'
+    - '\bwarning\b'
