@@ -50,3 +50,29 @@ class TestRunGuiBat:
     def test_failure_shows_pause(self, bat_content):
         # 失败分支必须 pause，避免双击后窗口闪退看不到错误
         assert bat_content.count("pause") >= 3
+
+
+# ---------------------------------------------------------------------------
+# CLI 参数默认值与 GUI / 常量一致性（修复缺陷#5 收尾）
+# ---------------------------------------------------------------------------
+class TestCliDefaults:
+    def test_run_context_default_50(self):
+        """CLI --context 默认值必须与全局常量（50）一致。"""
+        from log_ai_compressor.cli import build_parser
+        args = build_parser().parse_args(["run", "app.log"])
+        assert args.context == 50
+
+    def test_context_max_clamped_by_pipeline(self, tmp_path):
+        """超上限的 --context 经管线钳制到 200（不直接报错）。"""
+        from log_ai_compressor.core.filters import FilterConfig
+        from log_ai_compressor.constants import MAX_CONTEXT_LINES
+        cfg = FilterConfig.from_dict({"context_lines": 9999})
+        assert cfg.context_lines == MAX_CONTEXT_LINES
+
+    def test_gui_and_cli_context_same_default(self):
+        """GUI 与 CLI 的上下文默认值必须同源（DEFAULT_CONTEXT_LINES）。"""
+        from log_ai_compressor.cli import build_parser
+        from log_ai_compressor.constants import DEFAULT_CONTEXT_LINES
+        from log_ai_compressor.gui.config_store import DEFAULT_CONFIG
+        args = build_parser().parse_args(["run", "app.log"])
+        assert args.context == DEFAULT_CONTEXT_LINES == DEFAULT_CONFIG["context_lines"]

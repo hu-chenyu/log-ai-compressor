@@ -27,7 +27,12 @@ from pathlib import Path
 from typing import List, Optional
 
 from log_ai_compressor import __version__
-from log_ai_compressor.constants import DEFAULT_TOP_N, LEVEL_ORDER
+from log_ai_compressor.constants import (
+    DEFAULT_CONTEXT_LINES,
+    DEFAULT_TOP_N,
+    LEVEL_ORDER,
+    MAX_CONTEXT_LINES,
+)
 from log_ai_compressor.core.comparator import compare_files
 from log_ai_compressor.core.pipeline import analyze_file
 from log_ai_compressor.export.reporters import (
@@ -60,8 +65,9 @@ def _add_filter_options(p: argparse.ArgumentParser) -> None:
                    help="排除关键字（逗号分隔，任一命中剔除）")
     p.add_argument("--top", "-t", type=int, default=DEFAULT_TOP_N,
                    help=f"Top N 错误数（默认 {DEFAULT_TOP_N}）")
-    p.add_argument("--context", type=int, default=5,
-                   help="典型样例上下文行数（默认 5）")
+    p.add_argument("--context", type=int, default=DEFAULT_CONTEXT_LINES,
+                   help=f"典型样例上下文行数（默认 {DEFAULT_CONTEXT_LINES}，"
+                        f"范围 0~{MAX_CONTEXT_LINES}）")
     p.add_argument("--rule", "-r", default=None,
                    help="解析规则：模板名(generic/embedded/jenkins)或 YAML 路径")
 
