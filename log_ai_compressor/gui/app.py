@@ -513,6 +513,10 @@ class LogCompressorApp(_make_app_base()):
             self._queue.put(("error", f"处理失败：{exc}"))
 
     def _on_cancel(self) -> None:
+        # 完成后「取消」按钮保持可点击（规范要求），空任务时仅提示
+        if not (self._worker and self._worker.is_alive()):
+            self._status_label.configure(text="当前没有进行中的分析任务")
+            return
         self._cancel_event.set()
         self._progress_label.configure(text="正在取消…")
         self._cancel_btn.configure(state="disabled")
@@ -552,10 +556,12 @@ class LogCompressorApp(_make_app_base()):
     # 结果渲染
     # ==================================================================
     def _on_result(self, result: AnalysisResult) -> None:
+        # 先赋值再切换按钮状态：状态机依据 self._result 判断可用性
+        self._result = result
+        self._compare_results = []
         self._set_running(False)
         self._progress_bar.stop()
         self._progress_bar.set(1.0)
-        self._result = result
         s = result.stats
         suffix = "（已取消，增量结果）" if s.truncated else ""
         self._progress_label.configure(
@@ -745,12 +751,13 @@ class LogCompressorApp(_make_app_base()):
     # 对比结果渲染
     # ------------------------------------------------------------------
     def _on_compare_result(self, results: List[CompareResult]) -> None:
+        # 先赋值再切换按钮状态：状态机依据结果判断可用性
+        self._compare_results = results
+        self._result = None
         self._set_running(False)
         self._progress_bar.stop()
         self._progress_bar.set(1.0)
         self._progress_label.configure(text="对比完成")
-        self._compare_results = results
-        self._result = None
 
         box = self._detail_box
         box.configure(state="normal")
@@ -850,19 +857,26 @@ class LogCompressorApp(_make_app_base()):
     # 状态切换 / 退出
     # ==================================================================
     def _set_running(self, running: bool) -> None:
-        """按钮状态机：运行中禁用全部；完成后按是否有结果分级启用。"""
+        """按钮状态机（调用前提：self._result / _compare_results 已就位）。
+
+        - 未开始分析：四个操作按钮全部置灰；
+        - 分析进行中：仅「取消」可点击，其余三个置灰；
+        - 分析完成后：「取消 / 导出报告 / 复制摘要 / 统图表」全部可点击。
+        """
         if running:
-            for btn in (self._start_btn, self._cancel_btn, self._export_btn,
-                        self._copy_btn, self._chart_btn):
+            self._start_btn.configure(state="disabled")
+            for btn in (self._export_btn, self._copy_btn, self._chart_btn):
                 btn.configure(state="disabled")
             self._cancel_btn.configure(state="normal")
             return
         self._start_btn.configure(state="normal")
-        self._cancel_btn.configure(state="disabled")
         has_result = self._result is not None
         has_any = has_result or bool(self._compare_results)
+        self._cancel_btn.configure(
+            state="normal" if has_any else "disabled")
         self._export_btn.configure(
             state="normal" if has_any else "disabled")
+        # 复制摘要 / 统计图表面向单次分析结果（对比模式的支持见对比功能）
         self._copy_btn.configure(
             state="normal" if has_result else "disabled")
         self._chart_btn.configure(
