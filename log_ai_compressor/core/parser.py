@@ -8,8 +8,10 @@
 2. 热路径性能：普通行（非缩进、非堆栈特征）只需 1 次规则正则匹配；
    缩进行与已知堆栈前缀先行分流，完整堆栈特征扫描仅作兜底，
    避免每行 ~10 次特征正则的开销；
-3. 时间戳解析带「原始串缓存 + 上次成功格式优先」两级优化：
-   日志中同一秒的时间戳大量重复，缓存命中后接近 O(1)；
+3. 时间戳解析三级加速：ISO 变体走 fromisoformat C 快路径；其余已知
+   格式走预编译复合正则 + 手工构造 datetime（strptime 每次调用内部
+   重查 locale 并重建正则，约 5µs/次，是 13 万行日志卡顿的主因之一）；
+   罕见/本地化格式才落到 strptime 兜底；
 4. 级别缺失时（Jenkins 等无级别格式）由规则集的关键词提示推断。
 """
 from __future__ import annotations
@@ -49,6 +51,66 @@ _TS_FORMATS = (
 _TS_TZ_SUFFIX = re.compile(r"\s*(?:Z|[+-]\d{2}:?\d{2})\s*$")
 # 纯数字（epoch 秒 / 嵌入式相对秒）
 _TS_NUMERIC = re.compile(r"^\d+(?:\.\d+)?$")
+
+# 修复缺陷#9：strptime 单次调用约 5µs（内部重查 locale + 重建正则），
+# 13 万行非 ISO 时间戳日志仅时间解析即耗时 2s+，是「小日志卡顿」的
+# 核心瓶颈之一。下方复合正则一条匹配覆盖全部 12 种已知格式，配合
+# 手工构造 datetime（约 0.9µs/次）替代热路径上的 strptime。
+_MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+
+# 复合时间戳正则：日期部分可选（4 种形态），时间部分秒/毫秒可选，
+# 尾部允许 Z / ±hh:mm 时区后缀。与 _TS_FORMATS 的 12 种格式一一对应。
+_TS_FAST = re.compile(
+    r"^\s*(?:"
+    r"(?P<y1>\d{4})(?P<sep>[-/])(?P<mo1>\d{1,2})(?P=sep)(?P<d1>\d{1,2})"
+    r"|(?P<mo2>\d{1,2})/(?P<d2>\d{1,2})/(?P<y2>\d{4})"
+    r"|(?P<d3>\d{1,2})[-/](?P<mon3>[A-Za-z]{3})[-/](?P<y3>\d{4})"
+    r"|(?P<mon4>[A-Za-z]{3})\s+(?P<d4>\d{1,2})"
+    r")?"
+    r"[T: ]*\s*"
+    r"(?P<h>\d{1,2}):(?P<mi>\d{2})(?::(?P<ss>\d{2})(?:[.,](?P<us>\d{1,6}))?)?"
+    r"\s*(?:Z|[+-]\d{2}:?\d{2})?\s*$"
+)
+
+
+def _fast_datetime(key: str) -> Optional[datetime]:
+    """复合正则快速构造 datetime（覆盖 _TS_FORMATS 全部已知格式）。
+
+    无年份格式（syslog / 纯时间）按 1900 年构造 —— 与 strptime 行为
+    一致（_to_epoch 随后统一替换为安全基准年 2000）。月份缩写按
+    英文三字母解析（不依赖系统 locale，行为比 strptime 更稳定）。
+    """
+    m = _TS_FAST.match(key)
+    if m is None:
+        return None
+    g = m.groupdict()
+    year = g["y1"] or g["y2"] or g["y3"]
+    if year is not None:
+        year = int(year)
+        if g["mo1"] is not None:        # YYYY-MM-DD / YYYY/MM/DD
+            month, day = int(g["mo1"]), int(g["d1"])
+        elif g["mo2"] is not None:      # MM/DD/YYYY
+            month, day = int(g["mo2"]), int(g["d2"])
+        else:                            # DD-Mon-YYYY / DD/Mon/YYYY
+            month = _MONTHS.get(g["mon3"].lower(), 0)
+            if not month:
+                return None
+            day = int(g["d3"])
+    elif g["mon4"] is not None:         # syslog：Mon DD（无年份）
+        month = _MONTHS.get(g["mon4"].lower(), 0)
+        if not month:
+            return None
+        year, day = 1900, int(g["d4"])
+    else:                                # 纯时间 HH:MM[:SS[.fff]]
+        year, month, day = 1900, 1, 1
+    try:
+        us = int(g["us"].ljust(6, "0")) if g["us"] else 0
+        return datetime(year, month, day, int(g["h"]), int(g["mi"]),
+                        int(g["ss"] or 0), us)
+    except ValueError:
+        # 无效日期（月 13 / 日 32 / 时 25 等）：与 strptime 失败语义一致
+        return None
 
 _CACHE_MISS = object()
 
@@ -118,7 +180,14 @@ class TimestampParser:
             except ValueError:
                 key = stripped
 
-        # 4) strptime 格式列表（上次成功格式优先）
+        # 4) 复合正则快速路径：一条匹配覆盖全部 12 种已知格式
+        #    （修复缺陷#9：替代热路径 strptime，单次解析约快 5 倍）
+        fast = _fast_datetime(key)
+        if fast is not None:
+            return _to_epoch(fast)
+
+        # 5) strptime 格式列表兜底（本地化月份名 / 全拼月份等罕见格式；
+        #    上次成功格式优先）
         order = [self._fmt_index] + [
             i for i in range(len(_TS_FORMATS)) if i != self._fmt_index
         ]

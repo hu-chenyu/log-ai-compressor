@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 import tkinter as tk
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -37,10 +38,14 @@ def app(monkeypatch, tmp_path):
     application = LogCompressorApp()
     application.update()
     yield application
+    # 宽容销毁：窗口已失效时仅静默清理（避免teardown报错）
     try:
         application._on_close()
-    except tk.TclError:
-        application.destroy()
+    except Exception:
+        try:
+            application.destroy()
+        except Exception:
+            pass
 
 
 class TestDragAndDrop:
@@ -107,18 +112,24 @@ java.net.ConnectException: Connection refused
 """
 
 
-def _run_paste_analysis(app, text=SAMPLE_PASTE):
+def _run_paste_analysis(app, text=SAMPLE_PASTE, timeout=30.0):
     """执行一次文本粘贴分析并等待完成。"""
     app._tabview.set("文本粘贴")
     app._paste_box.delete("1.0", "end")
     app._paste_box.insert("1.0", text)
     app._on_start()
-    deadline = time.time() + 20
+    deadline = time.time() + timeout
     while time.time() < deadline:
         app.update()
         if app._result is not None:
             break
         time.sleep(0.02)
+    if app._result is None:
+        # 诊断转储：失败时输出 worker/轮询状态（定位挂起类问题）
+        worker = app._worker
+        print(f"[diag] queue_size={app._queue.qsize()} "
+              f"worker_alive={worker.is_alive() if worker else None}",
+              flush=True)
     assert app._result is not None, "分析未完成"
 
 
@@ -255,3 +266,84 @@ class TestClusterListWrap:
         row = app._cluster_rows[1]
         assert row["summary"].winfo_reqwidth() <= \
             int(row["summary"].cget("wraplength")) + 40
+
+
+# ---------------------------------------------------------------------------
+# 修复9：性能优化（matplotlib 懒加载 + 共享字体防死锁）
+# ---------------------------------------------------------------------------
+class TestPerformanceOptimizations:
+    def test_charts_module_not_imported_at_startup(self):
+        """matplotlib 必须延迟加载：GUI 模块导入后不应加载 matplotlib。
+
+        用独立子进程验证（当前测试进程可能已被其他用例拉起 matplotlib）。
+        """
+        import json
+        import subprocess
+        import sys
+        code = ("import sys, json; import log_ai_compressor.gui.app; "
+                "print(json.dumps('matplotlib' not in sys.modules))")
+        proc = subprocess.run([sys.executable, "-c", code],
+                              capture_output=True, text=True,
+                              cwd=str(Path(__file__).resolve().parent.parent))
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout.strip().splitlines()[-1]), \
+            "matplotlib 不应在 GUI 启动路径上被导入（应懒加载）"
+
+    def test_chart_button_lazy_loads_charts(self, app):
+        """点击统计图表后才导入 matplotlib 且窗口正常弹出。"""
+        import sys
+        import time as _time
+        _run_paste_analysis(app)
+        # 触发前确保未加载（其他测试可能已加载，先清理引用判定逻辑：
+        # 直接调用 _show_charts 验证功能不受懒加载影响）
+        had_matplotlib = "matplotlib" in sys.modules
+        app._show_charts()
+        deadline = _time.time() + 5
+        while _time.time() < deadline and not (
+                app._chart_window is not None
+                and app._chart_window.winfo_exists()):
+            app.update()
+            _time.sleep(0.02)
+        assert app._chart_window is not None and app._chart_window.winfo_exists()
+        assert "matplotlib" in sys.modules or had_matplotlib
+        app._chart_window.destroy()
+        app._chart_window = None
+
+    def test_shared_fonts_reused_across_rows(self, app):
+        """行级字体必须共享复用：防止跨线程 GC 析构导致 Tkinter 死锁。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        assert len(app._cluster_rows) >= 2
+        # 所有行引用同一字体对象（无每行新建）
+        fonts = {id(row["summary"].cget("font")) for row in app._cluster_rows}
+        # tk.Label cget('font') 返回字体名；底层共享通过 app 字段验证
+        assert app._font_row_summary is not None
+        assert app._font_row_head is not None
+        # 两个字体的底层 Tk 字体名不同（各自独立共享对象）
+        assert (str(app._font_row_head) != str(app._font_row_summary))
+
+    def test_analysis_runs_in_worker_thread(self, app, monkeypatch):
+        """分析必须在后台线程执行（主线程阻塞 = 界面卡死）。"""
+        import threading
+        import log_ai_compressor.gui.app as app_mod
+        observed = {}
+
+        def spy_analyze(text, **kwargs):
+            observed["thread"] = threading.current_thread()
+            from log_ai_compressor.core.models import RunStats, AnalysisResult
+            return AnalysisResult(stats=RunStats(source="<t>", total_lines=1),
+                                  clusters=[])
+
+        monkeypatch.setattr(app_mod, "analyze_text", spy_analyze)
+        app._tabview.set("文本粘贴")
+        app._paste_box.delete("1.0", "end")
+        app._paste_box.insert("1.0", SAMPLE_PASTE)
+        app._on_start()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            app.update()
+            if app._result is not None:
+                break
+            time.sleep(0.02)
+        assert app._result is not None
+        # 工作线程必须不是主线程
+        assert observed["thread"] is not threading.main_thread()

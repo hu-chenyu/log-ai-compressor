@@ -236,3 +236,42 @@ class TestPipelineReuse:
         assert len(r.clusters) == 1
         assert r.clusters[0].count == 20000
         assert r.stats.error_entries == 20000
+
+
+# ---------------------------------------------------------------------------
+# 修复缺陷#9：小日志性能保障（100 行内 1 秒出结果）
+# ---------------------------------------------------------------------------
+class TestSmallLogPerformance:
+    def test_100_lines_under_1s(self):
+        # 100 行混合日志（含错误行）：整体分析应在 1 秒内完成
+        import time as _time
+        lines = []
+        for i in range(100):
+            ts = f"2024-01-01 09:{i // 60:02d}:{i % 60:02d}"
+            if i % 10 == 0:
+                lines.append(f"{ts} ERROR [db] connection refused to host {i}")
+            else:
+                lines.append(f"{ts} INFO [core] heartbeat ok {i}")
+        t0 = _time.perf_counter()
+        r = analyze_text("\n".join(lines))
+        elapsed = _time.perf_counter() - t0
+        assert r.stats.total_lines == 100
+        assert r.stats.error_entries == 10
+        # 宽松上限 1.0s（含 CI 冷启动开销；正常本机 < 0.05s）
+        assert elapsed < 1.0, f"小日志分析耗时 {elapsed:.2f}s 超过 1s"
+
+    def test_20k_lines_under_10s(self):
+        # 2 万行中等日志：流式管线应在 10 秒内完成（性能回归保护）
+        import time as _time
+        lines = []
+        for i in range(20000):
+            ts = f"2024-01-01 09:{(i // 60) % 60:02d}:{i % 60:02d}.{i % 1000:03d}"
+            if i % 10 == 0:
+                lines.append(f"{ts} ERROR [db] connection refused to host {i % 5}")
+            else:
+                lines.append(f"{ts} INFO [core] heartbeat ok {i}")
+        t0 = _time.perf_counter()
+        r = analyze_text("\n".join(lines))
+        elapsed = _time.perf_counter() - t0
+        assert r.stats.total_lines == 20000
+        assert elapsed < 10.0, f"2 万行分析耗时 {elapsed:.2f}s 超过 10s"

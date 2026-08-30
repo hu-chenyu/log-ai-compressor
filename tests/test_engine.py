@@ -140,3 +140,61 @@ class TestMatchLine:
         assert m.group("timestamp") == "2024-01-01T12:00:00.123Z"
         # 前导空白行不应匹配（交给续行/堆栈逻辑处理）
         assert rs.match_line("   indented continuation") is None
+
+
+# ---------------------------------------------------------------------------
+# 修复缺陷#9：合并正则加速（与逐条匹配语义一致性）
+# ---------------------------------------------------------------------------
+class TestCombinedRegexEquivalence:
+    """合并正则必须与逐条匹配在判定结果上完全一致。"""
+
+    @pytest.mark.parametrize("name", ["generic", "embedded", "jenkins"])
+    def test_stack_indicator_equivalence(self, name):
+        rs = load_ruleset(name)
+        assert rs._stack_combined is not None, "堆栈特征应已合并"
+        samples = [
+            "\tat com.foo.Bar.run(Bar.java:10)",
+            "Traceback (most recent call last):",
+            "Caused by: java.lang.NullPointerException",
+            "  #2  0x08004a1b in im_clk_a400_enable",
+            '  File "app.py", line 88, in handle',
+            "raise ValueError('boom')",
+            "Backtrace: 0x4a1b2c",
+            "java.net.ConnectException: Connection refused",
+            "INFO normal line without stack",
+            "plain text 123",
+            "",
+        ]
+        for line in samples:
+            combined = rs._stack_combined.search(line) is not None
+            sequential = any(p.search(line) for p in rs.stack_indicators)
+            assert combined == sequential, f"{name} 堆栈判定不一致: {line!r}"
+
+    @pytest.mark.parametrize("name", ["generic", "embedded", "jenkins"])
+    def test_level_hint_equivalence(self, name):
+        rs = load_ruleset(name)
+        samples = [
+            "BUILD FAILURE in 30s",
+            "[err] compile fail",
+            "terminate called after throwing an instance",
+            "uncaught exception in worker",
+            "warning: disk almost full",
+            "segfault at 0x4a1b2c",
+            "assert failed: rate mismatch",
+            "plain output line",
+            "routine heartbeat ok",
+        ]
+        for text in samples:
+            fast = rs.infer_level_by_keyword(text)
+            sequential = None
+            for level in ("FATAL", "ERROR", "FAIL", "WARN"):
+                if any(p.search(text) for p in rs.level_hints.get(level, ())):
+                    sequential = level
+                    break
+            assert fast == sequential, f"{name} 级别推断不一致: {text!r}"
+
+    def test_hint_combined_built_for_generic(self):
+        rs = load_ruleset("generic")
+        # 级别提示已按级别合并（FATAL/ERROR/FAIL/WARN 各一条）
+        for level in ("FATAL", "ERROR", "FAIL", "WARN"):
+            assert level in rs._hint_combined, f"{level} 提示未合并"

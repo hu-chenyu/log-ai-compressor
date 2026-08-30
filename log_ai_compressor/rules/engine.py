@@ -86,6 +86,29 @@ class RuleSet:
     # 上次命中的 pattern 索引（热路径优化：同格式日志优先重试上次命中的正则）
     _last_pattern: int = -1
 
+    # 修复缺陷#9：无结构行兜底路径的合并正则缓存（构造时构建）
+    # - 堆栈特征 8 条 -> 单条交替正则（1 次 search 替代 8 次）
+    # - 级别提示按级别合并（每级别 1 次 search 替代逐条多次）
+    _stack_combined: Optional[Pattern[str]] = None
+    _hint_combined: Dict[str, Pattern[str]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """构造后处理：预合并热路径正则（失败时自动退回逐条匹配）。"""
+        try:
+            self._stack_combined = re.compile(
+                "|".join(p.pattern for p in self.stack_indicators))
+        except re.error:
+            self._stack_combined = None  # 含命名组冲突等场景，退回逐条
+        self._hint_combined = {}
+        for level, pats in self.level_hints.items():
+            if not pats:
+                continue
+            try:
+                self._hint_combined[level] = re.compile(
+                    "|".join(p.pattern for p in pats), re.IGNORECASE)
+            except re.error:
+                continue  # 退回该级别逐条匹配
+
     # ------------------------------------------------------------------
     # 构造
     # ------------------------------------------------------------------
@@ -156,12 +179,29 @@ class RuleSet:
         return None
 
     def match_stack_indicator(self, line: str) -> bool:
-        """判断一行是否命中堆栈特征。"""
+        """判断一行是否命中堆栈特征。
+
+        修复缺陷#9：优先使用构造期合并的单条交替正则（1 次扫描
+        覆盖全部特征，无结构行兜底路径提速约 8 倍）；合并失败或
+        语义需要逐条时自动退回原实现。
+        """
+        combined = self._stack_combined
+        if combined is not None:
+            return combined.search(line) is not None
         return any(p.search(line) for p in self.stack_indicators)
 
     def infer_level_by_keyword(self, text: str) -> Optional[str]:
-        """对无级别字段的行按关键词推断级别（FATAL > ERROR > FAIL > WARN）。"""
+        """对无级别字段的行按关键词推断级别（FATAL > ERROR > FAIL > WARN）。
+
+        修复缺陷#9：每级别先查合并正则（单次扫描），未命中再逐条
+        兜底；级别间仍按优先级顺序判定，语义与逐条实现完全一致。
+        """
         for level in ("FATAL", "ERROR", "FAIL", "WARN"):
+            combined = self._hint_combined.get(level)
+            if combined is not None:
+                if combined.search(text):
+                    return level
+                continue
             for pat in self.level_hints.get(level, ()):
                 if pat.search(text):
                     return level

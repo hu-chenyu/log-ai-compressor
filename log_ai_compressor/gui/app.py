@@ -36,8 +36,10 @@ from log_ai_compressor.export.reporters import (
     to_markdown,
     to_text,
 )
-from log_ai_compressor.gui.charts import ChartsPanel
 from log_ai_compressor.gui.config_store import ConfigStore
+
+# 修复缺陷#9：matplotlib 导入约 0.4s，延迟到首次点击「统计图表」时
+# 才加载（charts 模块不再在 GUI 启动路径上被导入）。
 
 # 可选拖拽支持（tkinterdnd2 未安装时自动退化为点击选择）
 try:
@@ -112,6 +114,11 @@ class LogCompressorApp(_make_app_base()):
         self._cluster_rows: List[dict] = []
         self._selected_row: int = -1
         self._queue: "queue.Queue" = queue.Queue()
+        # 共享字体：行级字体必须复用（每行新建 CTkFont 会被 GC 在
+        # 任意线程析构，tkinter.Font.__del__ 跨线程调用 Tk 造成死锁）
+        self._font_row_head = ctk.CTkFont(family="Consolas", size=12)
+        self._font_row_summary = ctk.CTkFont(size=11)
+        self._font_hint = ctk.CTkFont(size=11)
         self._cancel_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._chart_window: Optional[ctk.CTkToplevel] = None
@@ -532,6 +539,13 @@ class LogCompressorApp(_make_app_base()):
         self._cancel_btn.configure(state="disabled")
 
     def _poll_queue(self) -> None:
+        """队列轮询（80ms 周期）。
+
+        健壮性设计：先重调度再处理事件——任何处理器异常都不会
+        终止轮询循环（否则 GUI 将永久失去响应）；异常降级为
+        状态栏提示并打印到 stderr 便于定位。
+        """
+        self.after(80, self._poll_queue)
         try:
             while True:
                 kind, data = self._queue.get_nowait()
@@ -545,7 +559,10 @@ class LogCompressorApp(_make_app_base()):
                     self._on_error(data)
         except queue.Empty:
             pass
-        self.after(80, self._poll_queue)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            self._status_label.configure(text="内部错误（详情见控制台），轮询已继续")
 
     def _update_progress(self, data: dict) -> None:
         if data.get("phase") == "parsing":
@@ -611,8 +628,8 @@ class LogCompressorApp(_make_app_base()):
         if total > n:
             ctk.CTkLabel(self._cluster_list,
                          text=f"…… 其余 {total - n} 种错误可通过调大 Top N 查看",
-                         text_color="#8fa4b8", font=ctk.CTkFont(size=11)
-                         ).pack(pady=6)
+                         text_color="#8fa4b8",
+                         font=self._font_hint).pack(pady=6)
         # 列表宽度变化时刷新换行宽度
         self._cluster_list.unbind("<Configure>")
         self._cluster_list.bind("<Configure>", self._on_list_resize)
@@ -629,12 +646,12 @@ class LogCompressorApp(_make_app_base()):
         head = ctk.CTkLabel(
             frame, text=self._row_text(cluster), anchor="w",
             text_color=self._row_color(cluster) or None,
-            font=ctk.CTkFont(family="Consolas", size=12))
+            font=self._font_row_head)
         head.pack(fill="x", padx=(8, 8), pady=(3, 0))
         summary = tk.Label(
             frame, text=cluster.summary, anchor="w", justify="left",
             wraplength=360,
-            font=ctk.CTkFont(size=11),
+            font=self._font_row_summary,
             bg=self._resolve_row_color(_ROW_BG_DEFAULT),
             fg=_ROW_TEXT_DARK if self._is_dark_mode() else _ROW_TEXT_LIGHT)
         summary.pack(fill="x", padx=(8, 2), pady=(0, 4))
@@ -918,6 +935,8 @@ class LogCompressorApp(_make_app_base()):
             return
         if self._chart_window is not None and self._chart_window.winfo_exists():
             self._chart_window.destroy()
+        # 懒加载：首次点击图表时才导入 matplotlib（修复缺陷#9）
+        from log_ai_compressor.gui.charts import ChartsPanel
         self._chart_window = ctk.CTkToplevel(self)
         self._chart_window.title("错误统计图表")
         self._chart_window.geometry("1150x430")
