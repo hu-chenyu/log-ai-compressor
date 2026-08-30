@@ -253,9 +253,11 @@ class LogCompressorApp(_make_app_base()):
             bar, text="海量日志压缩投喂大模型 · 快速故障排查",
             text_color="#8fa4b8")
         subtitle.grid(row=0, column=1, padx=6, sticky="w")
-        theme_btn = ctk.CTkButton(bar, text="主题", width=56,
-                                  command=self._toggle_theme)
-        theme_btn.grid(row=0, column=2, padx=10)
+        # 修复缺陷#12：主题按钮显示当前主题状态（🌙 暗色 / ☀️ 亮色）
+        self._theme_btn = ctk.CTkButton(bar, text="🌙 暗色", width=86,
+                                        command=self._toggle_theme)
+        self._theme_btn.grid(row=0, column=2, padx=10)
+        self._update_theme_button()
 
     # ------------------------------------------------------------------
     def _build_tabs(self) -> None:
@@ -615,10 +617,75 @@ class LogCompressorApp(_make_app_base()):
                     text=f"已拖入文件：{paths[0]}（点击开始分析）")
 
     def _toggle_theme(self) -> None:
+        """主题切换入口：淡出 -> 切换 -> 淡入（平滑过渡）。"""
         current = ctk.get_appearance_mode().lower()
-        mode = "light" if current == "dark" else "dark"
-        ctk.set_appearance_mode(mode)
-        self._config["appearance"] = mode
+        target = "light" if current == "dark" else "dark"
+        self._fade_out(target, 0)
+
+    # 主题过渡帧序列（窗口透明度）
+    _FADE_OUT_STEPS = (1.0, 0.82, 0.66, 0.55)
+    _FADE_IN_STEPS = (0.55, 0.66, 0.82, 1.0)
+
+    def _set_window_alpha(self, alpha: float) -> bool:
+        """设置窗口透明度（平台不支持时返回 False 降级直切）。"""
+        try:
+            self.attributes("-alpha", alpha)
+            return True
+        except tk.TclError:
+            return False
+
+    def _fade_out(self, target: str, step: int) -> None:
+        """过渡第一阶段：窗口渐隐（8 帧后于谷底切换主题）。"""
+        if step >= len(self._FADE_OUT_STEPS):
+            self._apply_theme_switch(target)
+            self._fade_in(0)
+            return
+        if not self._set_window_alpha(self._FADE_OUT_STEPS[step]):
+            # 平台不支持透明度：直接切换（无动画但功能完整）
+            self._apply_theme_switch(target)
+            return
+        self.after(28, lambda: self._fade_out(target, step + 1))
+
+    def _fade_in(self, step: int) -> None:
+        """过渡第二阶段：窗口渐显恢复。"""
+        if step >= len(self._FADE_IN_STEPS):
+            self._set_window_alpha(1.0)
+            return
+        if not self._set_window_alpha(self._FADE_IN_STEPS[step]):
+            return
+        self.after(28, lambda: self._fade_in(step + 1))
+
+    def _apply_theme_switch(self, target: str) -> None:
+        """实际执行主题切换（配色 / 按钮标识 / 行颜色 / 持久化）。"""
+        ctk.set_appearance_mode(target)
+        self._config["appearance"] = target
+        self._update_theme_button()
+        self._refresh_row_colors()
+        # 修复缺陷#12：切换立即持久化（不等关闭/下次分析）
+        self._store.save(self._current_config_dict())
+
+    def _update_theme_button(self) -> None:
+        """主题按钮显示当前主题状态。"""
+        if getattr(self, "_theme_btn", None) is None:
+            return
+        dark = self._is_dark_mode()
+        self._theme_btn.configure(
+            text="🌙 暗色" if dark else "☀️ 亮色")
+
+    def _refresh_row_colors(self) -> None:
+        """主题切换后刷新列表行的明暗配色（原生 tk.Label 不随 CTk 主题）。"""
+        rows = getattr(self, "_cluster_rows", ())
+        if not rows:
+            return
+        fg = _ROW_TEXT_DARK if self._is_dark_mode() else _ROW_TEXT_LIGHT
+        default_bg = self._resolve_row_color(_ROW_BG_DEFAULT)
+        for row in rows:
+            row["summary"].configure(fg=fg, bg=default_bg)
+            row["frame"].configure(fg_color=_ROW_BG_DEFAULT)
+        # 恢复选中行高亮（主列表模式下）
+        selected = getattr(self, "_selected_row", -1)
+        if 0 <= selected < len(rows) and "idx" in rows[selected]:
+            self._apply_row_bg(selected, _ROW_BG_SELECTED)
 
     # ==================================================================
     # 任务调度（后台线程 + 队列轮询）
@@ -1142,7 +1209,9 @@ class LogCompressorApp(_make_app_base()):
                          text_color="#8fa4b8").pack(pady=20)
             return
         for kind, cmp, item in rows[:200]:   # 上限保护（超长列表性能）
-            self._make_compare_row(self._cluster_list, kind, cmp, item)
+            # 登记进 _cluster_rows：主题切换时统一刷新明暗配色（修复缺陷#12）
+            self._cluster_rows.append(
+                self._make_compare_row(self._cluster_list, kind, cmp, item))
 
     # ==================================================================
     # 导出 / 复制 / 图表
