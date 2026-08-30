@@ -290,7 +290,9 @@ class LogCompressorApp(_make_app_base()):
             tab, text="直接粘贴日志片段（适合几万行以内的快速排查，无需存为文件）",
             text_color="#8fa4b8")
         hint.grid(row=0, column=0, sticky="w", pady=(2, 4))
-        self._paste_box = ctk.CTkTextbox(tab, height=170,
+        # 修复缺陷#11：undo=False —— 大段粘贴时 undo 栈与 autoseparator
+        # 会随粘贴体量膨胀（几万行日志可达数百 MB），关闭撤销换取内存稳定
+        self._paste_box = ctk.CTkTextbox(tab, height=170, undo=False,
                                          font=ctk.CTkFont(family="Consolas",
                                                           size=12))
         self._paste_box.grid(row=1, column=0, sticky="ew")
@@ -643,7 +645,13 @@ class LogCompressorApp(_make_app_base()):
                 return
             payload["file"] = path
         elif mode == "文本粘贴":
+            # 修复缺陷#11：粘贴文本读取健壮性处理
+            # - Tk Text 的 get("1.0","end") 恒返回尾部换行（strip 去除）；
+            # - BOM（\ufeff）非空白字符 strip 不去除，会把首行变成
+            #   无结构行导致解析失败 —— 显式剥离；
+            # - \r\n / \r 由 run_text 的 splitlines 正确分行，此处不动。
             text = self._paste_box.get("1.0", "end").strip()
+            text = text.lstrip("\ufeff").strip()
             if not text:
                 messagebox.showwarning("提示", "请先粘贴日志文本")
                 return
