@@ -1,0 +1,263 @@
+# -*- coding: utf-8 -*-
+"""核心数据模型：日志条目、错误簇、自适应时间直方图、运行统计与结果。
+
+设计说明
+--------
+- 数据模型与处理逻辑分离：parser 产出 LogEntry，clustering 聚合为 ErrorCluster，
+  analysis 填充智能分析字段，export/GUI 只读模型渲染，层间单向依赖；
+- TimeHistogram 是内存控制的核心：桶数上限固定、超出自动扩宽桶宽合并旧桶，
+  内存占用 O(max_buckets)，与日志总行数无关。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+from log_ai_compressor.constants import (
+    GLOBAL_HIST_MAX_BUCKETS,
+    HIST_MAX_BUCKETS,
+    LEVEL_WEIGHT,
+)
+
+
+def format_timestamp(t: Optional[float]) -> str:
+    """时间戳展示格式化：epoch 秒 -> 日期时间；相对秒 -> 秒计数。"""
+    if t is None:
+        return "-"
+    if t < 1e9:                      # 相对计时（嵌入式秒计数等）
+        return f"{t:.3f}s"
+    from datetime import datetime
+    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---------------------------------------------------------------------------
+# 自适应时间直方图
+# ---------------------------------------------------------------------------
+class TimeHistogram:
+    """时间分布直方图（自适应分桶，内存 O(max_buckets)）。
+
+    - 首个样本确定起点，桶宽从 1 秒起步；
+    - 桶数超过上限时桶宽 ×8 并合并旧桶（向前兼容历史数据）；
+    - 时间回跳（无序日志）时向前平移起点。
+    """
+
+    __slots__ = ("_max", "_width", "_start", "_counts")
+
+    def __init__(self, max_buckets: int = HIST_MAX_BUCKETS,
+                 initial_width: float = 1.0):
+        self._max = max_buckets
+        self._width = initial_width
+        self._start: Optional[float] = None
+        self._counts: Dict[int, int] = {}
+
+    # -- 写入 ------------------------------------------------------------
+    def add(self, t: float) -> None:
+        """记录一个时间点。"""
+        if self._start is None:
+            self._start = t
+            self._counts = {0: 1}
+            return
+        if t < self._start:
+            # 时间回跳：向前平移起点并整体重定位旧桶
+            shift = int((self._start - t) / self._width) + 1
+            self._start -= shift * self._width
+            self._counts = {k + shift: v for k, v in self._counts.items()}
+        idx = int((t - self._start) // self._width)
+        while idx >= self._max:
+            self._widen()
+            idx = int((t - self._start) // self._width)
+        self._counts[idx] = self._counts.get(idx, 0) + 1
+
+    def _widen(self) -> None:
+        """桶宽 ×8，旧桶按 8:1 合并。"""
+        merged: Dict[int, int] = {}
+        for idx, cnt in self._counts.items():
+            merged[idx // 8] = merged.get(idx // 8, 0) + cnt
+        self._counts = merged
+        self._width *= 8
+
+    # -- 读取 ------------------------------------------------------------
+    @property
+    def width(self) -> float:
+        """当前桶宽（秒）。"""
+        return self._width
+
+    @property
+    def total(self) -> int:
+        """样本总数。"""
+        return sum(self._counts.values())
+
+    @property
+    def start(self) -> Optional[float]:
+        return self._start
+
+    def series(self) -> List[Tuple[float, int]]:
+        """返回 (桶起始时间, 计数) 升序序列，用于趋势图。"""
+        if self._start is None:
+            return []
+        return [
+            (self._start + i * self._width, c)
+            for i, c in sorted(self._counts.items())
+        ]
+
+    def burst_buckets(self, k: float = 3.0) -> List[Tuple[float, int]]:
+        """识别集中爆发桶。
+
+        稳健统计：中位数 + k×MAD×1.4826（抗尖峰膨胀：普通 mean+σ 会被
+        尖峰自身推高阈值导致漏检）；同时要求至少 2 倍于基线中位数。
+        """
+        import statistics
+
+        if not self._counts or self._start is None:
+            return []
+        items = sorted(self._counts.items())
+        counts = [c for _, c in items]
+        if len(counts) < 2:
+            return []
+        median = statistics.median(counts)
+        mad = statistics.median(abs(c - median) for c in counts)
+        robust_threshold = median + k * 1.4826 * mad
+        threshold = max(robust_threshold, 2.0 * median)
+        return [
+            (self._start + i * self._width, c)
+            for i, c in items
+            if c > threshold
+        ]
+
+
+# ---------------------------------------------------------------------------
+# 日志条目
+# ---------------------------------------------------------------------------
+@dataclass
+class LogEntry:
+    """单条解析完成的日志条目（含消息折行与堆栈聚合）。"""
+
+    line_no: int                        # 起始行号（1-based）
+    raw: str = ""                       # 首行原始文本
+    timestamp: Optional[float] = None   # epoch 秒或相对秒
+    level: str = "INFO"                 # 规范化级别
+    module: str = ""                    # 模块名（可为空）
+    message: str = ""                   # 日志内容首行
+    message_extra: List[str] = field(default_factory=list)  # 折行续接内容
+    stack: List[str] = field(default_factory=list)          # 堆栈/回溯行
+    last_line_no: int = 0               # 条目结束行号（含堆栈与续行）
+
+    @property
+    def has_stack(self) -> bool:
+        return bool(self.stack)
+
+    @property
+    def full_message(self) -> str:
+        """含折行的完整消息。"""
+        return " ".join([self.message] + self.message_extra).strip()
+
+
+# ---------------------------------------------------------------------------
+# 错误簇（聚类结果）
+# ---------------------------------------------------------------------------
+@dataclass
+class ClusterSample:
+    """错误簇的典型样例：完整条目 + 前后上下文原始行。"""
+    entry: LogEntry
+    before: List[str] = field(default_factory=list)   # 前上下文（原始行）
+    after: List[str] = field(default_factory=list)    # 后上下文（原始行）
+
+
+@dataclass
+class ErrorCluster:
+    """同类错误簇：模糊指纹聚合后的错误类别。"""
+
+    cluster_id: int
+    template: str                        # 归一化完整指纹模板（级别+消息+堆栈特征）
+    message_template: str = ""           # 消息指纹模板（跨堆栈差异的同类合并键）
+    level: str = "ERROR"
+    module: str = ""
+    summary: str = ""                    # 首条消息（展示用）
+    count: int = 0
+    first_line: int = 0
+    last_line: int = 0
+    first_seen: Optional[float] = None
+    last_seen: Optional[float] = None
+    sample: Optional[ClusterSample] = None
+    hist: TimeHistogram = field(default_factory=TimeHistogram)
+
+    # ---- 智能分析结果（analysis 模块填充）----
+    is_root_cause: bool = False
+    root_cause_reason: str = ""
+    anomaly: str = ""                    # 'burst' / 'rare' / ''
+    priority: float = 0.0
+
+    @property
+    def level_weight(self) -> float:
+        return LEVEL_WEIGHT.get(self.level, 0.0)
+
+    @property
+    def priority_label(self) -> str:
+        """优先级档位标签（P0 致命 / P1 高 / P2 中 / P3 低）。"""
+        if self.priority >= 75:
+            return "P0"
+        if self.priority >= 55:
+            return "P1"
+        if self.priority >= 35:
+            return "P2"
+        return "P3"
+
+
+# ---------------------------------------------------------------------------
+# 运行统计与分析结果
+# ---------------------------------------------------------------------------
+@dataclass
+class RunStats:
+    """一次管线运行的元统计。"""
+    source: str = ""                     # 文件路径或 '<粘贴文本>'
+    encoding: str = "utf-8"
+    rule_name: str = "generic"
+    total_lines: int = 0                 # 总行数
+    entry_lines: int = 0                 # 结构化条目数
+    error_lines: int = 0                 # 错误级行数（FATAL/ERROR/FAIL）
+    error_entries: int = 0               # 通过过滤并参与聚类的错误条目数
+    level_counts: Dict[str, int] = field(default_factory=dict)
+    duration: float = 0.0                # 处理耗时（秒）
+    lines_per_second: float = 0.0
+    time_start: Optional[float] = None   # 日志时间范围
+    time_end: Optional[float] = None
+    truncated: bool = False              # 是否因取消中断
+    analysis_cost: float = 0.0           # 智能分析耗时（秒，用于开销核算）
+
+    def as_dict(self) -> dict:
+        """导出 JSON 友好的字典。"""
+        return {
+            "source": self.source, "encoding": self.encoding,
+            "rule": self.rule_name, "total_lines": self.total_lines,
+            "entry_lines": self.entry_lines, "error_lines": self.error_lines,
+            "error_entries": self.error_entries,
+            "level_counts": dict(self.level_counts),
+            "duration_sec": round(self.duration, 3),
+            "lines_per_second": round(self.lines_per_second, 1),
+            "time_start": self.time_start, "time_end": self.time_end,
+            "truncated": self.truncated,
+        }
+
+
+@dataclass
+class AnalysisResult:
+    """管线完整输出：错误簇（按优先级降序）+ 运行统计 + 全局错误直方图。"""
+
+    stats: RunStats
+    clusters: List[ErrorCluster] = field(default_factory=list)
+    global_hist: TimeHistogram = field(
+        default_factory=lambda: TimeHistogram(max_buckets=GLOBAL_HIST_MAX_BUCKETS)
+    )
+    keywords: List[str] = field(default_factory=list)   # 高亮关键字
+
+    @property
+    def top_clusters(self) -> List[ErrorCluster]:
+        """默认 Top N（DEFAULT_TOP_N）簇。"""
+        from log_ai_compressor.constants import DEFAULT_TOP_N
+        return self.clusters[:DEFAULT_TOP_N]
+
+    def clusters_of_module(self, module: str) -> List[ErrorCluster]:
+        return [c for c in self.clusters if c.module == module]
+
+    def clusters_of_level(self, level: str) -> List[ErrorCluster]:
+        return [c for c in self.clusters if c.level == level]
