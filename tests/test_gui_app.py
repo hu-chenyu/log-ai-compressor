@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -328,6 +329,115 @@ class TestClusterListWrap:
         row = app._cluster_rows[1]
         assert row["summary"].winfo_reqwidth() <= \
             int(row["summary"].cget("wraplength")) + 40
+
+
+# ---------------------------------------------------------------------------
+# 修复R7：错误分类列表宽度对齐 + 字体放大（主列表 / 虚拟列表 / 全屏一致）
+# ---------------------------------------------------------------------------
+class TestClusterListFontAndWidth:
+    def test_main_list_font_sizes(self, app):
+        """修复R7：主列表字体实际大小——头部 17 加粗 / 摘要 14。"""
+        assert int(app._font_row_head.cget("size")) == 17
+        assert str(app._font_row_head.cget("weight")) == "bold"
+        assert int(app._font_row_summary.cget("size")) == 14
+        # 底层 tk 命名字体的实际像素尺寸（CTkFont 用负数表示像素）
+        head_tk = tkfont.Font(root=app, name=str(app._font_row_head),
+                              exists=True)
+        sum_tk = tkfont.Font(root=app, name=str(app._font_row_summary),
+                             exists=True)
+        assert int(head_tk.cget("size")) == -17
+        assert int(sum_tk.cget("size")) == -14
+
+    def test_fullscreen_list_font_sizes(self, app):
+        """修复R7：全屏列表字体实际大小——头部 18 加粗 / 摘要 16。"""
+        assert int(app._font_fs_head.cget("size")) == 18
+        assert str(app._font_fs_head.cget("weight")) == "bold"
+        assert int(app._font_fs_summary.cget("size")) == 16
+
+    def test_classic_row_uses_enlarged_fonts(self, app):
+        """修复R7：经典模式行控件直接使用放大后的共享字体对象。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        assert isinstance(head, ctk.CTkLabel)
+        assert head.cget("font") is app._font_row_head
+        assert str(app._cluster_rows[0]["summary"].cget("font")) == \
+            str(app._font_row_summary)
+
+    def test_virtual_row_fonts_match_classic(self, app):
+        """修复R7：虚拟模式（>40 行）与经典模式字体一致（同一共享字体）。"""
+        _run_many_clusters(app)
+        app.update()
+        assert app._virtual_list is not None, "60 簇应启用虚拟列表"
+        slot = app._virtual_list.slots[0]
+        assert str(slot["head"].cget("font")) == str(app._font_row_head)
+        assert str(slot["summary"].cget("font")) == \
+            str(app._font_row_summary)
+
+    def test_virtual_row_height_enlarged(self, app):
+        """修复R7：虚拟行高随字体放大（容纳 17 头部 + 多行 14 摘要）。"""
+        from log_ai_compressor.gui.app import VirtualClusterList
+        assert VirtualClusterList.ROW_HEIGHT >= 108, \
+            "行高应容纳放大后的头部与两行摘要"
+
+    def test_fullscreen_rows_use_fs_fonts(self, app):
+        """修复R7：全屏列表行实际使用全屏字体（头部 18 / 摘要 16）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app._open_list_fullscreen()
+        for _ in range(20):
+            app.update()
+            time.sleep(0.005)
+        win = app._fs_list_win
+        assert win is not None and win.winfo_exists()
+        fonts_in_use = set()
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                try:
+                    fonts_in_use.add(str(child.cget("font")))
+                except (tk.TclError, ValueError):
+                    pass    # CTkFrame 等不支持 font 属性的控件跳过
+                walk(child)
+
+        walk(win)
+        assert str(app._font_fs_head) in fonts_in_use, \
+            "全屏行头部应使用 18 号加粗字体"
+        assert str(app._font_fs_summary) in fonts_in_use, \
+            "全屏行摘要应使用 16 号字体"
+        win.event_generate("<Escape>")
+        app.update()
+
+    def test_list_right_edge_aligns_with_fullscreen_button(self, app):
+        """修复R7：列表右缘（含滚动条）与「全屏」按钮右缘严格对齐。"""
+        app.update()
+        if app._list_host.winfo_width() < 50:
+            pytest.skip("窗口未完成布局")
+        btn = app._list_fs_btn
+        btn_right = btn.winfo_rootx() + btn.winfo_width()
+        list_right = (app._list_host.winfo_rootx()
+                      + app._list_host.winfo_width())
+        assert abs(list_right - btn_right) <= 2, \
+            f"列表右缘与按钮右缘偏差 {list_right - btn_right}px（应 ≤2px）"
+
+    def test_list_fills_host_width(self, app):
+        """修复R7：列表占满宿主宽度 ≥90%（去除固定 470px 留白）。"""
+        app.update()
+        if app._list_host.winfo_width() < 50:
+            pytest.skip("窗口未完成布局")
+        host_w = app._list_host.winfo_width()
+        list_w = app._cluster_list.winfo_width()
+        assert list_w >= 0.9 * host_w, \
+            f"列表宽 {list_w}px 应占宿主宽 {host_w}px 的 90% 以上"
+
+    def test_summary_wraplength_uses_full_list_width(self, app):
+        """修复R7：摘要初始换行宽度按列表实际宽度计算（不再固定 400 早折行）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        width = app._cluster_list.winfo_width()
+        if width <= 100:
+            pytest.skip("窗口未完成布局")
+        wrap = int(app._cluster_rows[0]["summary"].cget("wraplength"))
+        assert wrap >= width - 80, \
+            f"换行宽 {wrap}px 应接近列表宽 {width}px（充分利用加宽空间）"
 
 
 # ---------------------------------------------------------------------------
