@@ -783,7 +783,11 @@ class TestFullscreenView:
         assert xbars, "详情全屏应配置水平滚动条"
 
     def test_fullscreen_esc_closes(self, app):
-        """ESC 键应关闭全屏窗口（返回主界面）。"""
+        """ESC 键应关闭全屏窗口（返回主界面）。
+
+        修复R6：窗口预创建复用后 ESC 改为 withdraw（隐藏返回主界面，
+        窗口保留复用）。判定标准：窗口销毁 或 不再可见（未映射）。
+        """
         _run_paste_analysis(app, SAMPLE_PASTE)
         app._open_list_fullscreen()
         app.update()
@@ -796,8 +800,9 @@ class TestFullscreenView:
         app.update()
         remaining = [w for w in app.winfo_children()
                      if isinstance(w, tk.Toplevel)
-                     and "错误分类列表" in w.title()]
-        assert not remaining, "ESC 后窗口应关闭"
+                     and "错误分类列表" in w.title()
+                     and w.winfo_ismapped()]
+        assert not remaining, "ESC 后窗口应不再可见（销毁或隐藏）"
         # 主界面仍存活
         assert app.winfo_exists()
 
@@ -863,12 +868,16 @@ REPEAT_LOG = "\n".join(
 
 
 def _click_ctk_label(widget):
-    """模拟真实点击 CTkLabel：事件发给内部子控件（Tk 不冒泡）。
+    """模拟真实点击：事件发给实际命中的子控件（Tk 不冒泡）。
 
-    CTk 的 bind() 重写把绑定转发到内部 Canvas/tk.Label 上，
-    在容器上 event_generate 不会触发——真实鼠标点击命中的
-    正是内部子控件，此处对内部 Label 发事件等价模拟。
+    - CTkLabel（winfo_class 为 Frame 的容器）：bind 转发到内部
+      Canvas/tk.Label，对其内部 Label 发事件；
+    - 原生 tk.Label（修复R6 全屏行）：绑定即在本体，直接发事件。
     """
+    if widget.winfo_class() == "Label":
+        widget.event_generate("<Button-1>", x=3, y=2)
+        widget.update()
+        return
     for child in widget.winfo_children():
         if child.winfo_class() == "Label":
             child.event_generate("<Button-1>")
@@ -877,10 +886,16 @@ def _click_ctk_label(widget):
 
 class TestFullscreenExpand:
     def _open_fs(self, app):
-        """分析 REPEAT_LOG 后打开列表全屏，返回窗口。"""
+        """分析 REPEAT_LOG 后打开列表全屏，返回窗口。
+
+        修复R6：行渲染分批异步（首批 after 1ms），需推进事件循环
+        至少一批行出现。
+        """
         _run_paste_analysis(app, REPEAT_LOG)
         app._open_list_fullscreen()
-        app.update()
+        for _ in range(20):
+            app.update()
+            time.sleep(0.005)
         wins = [w for w in app.winfo_children()
                 if isinstance(w, tk.Toplevel)
                 and "错误分类列表" in w.title()]
@@ -888,8 +903,10 @@ class TestFullscreenExpand:
         return wins[0]
 
     def _find_toggles(self, win):
+        # 修复R6：全屏行为原生 tk.Label（控件复用降开销）
         return [w for w in _all_widgets(win)
-                if isinstance(w, ctk.CTkLabel)
+                if isinstance(w, tk.Label)
+                and w.winfo_class() == "Label"
                 and "×12" in str(w.cget("text"))]
 
     def test_toggle_button_exists_with_count(self, app):
@@ -956,9 +973,9 @@ class TestFullscreenExpand:
         """点击簇行：右侧显示簇详情（典型样例）。"""
         win = self._open_fs(app)
         try:
-            # 点击首个簇行头部（非 toggle）
+            # 点击首个簇行头部（非 toggle；修复R6 后为原生 Label）
             heads = [w for w in _all_widgets(win)
-                     if isinstance(w, ctk.CTkLabel)
+                     if w.winfo_class() == "Label"
                      and "ERROR" in str(w.cget("text"))
                      and "×" not in str(w.cget("text"))]
             assert heads, "应有簇行头部"
@@ -1016,6 +1033,191 @@ class TestFullscreenExpand:
         assert len(db.instances) == 12
         assert db.instances[0].entry is not None
         assert "connection refused" in db.instances[0].summary
+
+
+# ---------------------------------------------------------------------------
+# 修复R6：UI 性能优化（虚拟列表 / 全屏窗口复用 / 原生行控件）
+# ---------------------------------------------------------------------------
+def _make_virtual_log(n=60):
+    """生成 n 类互不相似的错误（数字被指纹归一化掩盖、相似骨架会
+    触发相似度合并——用确定性唯一拼造码 + 分段不同骨架词保证独立簇）。"""
+    cons = "bcdfghjklmnpqrstvwxz"
+    vow = "aeiou"
+    muls = [7, 11, 13, 17, 19, 23, 3, 5, 9, 29]
+    tails = ["signal lost", "carrier gone", "beacon dead"]
+
+    def code(i):
+        out = [cons[(i // 20 * 7) % 20]]
+        for k, m in enumerate(muls):
+            mod = 20 if k % 2 == 0 else 5
+            out.append((cons if k % 2 == 0 else vow)[(i * m) % mod])
+        return "".join(out)
+
+    return "\n".join(
+        f"2024-01-01 09:{i // 60:02d}:{i % 60:02d} ERROR [db] "
+        f"{code(i)} {tails[i // 20]}" for i in range(n)) + "\n"
+
+
+def _run_many_clusters(app, n=60):
+    """分析 n 簇日志并把 Top N 调大（触发虚拟列表阈值）。"""
+    app._topn_entry.delete(0, "end")
+    app._topn_entry.insert(0, "200")
+    _run_paste_analysis(app, _make_virtual_log(n))
+
+
+class TestVirtualList:
+    def test_virtual_list_activates_above_threshold(self, app):
+        """修复R6：列表超过阈值（40）切换虚拟滚动渲染。"""
+        from log_ai_compressor.gui.app import VIRTUAL_LIST_THRESHOLD
+        _run_many_clusters(app)
+        assert len(app._displayed) > VIRTUAL_LIST_THRESHOLD
+        assert app._virtual_list is not None, "应启用虚拟列表"
+        # 经典滚动容器隐藏
+        assert not app._cluster_list.winfo_ismapped()
+
+    def test_slot_pool_bounded(self, app):
+        """修复R6：池化行数远小于总行数（只建可见区+缓冲）。"""
+        _run_many_clusters(app)
+        slots = app._virtual_list.slots
+        app.update()
+        assert len(slots) < 25, \
+            f"池行数应 <25（视口行数级别），实际 {len(slots)}"
+
+    def test_virtual_row_click_selects(self, app):
+        """修复R6：虚拟行点击选中 + 详情同步（池行复用后仍正确）。"""
+        _run_many_clusters(app)
+        app.update()
+        app._select_cluster(0)
+        slots = app._virtual_list.slots
+        # 点可见区第二行
+        target = next(s for s in slots if s["idx"] == 1)
+        target["summary"].event_generate("<Button-1>", x=3, y=2)
+        app.update()
+        assert app._selected_row == 1
+        assert "【错误摘要】" in app._detail_box.get("1.0", "end")
+
+    def test_virtual_scroll_reuses_slots(self, app):
+        """修复R6：滚动后池行复用到高索引（不新建控件）。"""
+        _run_many_clusters(app)
+        app.update()
+        before = len(app._virtual_list.slots)
+        app._virtual_list._canvas.yview_moveto(1.0)
+        app.update()
+        after = len(app._virtual_list.slots)
+        assert after <= before + 1, "滚动不应显著增加池行数"
+        max_idx = max(s["idx"] for s in
+                      app._virtual_list.slots if s["idx"] >= 0)
+        assert max_idx >= len(app._displayed) - 5, \
+            "滚动到底应显示尾部行"
+
+    def test_small_list_keeps_classic_mode(self, app):
+        """修复R6：小列表（<=阈值）保持经典 CTk 滚动列表。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        assert app._virtual_list is None
+        assert len(app._cluster_rows) == 2
+
+    def test_selected_highlight_on_virtual_row(self, app):
+        """修复R6：虚拟行选中态蓝色高亮（与未选中区分）。"""
+        _run_many_clusters(app)
+        app.update()
+        app._select_cluster(1)
+        app.update()
+        slots = {s["idx"]: s for s in app._virtual_list.slots}
+        if 1 in slots and 2 in slots:
+            sel = str(slots[1]["frame"].cget("bg"))
+            normal = str(slots[2]["frame"].cget("bg"))
+            assert sel != normal, "选中/未选中背景应区分"
+
+    def test_virtual_list_survives_theme_switch(self, app):
+        """修复R6：虚拟模式下主题切换刷新配色不崩溃。"""
+        _run_many_clusters(app)
+        app.update()
+        app._apply_theme_switch("blue")
+        app.update()
+        app._apply_theme_switch("dark")
+        app.update()
+        assert app._virtual_list is not None
+
+
+class TestFullscreenReuse:
+    def _open_fs(self, app):
+        app._open_list_fullscreen()
+        for _ in range(20):
+            app.update()
+            time.sleep(0.005)
+        return app._fs_list_win
+
+    def test_fullscreen_window_reused(self, app):
+        """修复R6：二次打开复用同一窗口对象（withdraw 而非销毁）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        win1 = self._open_fs(app)
+        assert win1 is not None and win1.winfo_exists()
+        win1.event_generate("<Escape>")
+        app.update()
+        assert not win1.winfo_ismapped(), "ESC 后窗口应隐藏"
+        app._open_list_fullscreen()
+        app.update()
+        assert app._fs_list_win is win1, "二次打开应复用窗口对象"
+        assert win1.winfo_ismapped(), "复用后窗口应可见"
+        win1.destroy()
+        app.update()
+
+    def test_detail_fullscreen_window_reused(self, app):
+        """修复R6：详情全屏窗口同样预创建复用。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app._select_cluster(0)
+        app.update()
+        app._open_detail_fullscreen()
+        app.update()
+        win1 = app._fs_detail_win
+        assert win1 is not None and win1.winfo_exists()
+        box = app._fs_detail_box
+        assert "【错误摘要】" in box.get("1.0", "end")
+        win1.event_generate("<Escape>")
+        app.update()
+        assert not win1.winfo_ismapped()
+        # 换一个簇再打开：内容刷新且窗口复用
+        app._select_cluster(1) if len(app._displayed) > 1 else None
+        app._open_detail_fullscreen()
+        app.update()
+        assert app._fs_detail_win is win1
+        assert win1.winfo_ismapped()
+        win1.destroy()
+        app.update()
+
+    def test_fs_rows_native_lightweight(self, app):
+        """修复R6：全屏列表行为原生 tk 控件（无内部 Canvas 开销）。"""
+        _run_many_clusters(app)
+        win = self._open_fs(app)
+        try:
+            native_labels = [w for w in _all_widgets(win)
+                             if w.winfo_class() == "Label"
+                             and "ERROR" in str(w.cget("text"))]
+            assert native_labels, "全屏行应为原生 Label"
+            canvases = [w for w in _all_widgets(win)
+                        if w.winfo_class() == "Canvas"]
+            # Canvas 仅来自 CTk 框架控件（搜索框/按钮/滚动条/详情框
+            # ≈11 个，与行数无关）；57 行若用 CTk 行会有 100+ Canvas
+            assert len(canvases) <= 12, \
+                f"行控件不应引入大量 Canvas，实际 {len(canvases)}"
+        finally:
+            win.destroy()
+            app.update()
+
+    def test_open_fullscreen_callback_fast(self, app):
+        """修复R6：全屏按钮回调 <300ms（首批渲染异步，窗口先显示）。"""
+        _run_many_clusters(app)
+        t0 = time.perf_counter()
+        app._open_list_fullscreen()
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        try:
+            assert elapsed_ms < 300, \
+                f"全屏回调应 <300ms，实际 {elapsed_ms:.0f}ms"
+        finally:
+            if app._fs_list_win is not None:
+                app._fs_list_win.destroy()
+                app.update()
 
 
 # ---------------------------------------------------------------------------

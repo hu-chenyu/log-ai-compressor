@@ -132,6 +132,9 @@ _THEME_ALIASES = {"dark": "dark", "light": "light", "blue": "blue",
 _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
                "Traceback")
 
+# 修复缺陷R6：主列表虚拟滚动阈值（超过则切换池化虚拟渲染）
+VIRTUAL_LIST_THRESHOLD = 40
+
 # 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7/R5）
 # 修复缺陷R5：业务栈帧提亮加粗更明显；系统库折叠提示独立配色更清晰
 _DETAIL_TAG_COLORS = {"kw": "#ff6b6b", "bstack": "#fbbf24",
@@ -325,6 +328,195 @@ class Tooltip:
             self._tip = None
 
 
+class VirtualClusterList:
+    """主错误列表虚拟滚动容器（修复缺陷R6）。
+
+    背景：CTk 复合控件（Frame/Label 各含内部 Canvas）创建开销大，
+    Top N 调大后一次性渲染数百行明显卡顿。
+
+    设计：
+    - 只为「可见区域 + 缓冲」创建行控件（池化），控件数量与列表
+      长度无关；滚动时把池内行重新绑定到不同数据索引（复用控件）；
+    - 行使用原生 tk 控件（无内部 Canvas，创建开销约为 CTk 的 1/5）；
+    - 固定行高（头部 15 加粗 + 摘要最多 3 行 13 号），摘要超长截断
+      （完整内容在右侧详情面板查看）。
+    """
+
+    ROW_HEIGHT = 96        # 固定行高（px）
+    BUFFER = 2             # 视口上下缓冲行数（快速滚动不露白）
+    SUMMARY_CLIP = 100     # 虚拟模式摘要截断字符数
+
+    def __init__(self, host, app):
+        self._app = app
+        self._host = host
+        self._data: List[ErrorCluster] = []
+        self._slots: List[dict] = []      # 行控件池
+        self._hovered = -1
+        p = app._palette()
+        self._canvas = tk.Canvas(host, highlightthickness=0,
+                                 bg=p["window"], yscrollincrement=48,
+                                 width=470, height=400)
+        self._vbar = tk.Scrollbar(host, orient="vertical",
+                                  command=self._scroll_cmd)
+        self._canvas.configure(yscrollcommand=self._on_yscroll)
+        host.grid_columnconfigure(0, weight=1)
+        host.grid_rowconfigure(0, weight=1)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        self._vbar.grid(row=0, column=1, sticky="ns")
+        self._canvas.bind("<Configure>", lambda e: self._sync())
+        self._canvas.bind("<Enter>", lambda e: self._bind_wheel())
+        self._canvas.bind("<Leave>", lambda e: self._unbind_wheel())
+
+    # ------------------------------------------------------------------
+    # 数据 / 生命周期
+    # ------------------------------------------------------------------
+    def set_data(self, data: List[ErrorCluster]) -> None:
+        """设置列表数据并回到顶部。"""
+        self._data = data
+        self._hovered = -1
+        self._canvas.configure(scrollregion=(0, 0, 0,
+                                             len(data) * self.ROW_HEIGHT))
+        self._canvas.yview_moveto(0.0)
+        self._sync()
+
+    def destroy(self) -> None:
+        """销毁虚拟列表（切回经典模式 / 重新分析时）。"""
+        self._unbind_wheel()
+        for slot in self._slots:
+            try:
+                slot["frame"].destroy()
+            except tk.TclError:
+                pass
+        self._slots = []
+        try:
+            self._canvas.destroy()
+            self._vbar.destroy()
+        except tk.TclError:
+            pass
+
+    def apply_palette(self) -> None:
+        """主题切换：画布底色 + 可见行重刷（fill 时取最新调色板）。"""
+        try:
+            self._canvas.configure(bg=self._app._palette()["window"])
+        except (tk.TclError, ValueError):
+            pass
+        self._sync()
+
+    @property
+    def slots(self) -> List[dict]:
+        return self._slots
+
+    # ------------------------------------------------------------------
+    # 滚动
+    # ------------------------------------------------------------------
+    def _scroll_cmd(self, *args) -> None:
+        self._canvas.yview(*args)
+
+    def _on_yscroll(self, first, last) -> None:
+        self._vbar.set(first, last)
+        self._sync()
+
+    def _bind_wheel(self) -> None:
+        self._canvas.bind_all("<MouseWheel>", self._on_wheel)
+
+    def _unbind_wheel(self) -> None:
+        try:
+            self._canvas.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
+
+    def _on_wheel(self, event) -> None:
+        steps = -int(event.delta / 120) * 2   # 每 2 单位 ≈ 1 行
+        self._canvas.yview_scroll(steps, "units")
+
+    # ------------------------------------------------------------------
+    # 池化渲染核心
+    # ------------------------------------------------------------------
+    def _sync(self) -> None:
+        """把池内行对齐到当前可见索引区间（滚动/resize 时复用）。"""
+        if not self._data:
+            return
+        height = self._canvas.winfo_height()
+        if height < 10:                       # 布局未完成
+            return
+        width = max(200, self._canvas.winfo_width() - 12)
+        top = self._canvas.canvasy(0)
+        first = max(0, int(top // self.ROW_HEIGHT) - self.BUFFER)
+        need = int(height // self.ROW_HEIGHT) + 2 * self.BUFFER + 1
+        last = min(len(self._data), first + need)
+        # 池按需增长（只增不减，控件全程复用）
+        while len(self._slots) < (last - first):
+            self._slots.append(self._make_slot(width))
+        for i, slot in enumerate(self._slots):
+            idx = first + i
+            if idx < last:
+                self._fill_slot(slot, idx, width)
+            else:
+                try:
+                    self._canvas.itemconfigure(slot["win"], state="hidden")
+                except tk.TclError:
+                    pass
+
+    def _make_slot(self, width: int) -> dict:
+        """创建一个池化行（原生 tk 控件，创建后长期复用）。"""
+        p = self._app._palette()
+        frame = tk.Frame(self._canvas, bg=p["row_bg"], bd=0,
+                         highlightthickness=0)
+        head = tk.Label(frame, anchor="w", font=self._app._font_row_head,
+                        bg=p["row_bg"], fg=p["row_text"])
+        head.pack(fill="x", padx=(10, 10), pady=(8, 2))
+        summary = tk.Label(frame, anchor="w", justify="left",
+                           font=self._app._font_row_summary,
+                           wraplength=width - 24,
+                           bg=p["row_bg"], fg=p["row_text"])
+        summary.pack(fill="x", padx=(10, 4), pady=(2, 9))
+        win = self._canvas.create_window(0, 0, window=frame,
+                                         anchor="nw", width=width)
+        return {"frame": frame, "head": head, "summary": summary,
+                "win": win, "idx": -1, "virtual": True}
+
+    def _fill_slot(self, slot: dict, idx: int, width: int) -> None:
+        """池行填充数据索引 idx（复用控件，仅改文本/颜色/绑定）。"""
+        app = self._app
+        cluster = self._data[idx]
+        p = app._palette()
+        states = app._row_states()
+        if idx == app._selected_row:
+            bg = states["selected"]
+        elif idx == self._hovered:
+            bg = states["hover"]
+        else:
+            bg = states["bg"]
+        head_color = app._row_color(cluster) or p["row_text"]
+        slot["idx"] = idx
+        try:
+            slot["frame"].configure(bg=bg)
+            slot["head"].configure(
+                bg=bg, fg=head_color, text=app._row_text(cluster))
+            slot["summary"].configure(
+                bg=bg, fg=p["row_text"],
+                text=app._clip(cluster.summary, self.SUMMARY_CLIP),
+                wraplength=max(200, width - 24))
+            self._canvas.itemconfigure(slot["win"], state="normal",
+                                       width=width)
+            self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
+            # 重新绑定到当前数据索引（池行复用后索引变化）
+            for w in (slot["frame"], slot["head"], slot["summary"]):
+                w.bind("<Button-1>",
+                       lambda e, i=idx: app._select_cluster(i))
+                w.bind("<Enter>",
+                       lambda e, i=idx: self._hover(i, True))
+                w.bind("<Leave>",
+                       lambda e, i=idx: self._hover(i, False))
+        except (tk.TclError, ValueError):
+            pass
+
+    def _hover(self, idx: int, hovered: bool) -> None:
+        self._hovered = idx if hovered else -1
+        # 复用 app 的行悬停绘制（含选中态保持逻辑）
+        self._app._hover_row(idx, hovered)
+
+
 class LogCompressorApp(_make_app_base()):
     """日志AI压缩器主窗口。"""
 
@@ -366,6 +558,13 @@ class LogCompressorApp(_make_app_base()):
         self._cancel_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._chart_window: Optional[ctk.CTkToplevel] = None
+        # 修复缺陷R6：虚拟列表 / 全屏窗口预创建缓存
+        self._virtual_list: Optional[VirtualClusterList] = None
+        self._fs_list_win: Optional[ctk.CTkToplevel] = None
+        self._fs_list_refresh = None          # 全屏列表内容刷新回调
+        self._fs_list_sig: Optional[tuple] = None    # 已渲染数据签名
+        self._fs_detail_win: Optional[ctk.CTkToplevel] = None
+        self._fs_detail_box: Optional[ctk.CTkTextbox] = None
 
         # 修复缺陷R1：主题调色板登记表（切换时按角色批量刷新）
         self._bg_widgets: List[tuple] = []       # (控件, "window"/"card"/"header")
@@ -636,11 +835,17 @@ class LogCompressorApp(_make_app_base()):
         self._detail_fs_btn.grid(row=0, column=2, padx=(6, 0), sticky="e")
         self._accent_buttons.append((self._detail_fs_btn, "accent"))
 
+        # 修复缺陷R6：列表宿主容器（经典滚动 / 虚拟滚动两模式切换）
+        self._list_host = ctk.CTkFrame(panel, fg_color="transparent")
+        self._list_host.grid(row=1, column=0, sticky="nsw", padx=(10, 4),
+                             pady=(2, 8))
+        self._list_host.grid_columnconfigure(0, weight=1)
+        self._list_host.grid_rowconfigure(0, weight=1)
+        self._bg_widgets.append((self._list_host, "window"))
         # 修复缺陷R2：列表宽度加大（更大字体需要更宽可视区）
-        self._cluster_list = ctk.CTkScrollableFrame(panel, width=470)
-        self._cluster_list.grid(row=1, column=0, sticky="nsw", padx=(10, 4),
-                                pady=(2, 8))
-        self._bg_widgets.append((self._cluster_list, "window"))
+        self._cluster_list = ctk.CTkScrollableFrame(self._list_host,
+                                                    width=470)
+        self._cluster_list.grid(row=0, column=0, sticky="nsew")
         # 修复缺陷R5：详情字体放大到 13（摘要/堆栈/上下文更易读）
         self._detail_box = ctk.CTkTextbox(
             panel, font=ctk.CTkFont(family="Consolas", size=13), wrap="none")
@@ -922,6 +1127,10 @@ class LogCompressorApp(_make_app_base()):
 
     def _refresh_row_colors(self) -> None:
         """主题切换后刷新列表行配色（原生 tk.Label 不随 CTk 主题）。"""
+        # 修复缺陷R6：虚拟模式由虚拟列表自刷（池行原生控件配色）
+        if self._virtual_list is not None:
+            self._virtual_list.apply_palette()
+            return
         rows = getattr(self, "_cluster_rows", ())
         if not rows:
             return
@@ -986,8 +1195,7 @@ class LogCompressorApp(_make_app_base()):
         self._result = None
         self._compare_results = []
         self._displayed = []
-        for child in self._cluster_list.winfo_children():
-            child.destroy()
+        self._clear_list()
         self._detail_box.configure(state="normal")
         self._detail_box.delete("1.0", "end")
         self._detail_box.configure(state="disabled")
@@ -1101,27 +1309,46 @@ class LogCompressorApp(_make_app_base()):
         if self._displayed:
             self._select_cluster(0)
 
+    def _clear_list(self) -> None:
+        """清空左侧列表（销毁虚拟模式 / 经典行，恢复经典滚动容器）。"""
+        # 修复缺陷R6：虚拟列表销毁 + 经典容器恢复
+        if self._virtual_list is not None:
+            self._virtual_list.destroy()
+            self._virtual_list = None
+        if _widget_alive(self._cluster_list):
+            self._cluster_list.grid()          # grid_remove 后恢复
+            for child in self._cluster_list.winfo_children():
+                child.destroy()
+        self._cluster_rows = []
+
     def _render_cluster_list(self) -> None:
         """左侧错误列表：Top N 行（图标/优先级/次数行 + 自动换行摘要行）。
 
         修复缺陷：原单行 CTkButton 长文本溢出右侧且无横向滚动能力，
         改为摘要自动换行（wraplength 随列表宽度自适应），内容完整可见。
+        修复缺陷R6：行数超过 VIRTUAL_LIST_THRESHOLD 切换虚拟滚动
+        （池化复用可见区行控件，列表长度不再影响渲染耗时）。
         """
         assert self._result is not None
         n = self._current_top_n()
         self._displayed = self._result.clusters[:n]
-        for child in self._cluster_list.winfo_children():
-            child.destroy()
+        self._clear_list()
         # 清理随列表销毁的动态 muted 标签（防登记表无限累积）
         self._muted_labels = [
             w for w in self._muted_labels
             if not hasattr(w, "winfo_exists") or _widget_alive(w)]
-        self._cluster_rows = []
         self._selected_row = -1
         if not self._displayed:
             empty = ctk.CTkLabel(self._cluster_list, text="未发现符合条件的错误")
             empty.pack(pady=20)
             self._muted_labels.append(empty)
+            return
+        # 修复缺陷R6：大列表走虚拟滚动（控件池只建可见区行数）
+        if len(self._displayed) > VIRTUAL_LIST_THRESHOLD:
+            self._cluster_list.grid_remove()
+            self._virtual_list = VirtualClusterList(self._list_host, self)
+            self._cluster_rows = self._virtual_list.slots
+            self._virtual_list.set_data(self._displayed)
             return
         for idx, cluster in enumerate(self._displayed):
             self._make_cluster_row(self._cluster_list, idx, cluster)
@@ -1141,7 +1368,8 @@ class LogCompressorApp(_make_app_base()):
                           register: bool = True,
                           on_select=None, on_hover=None,
                           font_head=None, font_summary=None,
-                          on_toggle=None) -> dict:
+                          on_toggle=None,
+                          native: bool = False) -> dict:
         """构建单条错误行（主列表与全屏列表复用，修复缺陷#7）。
 
         修复缺陷R2：字体放大（头部 15 加粗 / 摘要 13）、行距加大、
@@ -1149,6 +1377,9 @@ class LogCompressorApp(_make_app_base()):
         修复缺陷R4：font_head/font_summary 覆盖字体（全屏 16/14）；
         on_toggle 提供时行首渲染「▶ ×N」可点击展开按钮（次数从
         行首元信息移入按钮）。
+        修复缺陷R6：native=True 全原生 tk 控件（全屏列表用）——
+        CTk 复合控件每行 4 个内部 Canvas 约 20ms/行，57 行全量
+        渲染卡 4.5s；原生行约 8ms/行且无内部 Canvas。
 
         摘要使用原生 tk.Label：wraplength 超限即折行（含超长
         单词的字符级折行），长 token（超长路径 / 哈希串）完整可见。
@@ -1158,11 +1389,58 @@ class LogCompressorApp(_make_app_base()):
             on_select / on_hover: 自定义回调（全屏窗口联动高亮用）
         """
         p = self._palette()
+        f_head = font_head or self._font_row_head
+        f_sum = font_summary or self._font_row_summary
+        toggle = None
+        if native:
+            # 全原生行（全屏列表）：bg/fg 直取调色板
+            frame = tk.Frame(parent, bg=p["row_bg"], bd=0,
+                             highlightthickness=0)
+            frame.pack(fill="x", padx=5, pady=4)
+            if on_toggle is not None:
+                link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
+                line = tk.Frame(frame, bg=p["row_bg"], bd=0,
+                                highlightthickness=0)
+                line.pack(fill="x", padx=(10, 10), pady=(8, 2))
+                toggle = tk.Label(
+                    line, text=f"\u25b6 \u00d7{cluster.count}",
+                    font=f_head, bg=p["row_bg"], fg=link,
+                    cursor="hand2")
+                toggle.pack(side="left", padx=(0, 10))
+                head = tk.Label(
+                    line, text=self._row_text(cluster, with_count=False),
+                    anchor="w", font=f_head, bg=p["row_bg"],
+                    fg=self._row_color(cluster) or p["row_text"])
+                head.pack(side="left", fill="x", expand=True)
+                self._bind_row_events((toggle,), on_toggle,
+                                      lambda hovered: None)
+            else:
+                head = tk.Label(
+                    frame, text=self._row_text(cluster), anchor="w",
+                    font=f_head, bg=p["row_bg"],
+                    fg=self._row_color(cluster) or p["row_text"])
+                head.pack(fill="x", padx=(10, 10), pady=(8, 2))
+            summary = tk.Label(
+                frame, text=cluster.summary, anchor="w", justify="left",
+                wraplength=400, font=f_sum,
+                bg=p["row_bg"], fg=p["row_text"])
+            summary.pack(fill="x", padx=(10, 4), pady=(2, 9))
+            select_cb = on_select or (lambda: self._select_cluster(idx))
+            hover_cb = on_hover or (
+                lambda hovered: self._hover_row(idx, hovered))
+            self._bind_row_events((frame, head, summary), select_cb,
+                                  hover_cb)
+            row = {"frame": frame, "summary": summary, "idx": idx,
+                   "native": True}
+            if toggle is not None:
+                row["toggle"] = toggle
+            if register:
+                self._cluster_rows.append(row)
+            return row
         # 修复缺陷R2：行距/内边距加大（大字体下行高充足不拥挤）
         frame = ctk.CTkFrame(parent, corner_radius=6,
                              fg_color=p["row_bg"])
         frame.pack(fill="x", padx=5, pady=4)
-        toggle = None
         if on_toggle is not None:
             # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
             link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
@@ -1170,14 +1448,13 @@ class LogCompressorApp(_make_app_base()):
             line.pack(fill="x", padx=(10, 10), pady=(8, 2))
             toggle = ctk.CTkLabel(
                 line, text=f"\u25b6 \u00d7{cluster.count}",
-                font=font_head or self._font_row_head,
-                text_color=link, cursor="hand2")
+                font=f_head, text_color=link, cursor="hand2")
             toggle.pack(side="left", padx=(0, 10))
             head = ctk.CTkLabel(
                 line, text=self._row_text(cluster, with_count=False),
                 anchor="w",
                 text_color=self._row_color(cluster) or None,
-                font=font_head or self._font_row_head)
+                font=f_head)
             head.pack(side="left", fill="x", expand=True)
             # 展开按钮独立绑定（不触发行选中）
             self._bind_row_events((toggle,), on_toggle,
@@ -1186,12 +1463,12 @@ class LogCompressorApp(_make_app_base()):
             head = ctk.CTkLabel(
                 frame, text=self._row_text(cluster), anchor="w",
                 text_color=self._row_color(cluster) or None,
-                font=font_head or self._font_row_head)
+                font=f_head)
             head.pack(fill="x", padx=(10, 10), pady=(8, 2))
         summary = tk.Label(
             frame, text=cluster.summary, anchor="w", justify="left",
             wraplength=400,
-            font=font_summary or self._font_row_summary,
+            font=f_sum,
             bg=p["row_bg"], fg=p["row_text"])
         summary.pack(fill="x", padx=(10, 4), pady=(2, 9))
         select_cb = on_select or (lambda: self._select_cluster(idx))
@@ -1257,10 +1534,27 @@ class LogCompressorApp(_make_app_base()):
             target.bind("<Leave>", lambda e: set_hover(False))
 
     def _apply_row_bg(self, idx: int, color) -> None:
-        """统一更新行背景（CTkFrame + 原生摘要标签同步）。"""
-        row = self._cluster_rows[idx]
-        row["frame"].configure(fg_color=color)
-        row["summary"].configure(bg=self._resolve_row_color(color))
+        """统一更新行背景（经典 CTk 行 / 虚拟池化行都支持）。
+
+        修复缺陷R6：虚拟模式下行池控件为原生 tk 控件（bg 而非
+        fg_color），且池位置与数据索引不再一一对应——按 idx 字段
+        查找目标行。
+        """
+        resolved = self._resolve_row_color(color)
+        for row in self._cluster_rows:
+            if row.get("idx") != idx:
+                continue
+            try:
+                if row.get("virtual"):
+                    row["frame"].configure(bg=resolved)
+                    row["head"].configure(bg=resolved)
+                    row["summary"].configure(bg=resolved)
+                else:
+                    row["frame"].configure(fg_color=color)
+                    row["summary"].configure(bg=resolved)
+            except (tk.TclError, ValueError):
+                continue
+            return
 
     def _on_list_resize(self, event) -> None:
         """列表宽度变化 -> 自适应摘要换行宽度（保持内容完整可见）。"""
@@ -1588,10 +1882,8 @@ class LogCompressorApp(_make_app_base()):
                                       f"{self._CMP_SYMBOL[kind]}"}
 
     def _render_compare_list(self) -> None:
-        """左侧对比差异列表（新增/消失/共同 全量渲染）。"""
-        for child in self._cluster_list.winfo_children():
-            child.destroy()
-        self._cluster_rows = []
+        """左侧对比差异列表（新增/消失/共同 全量渲染，经典模式）。"""
+        self._clear_list()
         self._selected_row = -1
         if not self._compare_results:
             ctk.CTkLabel(self._cluster_list,
@@ -1732,8 +2024,38 @@ class LogCompressorApp(_make_app_base()):
         if not self._displayed and not compare_mode:
             messagebox.showinfo("提示", "请先完成一次分析再使用全屏")
             return
-        win = self._make_fullscreen_window("错误分类列表" if not compare_mode
-                                           else "对比差异列表")
+        if compare_mode:
+            # 对比模式结构不同（无簇/实例概念）：独立窗口，每次新建
+            self._open_compare_fullscreen()
+            return
+        # 修复缺陷R6：全屏窗口预创建复用 —— 首次创建后 withdraw 隐藏，
+        # 二次打开仅 deiconify（数据签名变化时才重渲染列表内容）
+        win = self._fs_list_win
+        if win is None or not win.winfo_exists():
+            win = self._build_fs_list_window()
+        else:
+            win.deiconify()
+            try:
+                win.state("zoomed")        # 恢复最大化（个别环境丢失）
+            except tk.TclError:
+                pass
+            # 数据未变则跳过重渲染（复用已有行控件）
+            sig = (id(self._result), len(self._displayed),
+                   self._current_top_n())
+            if sig != self._fs_list_sig and callable(self._fs_list_refresh):
+                self._fs_list_refresh()
+                self._fs_list_sig = sig
+        win.after(60, win.focus_set)
+
+    def _build_fs_list_window(self) -> ctk.CTkToplevel:
+        """构建（并缓存）错误分类列表全屏窗口（修复缺陷R6）。"""
+        win = self._make_fullscreen_window("错误分类列表")
+        self._fs_list_win = win
+        # 隐藏而非销毁：ESC / 关闭按钮返回主界面但保留窗口复用
+        def hide() -> None:
+            win.withdraw()
+        win.bind("<Escape>", lambda e: hide())
+
         bar = ctk.CTkFrame(win, corner_radius=0)
         bar.pack(fill="x")
         ctk.CTkLabel(bar, text="搜索：").pack(side="left", padx=(12, 4))
@@ -1744,49 +2066,7 @@ class LogCompressorApp(_make_app_base()):
         count_label = ctk.CTkLabel(bar, text="", text_color="#8fa4b8")
         count_label.pack(side="right", padx=12)
         ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
-                      command=win.destroy).pack(side="right", padx=(0, 12))
-        if compare_mode:
-            # 图例常驻顶栏（对比模式）
-            ctk.CTkLabel(bar,
-                         text="+ 新增  - 消失  = 共同",
-                         text_color="#8fa4b8").pack(side="right", padx=12)
-
-        if compare_mode:
-            # 对比模式：保持原单栏差异列表（无簇/实例概念）
-            list_area = ctk.CTkScrollableFrame(win)
-            list_area.pack(fill="both", expand=True)
-            fs_rows: List[dict] = []
-
-            def render_compare(keyword: str = "") -> None:
-                kw = keyword.strip().lower()
-                for child in list_area.winfo_children():
-                    child.destroy()
-                fs_rows.clear()
-                shown = 0
-                total = 0
-                for kind, cmp, item in self._iter_compare_rows():
-                    total += 1
-                    hay = (f"{item.summary} {item.level} {item.module} "
-                           f"{self._CMP_SYMBOL[kind]}").lower()
-                    if kw and kw not in hay:
-                        continue
-                    if total > 500:
-                        continue
-                    shown += 1
-                    fs_rows.append(
-                        self._make_compare_row(list_area, kind, cmp, item))
-                count_label.configure(text=f"显示 {shown} / {total} 条")
-
-            def on_resize_cmp(event) -> None:
-                wrap = max(240, event.width - 60)
-                for row in fs_rows:
-                    row["summary"].configure(wraplength=wrap)
-
-            search_var.trace_add(
-                "write", lambda *a: render_compare(search_var.get()))
-            list_area.bind("<Configure>", on_resize_cmp)
-            render_compare()
-            return
+                      command=hide).pack(side="right", padx=(0, 12))
 
         # ---------------- 常规模式：左右分栏 ----------------
         body = ctk.CTkFrame(win, fg_color="transparent")
@@ -1813,17 +2093,31 @@ class LogCompressorApp(_make_app_base()):
         self._apply_detail_tags(fs_detail)
 
         fs_rows: List[dict] = []
+        render_jobs: List[str] = []        # 分批渲染的挂起任务（重过滤时取消）
         expanded: Dict[int, dict] = {}     # idx -> 展开状态（实例标签等）
         p = self._palette()
         inst_bg = p["row_hover"]           # 实例行底色（与簇行区分）
         selected_inst: Dict[str, object] = {"label": None}
 
         def paint_row(idx: int, color) -> None:
+            resolved = self._resolve_row_color(color)
+
+            def paint_native(widget) -> None:
+                # 原生行递归刷背景（frame/line/head/toggle/summary）
+                try:
+                    widget.configure(bg=resolved)
+                except (tk.TclError, ValueError):
+                    pass
+                for child in widget.winfo_children():
+                    paint_native(child)
+
             for row in fs_rows:
                 if row["idx"] == idx:
-                    row["frame"].configure(fg_color=color)
-                    row["summary"].configure(
-                        bg=self._resolve_row_color(color))
+                    if row.get("native"):
+                        paint_native(row["frame"])
+                    else:
+                        row["frame"].configure(fg_color=color)
+                        row["summary"].configure(bg=resolved)
 
         def fs_select(idx: int) -> None:
             # 联动主界面详情 + 全屏窗口内高亮（主题调色板配色）
@@ -1832,9 +2126,7 @@ class LogCompressorApp(_make_app_base()):
             for row in fs_rows:
                 color = (states["selected"] if row["idx"] == idx
                          else states["bg"])
-                row["frame"].configure(fg_color=color)
-                row["summary"].configure(
-                    bg=self._resolve_row_color(color))
+                paint_row(row["idx"], color)
             _fill_fs_cluster(idx)
 
         def _fill_fs_cluster(idx: int) -> None:
@@ -1955,31 +2247,60 @@ class LogCompressorApp(_make_app_base()):
             add_batch()
 
         def render(keyword: str = "") -> None:
+            """渲染匹配行（修复缺陷R6：分批渐进创建，打开即响应）。
+
+            CTk 复合控件创建开销大（每行含 2 个 Canvas），57 行全量
+            一次性创建实测 4.5s 卡死窗口。改为每批 20 行、12ms 间隔
+            渐进创建：窗口即刻可用，剩余行后台补齐。
+            """
             kw = keyword.strip().lower()
+            # 取消上一轮挂起的批次（重新过滤 / 窗口复用刷新）
+            for job in render_jobs:
+                try:
+                    win.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+            render_jobs.clear()
             for child in list_area.winfo_children():
                 child.destroy()
             fs_rows.clear()
             expanded.clear()
             _clear_inst_selection()
-            shown = 0
+            matched = []
             for idx, cluster in enumerate(self._displayed):
                 hay = (f"{cluster.summary} {cluster.module} "
                        f"{cluster.level} {cluster.priority_label}").lower()
                 if kw and kw not in hay:
                     continue
-                shown += 1
-                states = self._row_states()
-                fs_rows.append(
-                    self._make_cluster_row(
-                        list_area, idx, cluster, register=False,
-                        on_select=lambda i=idx: fs_select(i),
-                        on_hover=lambda hovered, i=idx: paint_row(
-                            i, states["hover"] if hovered else states["bg"]),
-                        font_head=self._font_fs_head,
-                        font_summary=self._font_fs_summary,
-                        on_toggle=lambda i=idx: toggle_expand(i)))
+                matched.append((idx, cluster))
+            total = len(matched)
+            states = self._row_states()
+            prog = {"pos": 0}
+            # 匹配计数同步更新（过滤即时反馈，不等异步批次）
             count_label.configure(
-                text=f"显示 {shown} / {len(self._displayed)} 条")
+                text=f"显示 {total} / {len(self._displayed)} 条")
+
+            def add_batch() -> None:
+                batch = matched[prog["pos"]:prog["pos"] + 20]
+                for idx, cluster in batch:
+                    # 修复缺陷R6：全屏行用原生控件（8ms/行 vs CTk 20ms/行）
+                    fs_rows.append(
+                        self._make_cluster_row(
+                            list_area, idx, cluster, register=False,
+                            native=True,
+                            on_select=lambda i=idx: fs_select(i),
+                            on_hover=lambda hovered, i=idx: paint_row(
+                                i, states["hover"] if hovered
+                                else states["bg"]),
+                            font_head=self._font_fs_head,
+                            font_summary=self._font_fs_summary,
+                            on_toggle=lambda i=idx: toggle_expand(i)))
+                prog["pos"] += len(batch)
+                if prog["pos"] < total:
+                    render_jobs.append(win.after(12, add_batch))
+
+            # 首批也异步：窗口 deiconify 后即刻可见（点击响应 <300ms）
+            render_jobs.append(win.after(1, add_batch))
 
         def on_resize(event) -> None:
             wrap = max(240, event.width - 90)
@@ -1989,28 +2310,85 @@ class LogCompressorApp(_make_app_base()):
         # 文本变化即过滤（trace 不依赖键盘事件，无焦点也可靠触发）
         search_var.trace_add("write", lambda *a: render(search_var.get()))
         list_area.bind("<Configure>", on_resize)
+        # 修复缺陷R6：登记刷新回调 + 数据签名（数据未变时跳过重渲染）
+        self._fs_list_refresh = render
+        self._fs_list_sig = (id(self._result), len(self._displayed),
+                             self._current_top_n())
         render()
+        return win
+
+    def _open_compare_fullscreen(self) -> None:
+        """对比差异列表全屏（独立窗口，每次新建后销毁）。"""
+        win = self._make_fullscreen_window("对比差异列表")
+        bar = ctk.CTkFrame(win, corner_radius=0)
+        bar.pack(fill="x")
+        ctk.CTkLabel(bar, text="搜索：").pack(side="left", padx=(12, 4))
+        search_var = tk.StringVar()
+        search = ctk.CTkEntry(bar, textvariable=search_var,
+                              placeholder_text="按摘要 / 模块 / 级别过滤…")
+        search.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
+        count_label = ctk.CTkLabel(bar, text="", text_color="#8fa4b8")
+        count_label.pack(side="right", padx=12)
+        ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
+                      command=win.destroy).pack(side="right", padx=(0, 12))
+        # 图例常驻顶栏（对比模式）
+        ctk.CTkLabel(bar, text="+ 新增  - 消失  = 共同",
+                     text_color="#8fa4b8").pack(side="right", padx=12)
+        list_area = ctk.CTkScrollableFrame(win)
+        list_area.pack(fill="both", expand=True)
+        fs_rows: List[dict] = []
+
+        def render_compare(keyword: str = "") -> None:
+            kw = keyword.strip().lower()
+            for child in list_area.winfo_children():
+                child.destroy()
+            fs_rows.clear()
+            shown = 0
+            total = 0
+            for kind, cmp, item in self._iter_compare_rows():
+                total += 1
+                hay = (f"{item.summary} {item.level} {item.module} "
+                       f"{self._CMP_SYMBOL[kind]}").lower()
+                if kw and kw not in hay:
+                    continue
+                if total > 500:
+                    continue
+                shown += 1
+                fs_rows.append(
+                    self._make_compare_row(list_area, kind, cmp, item))
+            count_label.configure(text=f"显示 {shown} / {total} 条")
+
+        def on_resize_cmp(event) -> None:
+            wrap = max(240, event.width - 60)
+            for row in fs_rows:
+                row["summary"].configure(wraplength=wrap)
+
+        search_var.trace_add(
+            "write", lambda *a: render_compare(search_var.get()))
+        list_area.bind("<Configure>", on_resize_cmp)
+        render_compare()
 
     def _open_detail_fullscreen(self) -> None:
-        """详情面板全屏：完整详情 + 上下左右滚动（高亮一并复制）。"""
+        """详情面板全屏：完整详情 + 上下左右滚动（高亮一并复制）。
+
+        修复缺陷R6：窗口预创建复用（隐藏而非销毁，二次打开仅刷新）。
+        """
         content = self._detail_box.get("1.0", "end").rstrip("\n")
         if not content:
             messagebox.showinfo("提示", "请先选择一个错误查看详情")
             return
-        win = self._make_fullscreen_window("错误详情")
-        bar = ctk.CTkFrame(win, corner_radius=0)
-        bar.pack(fill="x")
-        ctk.CTkLabel(bar, text="错误详情（典型样例 · 上下文 · 降噪堆栈 · "
-                               "支持上下左右滚动）").pack(side="left", padx=12)
-        ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
-                      command=win.destroy).pack(side="right", padx=12, pady=8)
-        box = ctk.CTkTextbox(win, font=ctk.CTkFont(family="Consolas",
-                                                   size=13), wrap="none")
-        # 水平滚动条（垂直滚动条 CTkTextbox 自带）
-        xbar = tk.Scrollbar(win, orient="horizontal", command=box.xview)
-        box.configure(xscrollcommand=xbar.set)
-        xbar.pack(side="bottom", fill="x")
-        box.pack(fill="both", expand=True, pady=(0, 4))
+        win = self._fs_detail_win
+        if win is None or not win.winfo_exists():
+            win = self._fs_detail_win = self._build_fs_detail_window()
+        else:
+            win.deiconify()
+            try:
+                win.state("zoomed")
+            except tk.TclError:
+                pass
+        box = self._fs_detail_box
+        box.configure(state="normal")
+        box.delete("1.0", "end")
         box.insert("1.0", content)
         # 复制主面板的高亮标签配置与范围（内容一致 -> 索引一致）
         for tag, color in _DETAIL_TAG_COLORS.items():
@@ -2022,6 +2400,30 @@ class LogCompressorApp(_make_app_base()):
             except (tk.TclError, AttributeError):
                 pass
         box.configure(state="disabled")
+        win.after(60, win.focus_set)
+
+    def _build_fs_detail_window(self) -> ctk.CTkToplevel:
+        """构建（并缓存）详情全屏窗口（修复缺陷R6）。"""
+        win = self._make_fullscreen_window("错误详情")
+        # 隐藏而非销毁：ESC / 关闭返回主界面但保留窗口复用
+        def hide() -> None:
+            win.withdraw()
+        win.bind("<Escape>", lambda e: hide())
+        bar = ctk.CTkFrame(win, corner_radius=0)
+        bar.pack(fill="x")
+        ctk.CTkLabel(bar, text="错误详情（典型样例 · 上下文 · 降噪堆栈 · "
+                               "支持上下左右滚动）").pack(side="left", padx=12)
+        ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
+                      command=hide).pack(side="right", padx=12, pady=8)
+        box = ctk.CTkTextbox(win, font=ctk.CTkFont(family="Consolas",
+                                                   size=13), wrap="none")
+        # 水平滚动条（垂直滚动条 CTkTextbox 自带）
+        xbar = tk.Scrollbar(win, orient="horizontal", command=box.xview)
+        box.configure(xscrollcommand=xbar.set)
+        xbar.pack(side="bottom", fill="x")
+        box.pack(fill="both", expand=True, pady=(0, 4))
+        self._fs_detail_box = box
+        return win
 
     # ==================================================================
     # 状态切换 / 退出
@@ -2055,6 +2457,20 @@ class LogCompressorApp(_make_app_base()):
 
     def _on_close(self) -> None:
         self._save_config()
+        # 修复缺陷R6：清理虚拟列表与全屏缓存窗口（释放控件/句柄）
+        self._fs_list_refresh = None
+        for win in (self._fs_list_win, self._fs_detail_win,
+                    self._chart_window):
+            if win is not None:
+                try:
+                    win.destroy()
+                except (tk.TclError, ValueError):
+                    pass
+        self._fs_list_win = None
+        self._fs_detail_win = None
+        if self._virtual_list is not None:
+            self._virtual_list.destroy()
+            self._virtual_list = None
         self.destroy()
 
 
