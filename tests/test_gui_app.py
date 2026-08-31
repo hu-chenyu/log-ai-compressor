@@ -225,22 +225,39 @@ class TestClusterListWrap:
                         .winfo_children()[0].cget("text"))
         assert "TAIL" not in head_text
 
-    def test_wraplength_adapts_to_width(self, app):
+    def test_summary_single_line_no_wrap(self, app):
+        """修复R9：摘要单行不换行（wraplength=0），长内容靠水平滚动。"""
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         app.update()
-        width = app._cluster_list.winfo_width()
-        if width > 100:  # 窗口已布局
-            for row in app._cluster_rows:
-                assert int(row["summary"].cget("wraplength")) >= 240
-
-    def test_row_content_not_clipped(self, app):
-        """修复验证：摘要标签请求宽度不超列表可视宽度（不再溢出裁剪）。"""
-        _run_paste_analysis(app, LONG_SUMMARY_LOG)
-        app.update()
-        # 换行后摘要的请求宽度应受 wraplength 约束
         for row in app._cluster_rows:
-            assert row["summary"].winfo_reqwidth() <= \
-                int(row["summary"].cget("wraplength")) + 40
+            assert int(row["summary"].cget("wraplength")) == 0, \
+                "摘要应取消自动换行（wraplength=0 单行显示）"
+
+    def test_horizontal_scrollbar_covers_wide_content(self, app):
+        """修复R9：长摘要不换行后，水平滚动区域覆盖完整内容宽度。"""
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app.update()
+        canvas = app._cluster_list._parent_canvas
+        region = str(canvas.cget("scrollregion")).split()
+        assert len(region) == 4, "scrollregion 应已设置"
+        region_w = int(region[2])
+        # 行 1 摘要极长（>100 字符），内容宽应超出视口（可水平滚动）
+        widest = max(r["summary"].winfo_reqwidth()
+                     for r in app._cluster_rows)
+        assert region_w >= widest, \
+            f"滚动区域宽 {region_w} 应 ≥ 摘要完整宽 {widest}"
+
+    def test_classic_hbar_wired_and_mapped(self, app):
+        """修复R9：经典列表底部水平滚动条存在且与画布双向联动。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        hbar = app._list_hbar
+        assert hbar is not None and hbar.winfo_ismapped(), \
+            "列表底部应有水平滚动条"
+        canvas = app._cluster_list._parent_canvas
+        # 画布 xscrollcommand 已接滚动条（set 回调非空）
+        assert str(canvas.cget("xscrollcommand")) != "", \
+            "画布 xscrollcommand 应接入水平滚动条"
 
     def test_selection_highlight(self, app):
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
@@ -322,89 +339,185 @@ class TestClusterListWrap:
         restored = frame.cget("fg_color")
         assert hovered != base and restored == base
 
-    def test_long_word_wraps_not_overflow(self, app):
-        """超长无空格 token（哈希/路径）也按字符折行，不横向溢出。"""
+    def test_long_word_single_line_horizontal(self, app):
+        """修复R9：超长 token 不再折行（单行），水平滚动查看完整内容。"""
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         app.update()
         row = app._cluster_rows[1]
-        assert row["summary"].winfo_reqwidth() <= \
-            int(row["summary"].cget("wraplength")) + 40
+        assert int(row["summary"].cget("wraplength")) == 0
+        # 单行摘要高度应只含一行文字（大字体下约 40-60px 逻辑）
+        assert row["summary"].winfo_height() < 120, \
+            f"摘要应为单行（实际高度 {row['summary'].winfo_height()}px）"
 
 
 # ---------------------------------------------------------------------------
-# 修复R7：错误分类列表宽度对齐 + 字体放大（主列表 / 虚拟列表 / 全屏一致）
+# 修复R7/R9：列表宽度对齐 + 字体放大 + 水平滚动 + 高度布局
 # ---------------------------------------------------------------------------
 class TestClusterListFontAndWidth:
     def test_main_list_font_sizes(self, app):
-        """修复R8：主列表字体实际大小——头部 19 加粗 / 摘要 16。"""
-        assert int(app._font_row_head.cget("size")) == 19
+        """修复R9：主列表字体标称大小——头部 22 加粗 / 摘要 18。"""
+        assert int(app._font_row_head.cget("size")) == 22
         assert str(app._font_row_head.cget("weight")) == "bold"
-        assert int(app._font_row_summary.cget("size")) == 16
+        assert int(app._font_row_summary.cget("size")) == 18
         # 底层 tk 命名字体的实际像素尺寸（CTkFont 用负数表示像素）
         head_tk = tkfont.Font(root=app, name=str(app._font_row_head),
                               exists=True)
         sum_tk = tkfont.Font(root=app, name=str(app._font_row_summary),
                              exists=True)
-        assert int(head_tk.cget("size")) == -19
-        assert int(sum_tk.cget("size")) == -16
+        assert int(head_tk.cget("size")) == -22
+        assert int(sum_tk.cget("size")) == -18
 
     def test_fullscreen_list_font_sizes(self, app):
-        """修复R8：全屏列表字体实际大小——头部 20 加粗 / 摘要 17。"""
-        assert int(app._font_fs_head.cget("size")) == 20
+        """修复R9：全屏列表字体标称大小——头部 24 加粗 / 摘要 20。"""
+        assert int(app._font_fs_head.cget("size")) == 24
         assert str(app._font_fs_head.cget("weight")) == "bold"
-        assert int(app._font_fs_summary.cget("size")) == 17
+        assert int(app._font_fs_summary.cget("size")) == 20
+
+    def test_summary_font_dpi_scaled(self, app):
+        """修复R9：摘要字体随 DPI 缩放（渲染比例与头部一致）。
+
+        原生 tk.Label 直传 CTkFont 命名字体不参与缩放，高 DPI 屏上
+        渲染偏小（修复前摘要/头部渲染比例 ≈ 18/22/scale）。
+        """
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        row = app._cluster_rows[0]
+        head = row["frame"].winfo_children()[0]
+        inner = [c for c in head.winfo_children()
+                 if c.winfo_class() == "Label"][0]
+        head_size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
+        sum_size = int(
+            tkfont.Font(font=row["summary"].cget("font")).cget("size"))
+        ratio = sum_size / max(1, head_size)
+        assert abs(ratio - 18 / 22) < 0.06, \
+            f"摘要/头部渲染比例 {ratio:.3f} 应 ≈ 18/22（均含 DPI 缩放）"
 
     def test_classic_row_uses_enlarged_fonts(self, app):
-        """修复R8：经典模式行控件直接使用放大后的共享字体对象。"""
+        """修复R9：经典模式头部使用共享字体对象，摘要渲染字号匹配。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
         head = app._cluster_rows[0]["frame"].winfo_children()[0]
         assert isinstance(head, ctk.CTkLabel)
         assert head.cget("font") is app._font_row_head
-        assert str(app._cluster_rows[0]["summary"].cget("font")) == \
-            str(app._font_row_summary)
+        inner = [c for c in head.winfo_children()
+                 if c.winfo_class() == "Label"][0]
+        head_size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
+        sum_size = int(tkfont.Font(
+            font=app._cluster_rows[0]["summary"].cget("font")).cget("size"))
+        assert abs(sum_size / max(1, head_size) - 18 / 22) < 0.06
 
     def test_virtual_row_fonts_match_classic(self, app):
-        """修复R8：虚拟模式（>40 行）与经典模式字体一致（同一共享字体）。"""
+        """修复R9：虚拟模式与经典模式渲染字号完全一致（含 DPI 缩放）。"""
+        # 经典模式先取样
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        classic_head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        inner = [c for c in classic_head.winfo_children()
+                 if c.winfo_class() == "Label"][0]
+        classic_head_size = tkfont.Font(
+            font=inner.cget("font")).cget("size")
+        classic_sum_size = tkfont.Font(
+            font=app._cluster_rows[0]["summary"].cget("font")).cget("size")
+        # 虚拟模式取样
         _run_many_clusters(app)
         app.update()
         assert app._virtual_list is not None, "60 簇应启用虚拟列表"
         slot = app._virtual_list.slots[0]
-        assert str(slot["head"].cget("font")) == str(app._font_row_head)
-        assert str(slot["summary"].cget("font")) == \
-            str(app._font_row_summary)
+        vh = tkfont.Font(font=slot["head"].cget("font"))
+        vs = tkfont.Font(font=slot["summary"].cget("font"))
+        assert abs(int(vh.cget("size")) - int(classic_head_size)) <= 1, \
+            "虚拟/经典头部渲染字号应一致"
+        assert abs(int(vs.cget("size")) - int(classic_sum_size)) <= 1, \
+            "虚拟/经典摘要渲染字号应一致"
 
-    def test_virtual_row_height_enlarged(self, app):
-        """修复R8：虚拟行高随字体放大（容纳 19 头部 + 多行 16 摘要）。"""
-        from log_ai_compressor.gui.app import VirtualClusterList
-        assert VirtualClusterList.ROW_HEIGHT >= 125, \
-            "行高应容纳放大后的头部与两行摘要"
+    def test_virtual_row_height_fits_fonts(self, app):
+        """修复R9：虚拟行高按实际字体度量计算（容纳头部+摘要单行）。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = app._virtual_list
+        assert vl is not None
+        head_ls = tkfont.Font(
+            font=vl.slots[0]["head"].cget("font")).metrics("linespace")
+        sum_ls = tkfont.Font(
+            font=vl.slots[0]["summary"].cget("font")).metrics("linespace")
+        assert vl.ROW_HEIGHT >= head_ls + sum_ls, \
+            f"行高 {vl.ROW_HEIGHT} 应 ≥ 头部{head_ls}+摘要{sum_ls}行距"
 
     def test_fullscreen_rows_use_fs_fonts(self, app):
-        """修复R8：全屏列表行实际使用全屏字体（头部 20 / 摘要 17）。"""
+        """修复R9：全屏列表行实际使用全屏字体（头部 24 / 摘要 20，含缩放）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
+        # 经典头部渲染字号取样（作为 22 号基准）
+        classic_head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        c_inner = [c for c in classic_head.winfo_children()
+                   if c.winfo_class() == "Label"][0]
+        classic_size = int(
+            tkfont.Font(font=c_inner.cget("font")).cget("size"))
         app._open_list_fullscreen()
         for _ in range(20):
             app.update()
             time.sleep(0.005)
         win = app._fs_list_win
         assert win is not None and win.winfo_exists()
-        fonts_in_use = set()
-
-        def walk(widget):
-            for child in widget.winfo_children():
-                try:
-                    fonts_in_use.add(str(child.cget("font")))
-                except (tk.TclError, ValueError):
-                    pass    # CTkFrame 等不支持 font 属性的控件跳过
-                walk(child)
-
-        walk(win)
-        assert str(app._font_fs_head) in fonts_in_use, \
-            "全屏行头部应使用 20 号加粗字体"
-        assert str(app._font_fs_summary) in fonts_in_use, \
-            "全屏行摘要应使用 17 号字体"
+        # 全屏行（原生 tk.Label）头部含级别文本；其渲染字号应 ≈ 24 号
+        #（经典 22 号基准 × 24/22，同一缩放系数）
+        heads = [w for w in _all_widgets(win)
+                 if isinstance(w, tk.Label)
+                 and ("ERROR" in str(w.cget("text"))
+                      or "FATAL" in str(w.cget("text")))]
+        assert heads, "全屏窗口应有行头部标签"
+        fs_size = int(
+            tkfont.Font(font=heads[0].cget("font")).cget("size"))
+        assert abs(fs_size - classic_size * 24 / 22) <= 2, \
+            f"全屏头部渲染 {fs_size} 应 ≈ 经典 {classic_size}×24/22"
         win.event_generate("<Escape>")
         app.update()
+
+    def test_virtual_hbar_and_mode_switch(self, app):
+        """修复R9：虚拟模式有独立水平滚动条，经典 hbar 隐藏，销毁后恢复。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = app._virtual_list
+        assert vl is not None
+        assert vl._hbar.winfo_ismapped(), "虚拟模式应有水平滚动条"
+        assert not app._list_hbar.winfo_ismapped(), \
+            "虚拟模式下经典 hbar 应隐藏"
+        # 长摘要数据：水平滚动区域应加宽（内容宽超视口）
+        canvas = vl._canvas
+        region = str(canvas.cget("scrollregion")).split()
+        assert int(region[2]) >= max(vl._content_w, canvas.winfo_width()) - 2
+        # 切回经典（重新分析小数据）：经典 hbar 恢复显示
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        assert app._virtual_list is None
+        assert app._list_hbar.winfo_ismapped(), \
+            "切回经典模式后经典 hbar 应恢复"
+
+    def test_default_window_height_upgraded(self, app):
+        """修复R9：默认窗口高度升级为 1000（容纳大字体与 6 行可视）。"""
+        assert int(app._config.get("window", {}).get("height", 0)) >= 1000
+
+    def test_list_shows_six_rows_at_default_height(self, app):
+        """修复R9：1000 逻辑高默认窗口下列表可视行数 ≥6。
+
+        屏幕不够高时窗口会被 WM 钳制（无法直接渲染验证），改用实测
+        行距与固定区域高度做数学验证（逻辑单位，DPI 无关）。
+        """
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        rows = app._cluster_rows
+        if len(rows) < 2:
+            pytest.skip("行数不足")
+        pitch = (rows[1]["frame"].winfo_rooty()
+                 - rows[0]["frame"].winfo_rooty())
+        canvas = app._cluster_list._parent_canvas
+        if pitch < 10 or canvas.winfo_height() < 60:
+            pytest.skip("窗口未完成布局")
+        scale = max(1.0, app._font_scale)
+        # 固定区域高度（逻辑）：窗口高 - 列表画布高
+        fixed = app.winfo_height() / scale - canvas.winfo_height() / scale
+        rows_at_1000 = int((1000 - fixed) / (pitch / scale))
+        assert rows_at_1000 >= 6, \
+            f"1000 逻辑高窗口应显示 ≥6 行（实际 {rows_at_1000}，" \
+            f"行距 {pitch / scale:.1f} 逻辑px，固定区 {fixed:.0f} 逻辑px）"
 
     def test_list_right_edge_aligns_with_fullscreen_button(self, app):
         """修复R7：列表右缘（含滚动条）与「全屏」按钮右缘严格对齐。"""
@@ -427,17 +540,6 @@ class TestClusterListFontAndWidth:
         list_w = app._cluster_list.winfo_width()
         assert list_w >= 0.9 * host_w, \
             f"列表宽 {list_w}px 应占宿主宽 {host_w}px 的 90% 以上"
-
-    def test_summary_wraplength_uses_full_list_width(self, app):
-        """修复R7：摘要初始换行宽度按列表实际宽度计算（不再固定 400 早折行）。"""
-        _run_paste_analysis(app, SAMPLE_PASTE)
-        app.update()
-        width = app._cluster_list.winfo_width()
-        if width <= 100:
-            pytest.skip("窗口未完成布局")
-        wrap = int(app._cluster_rows[0]["summary"].cget("wraplength"))
-        assert wrap >= width - 80, \
-            f"换行宽 {wrap}px 应接近列表宽 {width}px（充分利用加宽空间）"
 
 
 # ---------------------------------------------------------------------------
