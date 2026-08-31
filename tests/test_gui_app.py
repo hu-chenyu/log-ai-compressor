@@ -375,8 +375,6 @@ class TestPerformanceOptimizations:
         """行级字体必须共享复用：防止跨线程 GC 析构导致 Tkinter 死锁。"""
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         assert len(app._cluster_rows) >= 2
-        # 所有行引用同一字体对象（无每行新建）
-        fonts = {id(row["summary"].cget("font")) for row in app._cluster_rows}
         # tk.Label cget('font') 返回字体名；底层共享通过 app 字段验证
         assert app._font_row_summary is not None
         assert app._font_row_head is not None
@@ -577,7 +575,6 @@ class TestTooltipR3:
 
     def test_tooltip_light_bg_dark_text(self, app):
         """修复R3：tooltip 白底深字（视觉清晰）。"""
-        from log_ai_compressor.gui.app import Tooltip
         tip = app._sample_help_tooltip
         tip._show()
         app.update()
@@ -820,7 +817,6 @@ class TestFullscreenView:
         rows = [w for w in _all_widgets(win)
                 if isinstance(w, ctk.CTkFrame) and w.winfo_children()]
         # 触发行 1 的点击（通过事件绑定）——直接调用绑定回调
-        canvases = [w for w in _all_widgets(win) if w.winfo_class() == "Canvas"]
         # 行 frame 的第一个可点击子控件
         clickables = []
         for f in rows:
@@ -1027,7 +1023,6 @@ class TestFullscreenExpand:
     def test_instances_data_available(self, app):
         """数据层：簇实例全量记录（count == len(instances)）。"""
         _run_paste_analysis(app, REPEAT_LOG)
-        clusters = {c.summary[:30]: c for c in app._displayed}
         db = max(app._displayed, key=lambda c: c.count)
         assert db.count == 12
         assert len(db.instances) == 12
