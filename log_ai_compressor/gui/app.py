@@ -18,6 +18,7 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox
 from typing import Dict, List, Optional
 
@@ -338,11 +339,14 @@ class VirtualClusterList:
     - 只为「可见区域 + 缓冲」创建行控件（池化），控件数量与列表
       长度无关；滚动时把池内行重新绑定到不同数据索引（复用控件）；
     - 行使用原生 tk 控件（无内部 Canvas，创建开销约为 CTk 的 1/5）；
-    - 固定行高（修复缺陷R8：头部 19 加粗 + 摘要最多 3 行 16 号），
-      摘要超长截断（完整内容在右侧详情面板查看）。
+    - 固定行高（修复缺陷R9：头部 22 加粗 + 摘要单行 18 号不换行），
+      摘要超长截断（完整内容在右侧详情面板查看）；
+    - 修复缺陷R9：水平滚动 —— 摘要单行完整显示，内容自然宽度
+      超过视口时画布横向扩展（xscrollcommand 接底部水平滚动条，
+      Shift+滚轮横向滚动）。
     """
 
-    ROW_HEIGHT = 135       # 固定行高（px）（修复缺陷R8：大字体行距加大的行高）
+    ROW_HEIGHT = 138       # 类默认（实际在 __init__ 按字体度量动态计算）
     BUFFER = 2             # 视口上下缓冲行数（快速滚动不露白）
     SUMMARY_CLIP = 100     # 虚拟模式摘要截断字符数
 
@@ -352,48 +356,101 @@ class VirtualClusterList:
         self._data: List[ErrorCluster] = []
         self._slots: List[dict] = []      # 行控件池
         self._hovered = -1
+        self._content_w = 600             # 数据内容自然宽（水平滚动区域宽）
+        # 修复缺陷R9：行高按实际渲染字体度量动态计算（DPI 无关，
+        # 与经典模式行高一致：头部行距 + 摘要行距 + 行内边距/间隙）
+        try:
+            self._m_head = tkfont.Font(
+                font=app._scaled_font(app._font_row_head))
+            self._m_sum = tkfont.Font(
+                font=app._scaled_font(app._font_row_summary))
+            self.ROW_HEIGHT = (self._m_head.metrics("linespace")
+                               + self._m_sum.metrics("linespace") + 44)
+        except (tk.TclError, ValueError):
+            self._m_head = app._font_row_head
+            self._m_sum = app._font_row_summary
         p = app._palette()
-        # 修复缺陷R8：滚动步进随行高等比放大（135 的一半）
+        # 修复缺陷R9：滚动步进随行高走（每 2 单位 ≈ 1 行）
         self._canvas = tk.Canvas(host, highlightthickness=0,
-                                 bg=p["window"], yscrollincrement=68,
+                                 bg=p["window"],
+                                 yscrollincrement=max(1, self.ROW_HEIGHT // 2),
+                                 xscrollincrement=60,
                                  width=470, height=400)
-        self._vbar = tk.Scrollbar(host, orient="vertical",
-                                  command=self._scroll_cmd)
-        self._canvas.configure(yscrollcommand=self._on_yscroll)
+        # 修复缺陷R9：垂直/水平滚动条统一用 CTkScrollbar（与整体 UI 风格一致）
+        self._vbar = ctk.CTkScrollbar(host, orientation="vertical",
+                                      command=self._scroll_cmd)
+        self._hbar = ctk.CTkScrollbar(host, orientation="horizontal",
+                                      height=14, command=self._canvas.xview)
+        self._canvas.configure(yscrollcommand=self._on_yscroll,
+                               xscrollcommand=self._on_xscroll)
         host.grid_columnconfigure(0, weight=1)
         host.grid_rowconfigure(0, weight=1)
         self._canvas.grid(row=0, column=0, sticky="nsew")
         self._vbar.grid(row=0, column=1, sticky="ns")
-        self._canvas.bind("<Configure>", lambda e: self._sync())
-        self._canvas.bind("<Enter>", lambda e: self._bind_wheel())
-        self._canvas.bind("<Leave>", lambda e: self._unbind_wheel())
+        self._hbar.grid(row=1, column=0, sticky="ew")
+        # 修复缺陷R9：视口尺寸变化 -> 更新水平滚动区域并重对齐池行
+        # （scrollregion 变更会经 yscrollcommand 回流 _on_yscroll ->
+        # _sync，_sync 内不再改 scrollregion 且带重入护栏，防事件循环）
+        self._in_sync = False
+        self._canvas.bind("<Configure>", self._on_canvas_resize)
+        # 修复缺陷R9（顺带修复既有缺陷）：滚轮绑定挂在画布与池内行控件
+        # 自身而非 bind_all —— bind_all 会覆盖 CTkScrollableFrame 的全局
+        # 滚轮处理，虚拟模式销毁后经典列表滚轮失效；控件级绑定随控件
+        # 销毁自动解除，无此问题。Shift+滚轮横向滚动。
+        self._canvas.bind("<MouseWheel>", self._on_wheel)
+        self._canvas.bind("<Shift-MouseWheel>", self._on_wheel_h)
 
     # ------------------------------------------------------------------
     # 数据 / 生命周期
     # ------------------------------------------------------------------
     def set_data(self, data: List[ErrorCluster]) -> None:
-        """设置列表数据并回到顶部。"""
+        """设置列表数据并回到顶部（含水平内容宽测量）。"""
         self._data = data
         self._hovered = -1
-        self._canvas.configure(scrollregion=(0, 0, 0,
-                                             len(data) * self.ROW_HEIGHT))
+        # 修复缺陷R9：内容自然宽（摘要单行不换行后的完整像素宽）
+        self._content_w = self._measure_width(data)
+        self._update_region()
         self._canvas.yview_moveto(0.0)
+        self._canvas.xview_moveto(0.0)
         self._sync()
+
+    def _measure_width(self, data: List[ErrorCluster]) -> int:
+        """全部行的最大文本像素宽（按实际渲染的缩放字体度量）。"""
+        need = 0
+        for cluster in data:
+            need = max(
+                need,
+                self._m_sum.measure(
+                    self._app._clip(cluster.summary, self.SUMMARY_CLIP)),
+                self._m_head.measure(self._app._row_text(cluster)))
+        return need + 44          # 行内左右边距
+
+    def _region_w(self) -> int:
+        """水平滚动区域宽：内容自然宽与视口宽取大（整行高亮需占满视口）。"""
+        try:
+            view_w = self._canvas.winfo_width()
+        except tk.TclError:
+            view_w = 0
+        return max(self._content_w, view_w, 200)
+
+    def _update_region(self) -> None:
+        self._canvas.configure(
+            scrollregion=(0, 0, self._region_w(),
+                          len(self._data) * self.ROW_HEIGHT))
 
     def destroy(self) -> None:
         """销毁虚拟列表（切回经典模式 / 重新分析时）。"""
-        self._unbind_wheel()
         for slot in self._slots:
             try:
                 slot["frame"].destroy()
             except tk.TclError:
                 pass
         self._slots = []
-        try:
-            self._canvas.destroy()
-            self._vbar.destroy()
-        except tk.TclError:
-            pass
+        for w in (self._canvas, self._vbar, self._hbar):
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
 
     def apply_palette(self) -> None:
         """主题切换：画布底色 + 可见行重刷（fill 时取最新调色板）。"""
@@ -417,63 +474,89 @@ class VirtualClusterList:
         self._vbar.set(first, last)
         self._sync()
 
-    def _bind_wheel(self) -> None:
-        self._canvas.bind_all("<MouseWheel>", self._on_wheel)
+    def _on_xscroll(self, first, last) -> None:
+        self._hbar.set(first, last)
 
-    def _unbind_wheel(self) -> None:
-        try:
-            self._canvas.unbind_all("<MouseWheel>")
-        except tk.TclError:
-            pass
+    def _on_canvas_resize(self, event) -> None:
+        """视口尺寸变化：更新水平滚动区域宽（内容窄时区域=视口宽）。"""
+        self._update_region()
+        self._sync()
 
     def _on_wheel(self, event) -> None:
         steps = -int(event.delta / 120) * 2   # 每 2 单位 ≈ 1 行
         self._canvas.yview_scroll(steps, "units")
 
+    def _on_wheel_h(self, event) -> None:
+        # 修复缺陷R9：Shift+滚轮横向滚动（单行长摘要左右查看）
+        self._canvas.xview_scroll(-int(event.delta / 120) * 3, "units")
+
+    def _bind_row_wheel(self, *widgets) -> None:
+        """池内行控件挂滚轮绑定（Tk 事件不冒泡）。"""
+        for w in widgets:
+            w.bind("<MouseWheel>", self._on_wheel)
+            w.bind("<Shift-MouseWheel>", self._on_wheel_h)
+
     # ------------------------------------------------------------------
     # 池化渲染核心
     # ------------------------------------------------------------------
     def _sync(self) -> None:
-        """把池内行对齐到当前可见索引区间（滚动/resize 时复用）。"""
-        if not self._data:
+        """把池内行对齐到当前可见索引区间（滚动/resize 时复用）。
+
+        修复缺陷R9：带重入护栏 —— _on_yscroll 会回调本方法，若本方法
+        再触发滚动回调（scrollregion/yview 变化）会形成事件循环死锁。
+        """
+        if self._in_sync or not self._data:
             return
         height = self._canvas.winfo_height()
         if height < 10:                       # 布局未完成
             return
-        width = max(200, self._canvas.winfo_width() - 12)
-        top = self._canvas.canvasy(0)
-        first = max(0, int(top // self.ROW_HEIGHT) - self.BUFFER)
-        need = int(height // self.ROW_HEIGHT) + 2 * self.BUFFER + 1
-        last = min(len(self._data), first + need)
-        # 池按需增长（只增不减，控件全程复用）
-        while len(self._slots) < (last - first):
-            self._slots.append(self._make_slot(width))
-        for i, slot in enumerate(self._slots):
-            idx = first + i
-            if idx < last:
-                self._fill_slot(slot, idx, width)
-            else:
-                try:
-                    self._canvas.itemconfigure(slot["win"], state="hidden")
-                except tk.TclError:
-                    pass
+        self._in_sync = True
+        try:
+            # 修复缺陷R9：行宽 = 水平滚动区域宽（内容超宽时行随之加宽，
+            # 整行高亮与点击区域覆盖全部内容）
+            width = self._region_w()
+            top = self._canvas.canvasy(0)
+            first = max(0, int(top // self.ROW_HEIGHT) - self.BUFFER)
+            need = int(height // self.ROW_HEIGHT) + 2 * self.BUFFER + 1
+            last = min(len(self._data), first + need)
+            # 池按需增长（只增不减，控件全程复用）
+            while len(self._slots) < (last - first):
+                self._slots.append(self._make_slot(width))
+            for i, slot in enumerate(self._slots):
+                idx = first + i
+                if idx < last:
+                    self._fill_slot(slot, idx, width)
+                else:
+                    try:
+                        self._canvas.itemconfigure(slot["win"], state="hidden")
+                    except tk.TclError:
+                        pass
+        finally:
+            self._in_sync = False
 
     def _make_slot(self, width: int) -> dict:
         """创建一个池化行（原生 tk 控件，创建后长期复用）。"""
         p = self._app._palette()
         frame = tk.Frame(self._canvas, bg=p["row_bg"], bd=0,
                          highlightthickness=0)
-        head = tk.Label(frame, anchor="w", font=self._app._font_row_head,
+        # 修复缺陷R9：头部/摘要字体均施加与经典模式 CTkLabel 一致的
+        # DPI 缩放（原生 tk.Label 不缩放命名字体，直接传会偏小/不一致）
+        head = tk.Label(frame, anchor="w",
+                        font=self._app._scaled_font(self._app._font_row_head),
                         bg=p["row_bg"], fg=p["row_text"])
-        # 修复缺陷R8：头部/摘要行距加大（大字体下不拥挤）
-        head.pack(fill="x", padx=(10, 10), pady=(12, 6))
+        head.pack(fill="x", padx=(10, 10), pady=(7, 2))
+        # 修复缺陷R9：摘要单行不换行（wraplength=0），长摘要靠水平滚动查看
         summary = tk.Label(frame, anchor="w", justify="left",
-                           font=self._app._font_row_summary,
-                           wraplength=width - 24,
+                           font=self._app._scaled_font(
+                               self._app._font_row_summary),
+                           wraplength=0,
                            bg=p["row_bg"], fg=p["row_text"])
-        summary.pack(fill="x", padx=(10, 4), pady=(6, 12))
+        summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
+        # 窗口项高度锁 ROW_HEIGHT：整行高亮覆盖完整行（无残留缝隙）
         win = self._canvas.create_window(0, 0, window=frame,
-                                         anchor="nw", width=width)
+                                         anchor="nw", width=width,
+                                         height=self.ROW_HEIGHT)
+        self._bind_row_wheel(frame, head, summary)
         return {"frame": frame, "head": head, "summary": summary,
                 "win": win, "idx": -1, "virtual": True}
 
@@ -497,10 +580,10 @@ class VirtualClusterList:
                 bg=bg, fg=head_color, text=app._row_text(cluster))
             slot["summary"].configure(
                 bg=bg, fg=p["row_text"],
-                text=app._clip(cluster.summary, self.SUMMARY_CLIP),
-                wraplength=max(200, width - 24))
+                text=app._clip(cluster.summary, self.SUMMARY_CLIP))
             self._canvas.itemconfigure(slot["win"], state="normal",
-                                       width=width)
+                                       width=width,
+                                       height=self.ROW_HEIGHT)
             self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
             # 重新绑定到当前数据索引（池行复用后索引变化）
             for w in (slot["frame"], slot["head"], slot["summary"]):
@@ -532,11 +615,27 @@ class LogCompressorApp(_make_app_base()):
         super().__init__()
 
         window = self._config.get("window", {})
+        # 修复缺陷R9：默认窗口高度 840→1000 —— 840 逻辑高无法同时容纳
+        # 22/18 号列表字体与 6 行可视错误（6 行纯文本即约 470px）；对
+        # 旧配置一次性升级（标志位防止覆盖用户后续手动调整）。
+        if not self._config.get("window_h_upgraded"):
+            if int(window.get("height", 840)) < 900:
+                window["height"] = 1000
+                self._config["window"] = window
+            self._config["window_h_upgraded"] = True
         self.title(f"{HUMAN_NAME}  v{__version__}")
         width = window.get("width", 1280)
-        height = window.get("height", 840)
+        height = window.get("height", 1000)
         self.geometry(f"{width}x{height}")
         self.minsize(1000, 680)
+        # 修复缺陷R9：DPI 缩放系数 —— CTkLabel 对 CTkFont 自动施加控件
+        # 缩放，而行内摘要用原生 tk.Label（命名字体原样使用、不缩放），
+        # 高 DPI 屏上摘要实际渲染只有标称字号的 1/scale，偏小 —— 摘要
+        # 字体也需按同倍率换算为缩放元组（_scaled_font）。
+        try:
+            self._font_scale = ctk.ScalingTracker.get_widget_scaling(self)
+        except (AttributeError, tk.TclError):
+            self._font_scale = 1.0
 
         # 运行状态
         self._result: Optional[AnalysisResult] = None
@@ -547,15 +646,15 @@ class LogCompressorApp(_make_app_base()):
         self._queue: "queue.Queue" = queue.Queue()
         # 共享字体：行级字体必须复用（每行新建 CTkFont 会被 GC 在
         # 任意线程析构，tkinter.Font.__del__ 跨线程调用 Tk 造成死锁）
-        # 修复缺陷R8：列表字体继续放大（级别/次数 19 加粗，摘要 16）
-        self._font_row_head = ctk.CTkFont(family="Consolas", size=19,
+        # 修复缺陷R9：列表字体再放大（级别/次数 22 加粗，摘要 18）
+        self._font_row_head = ctk.CTkFont(family="Consolas", size=22,
                                           weight="bold")
-        self._font_row_summary = ctk.CTkFont(size=16)
+        self._font_row_summary = ctk.CTkFont(size=18)
         self._font_hint = ctk.CTkFont(size=12)
-        # 修复缺陷R8：全屏窗口字体同步放大（级别/次数 20 加粗，摘要 17）
-        self._font_fs_head = ctk.CTkFont(family="Consolas", size=20,
+        # 修复缺陷R9：全屏窗口字体同步放大（级别/次数 24 加粗，摘要 20）
+        self._font_fs_head = ctk.CTkFont(family="Consolas", size=24,
                                          weight="bold")
-        self._font_fs_summary = ctk.CTkFont(size=17)
+        self._font_fs_summary = ctk.CTkFont(size=20)
         self._font_fs_inst = ctk.CTkFont(size=13)
         self._cancel_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
@@ -591,6 +690,18 @@ class LogCompressorApp(_make_app_base()):
         """当前主题是否为暗色系（blue/green 视为亮色系）。"""
         return THEMES.get(self._theme, THEMES["dark"])["is_dark"] == "1"
 
+    def _scaled_font(self, font_obj):
+        """CTkFont -> 原生 tk.Label 字体（施加与 CTkLabel 一致的缩放）。
+
+        修复缺陷R9：经典/虚拟/全屏行的摘要为原生 tk.Label，直接传
+        CTkFont 命名字体不参与 DPI 缩放（高 DPI 屏渲染偏小），换算为
+        缩放元组后与 CTkLabel 渲染尺寸一致（经典/虚拟两种模式相同）。
+        """
+        try:
+            return font_obj.create_scaled_tuple(self._font_scale)
+        except (AttributeError, ValueError):
+            return font_obj
+
     # ==================================================================
     # UI 构建
     # ==================================================================
@@ -612,11 +723,11 @@ class LogCompressorApp(_make_app_base()):
         bar.grid_columnconfigure(1, weight=1)
         self._bg_widgets.append((bar, "header"))
         icon = ctk.CTkLabel(bar, text="🗂️", font=ctk.CTkFont(size=26))
-        icon.grid(row=0, column=0, padx=(16, 4), pady=10, sticky="w")
+        icon.grid(row=0, column=0, padx=(16, 4), pady=6, sticky="w")
         title = ctk.CTkLabel(
             bar, text=f"{HUMAN_NAME}  v{__version__}",
             font=ctk.CTkFont(size=20, weight="bold"))
-        title.grid(row=0, column=1, padx=(2, 6), pady=10, sticky="w")
+        title.grid(row=0, column=1, padx=(2, 6), pady=6, sticky="w")
         subtitle = ctk.CTkLabel(
             bar, text="海量日志压缩投喂大模型 · 快速故障排查",
             font=ctk.CTkFont(size=12))
@@ -631,7 +742,8 @@ class LogCompressorApp(_make_app_base()):
     # ------------------------------------------------------------------
     def _build_tabs(self) -> None:
         self._tabview = ctk.CTkTabview(self)
-        self._tabview.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 2))
+        # 修复缺陷R9：顶部区域压缩（结果区获得更大高度）
+        self._tabview.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 2))
         for name in ("文件导入", "文本粘贴", "多文件对比"):
             self._tabview.add(name)
         self._build_file_tab()
@@ -665,7 +777,7 @@ class LogCompressorApp(_make_app_base()):
         self._muted_labels.append(hint)
         # 修复缺陷#11：undo=False —— 大段粘贴时 undo 栈与 autoseparator
         # 会随粘贴体量膨胀（几万行日志可达数百 MB），关闭撤销换取内存稳定
-        self._paste_box = ctk.CTkTextbox(tab, height=170, undo=False,
+        self._paste_box = ctk.CTkTextbox(tab, height=100, undo=False,
                                          font=ctk.CTkFont(family="Consolas",
                                                           size=12))
         self._paste_box.grid(row=1, column=0, sticky="ew")
@@ -693,7 +805,8 @@ class LogCompressorApp(_make_app_base()):
     # ------------------------------------------------------------------
     def _build_config_panel(self) -> None:
         panel = ctk.CTkFrame(self)
-        panel.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
+        # 修复缺陷R9：顶部区域压缩（pady 4→3）
+        panel.grid(row=2, column=0, sticky="ew", padx=10, pady=3)
         self._bg_widgets.append((panel, "card"))
         for col in range(6):
             panel.grid_columnconfigure(col, weight=1)
@@ -711,29 +824,29 @@ class LogCompressorApp(_make_app_base()):
         self._include_entry = ctk.CTkEntry(panel, width=200,
                                            placeholder_text="包含关键字（逗号分隔）")
         self._include_entry.grid(row=1, column=0, columnspan=2, padx=(12, 6),
-                                 pady=(6, 8), sticky="ew")
+                                 pady=(4, 6), sticky="ew")
         self._exclude_entry = ctk.CTkEntry(panel, width=200,
                                            placeholder_text="排除关键字（逗号分隔）")
         self._exclude_entry.grid(row=1, column=2, columnspan=2, padx=6,
-                                 pady=(6, 8), sticky="ew")
+                                 pady=(4, 6), sticky="ew")
         ctk.CTkLabel(panel, text="Top N").grid(row=1, column=4, padx=(6, 2),
                                                sticky="e")
         self._topn_entry = ctk.CTkEntry(panel, width=60)
         self._topn_entry.insert(0, str(DEFAULT_TOP_N))
-        self._topn_entry.grid(row=1, column=5, padx=(2, 12), pady=(6, 8),
+        self._topn_entry.grid(row=1, column=5, padx=(2, 12), pady=(4, 6),
                               sticky="w")
 
         # 修复缺陷#5：上下文行数可调节输入框（5~200，默认 50）
         ctk.CTkLabel(panel, text="上下文行数").grid(
-            row=2, column=0, padx=(12, 2), pady=(0, 8), sticky="e")
+            row=2, column=0, padx=(12, 2), pady=(0, 6), sticky="e")
         self._ctx_entry = ctk.CTkEntry(panel, width=60)
         self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
-        self._ctx_entry.grid(row=2, column=1, padx=(2, 6), pady=(0, 8),
+        self._ctx_entry.grid(row=2, column=1, padx=(2, 6), pady=(0, 6),
                              sticky="w")
         ctx_hint = ctk.CTkLabel(
             panel, text="典型样例前后各保留的上下文行数（5~200）")
         ctx_hint.grid(row=2, column=2, columnspan=2, padx=(2, 6),
-                      pady=(0, 8), sticky="w")
+                      pady=(0, 6), sticky="w")
         self._muted_labels.append(ctx_hint)
 
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=6, padx=(6, 2),
@@ -753,28 +866,29 @@ class LogCompressorApp(_make_app_base()):
 
     def _build_action_panel(self) -> None:
         panel = ctk.CTkFrame(self)
-        panel.grid(row=3, column=0, sticky="ew", padx=10, pady=4)
+        # 修复缺陷R9：顶部区域压缩（pady 4→3，按钮高度 34→30）
+        panel.grid(row=3, column=0, sticky="ew", padx=10, pady=3)
         self._bg_widgets.append((panel, "card"))
         for col in range(7):
             panel.grid_columnconfigure(col, weight=1)
 
         self._start_btn = ctk.CTkButton(
             panel, text="开始分析", font=ctk.CTkFont(size=14, weight="bold"),
-            height=34, command=self._on_start)
-        self._start_btn.grid(row=0, column=0, padx=6, pady=8, sticky="ew")
+            height=30, command=self._on_start)
+        self._start_btn.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
         self._cancel_btn = ctk.CTkButton(
             panel, text="取消", state="disabled", fg_color="#7b3535",
-            hover_color="#94424a", command=self._on_cancel, height=34)
+            hover_color="#94424a", command=self._on_cancel, height=30)
         self._cancel_btn.grid(row=0, column=1, padx=6, sticky="ew")
         self._export_btn = ctk.CTkButton(panel, text="导出报告",
-                                         state="disabled", height=34,
+                                         state="disabled", height=30,
                                          command=self._on_export)
         self._export_btn.grid(row=0, column=2, padx=6, sticky="ew")
         self._copy_btn = ctk.CTkButton(panel, text="复制摘要", state="disabled",
-                                       height=34, command=self._on_copy_summary)
+                                       height=30, command=self._on_copy_summary)
         self._copy_btn.grid(row=0, column=3, padx=6, sticky="ew")
         self._chart_btn = ctk.CTkButton(panel, text="统计图表", state="disabled",
-                                        height=34, command=self._show_charts)
+                                        height=30, command=self._show_charts)
         self._chart_btn.grid(row=0, column=4, padx=6, sticky="ew")
         self._accent_buttons.append((self._start_btn, "accent"))
         self._accent_buttons.append((self._export_btn, "accent"))
@@ -792,12 +906,13 @@ class LogCompressorApp(_make_app_base()):
         self._muted_labels.append(self._progress_label)
         self._progress_bar = ctk.CTkProgressBar(progress_frame,
                                                 progress_color="#3B82F6")
-        self._progress_bar.grid(row=1, column=0, sticky="ew", pady=(2, 6))
+        self._progress_bar.grid(row=1, column=0, sticky="ew", pady=(2, 4))
         self._progress_bar.set(0)
 
     def _build_result_panel(self) -> None:
         panel = ctk.CTkFrame(self)
-        panel.grid(row=4, column=0, sticky="nsew", padx=10, pady=(4, 2))
+        # 修复缺陷R9：结果区上下留白压缩（列表/详情获得更大高度）
+        panel.grid(row=4, column=0, sticky="nsew", padx=10, pady=(2, 2))
         self._bg_widgets.append((panel, "card"))
         panel.grid_columnconfigure(0, weight=2)
         panel.grid_columnconfigure(1, weight=3)
@@ -805,7 +920,7 @@ class LogCompressorApp(_make_app_base()):
 
         # 修复缺陷#7：列表 / 详情标题行增加「全屏」按钮（独立最大化窗口）
         list_head = ctk.CTkFrame(panel, fg_color="transparent")
-        list_head.grid(row=0, column=0, padx=10, pady=(8, 2), sticky="ew")
+        list_head.grid(row=0, column=0, padx=10, pady=(4, 2), sticky="ew")
         list_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(list_head, text="错误分类列表（按优先级降序）",
                      font=ctk.CTkFont(size=13, weight="bold")).grid(
@@ -818,7 +933,7 @@ class LogCompressorApp(_make_app_base()):
 
         # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
         detail_head = ctk.CTkFrame(panel, fg_color="transparent")
-        detail_head.grid(row=0, column=1, padx=10, pady=(8, 2), sticky="ew")
+        detail_head.grid(row=0, column=1, padx=10, pady=(4, 2), sticky="ew")
         detail_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(detail_head, text="详情（典型样例 · 上下文 · 降噪堆栈）",
                      font=ctk.CTkFont(size=13, weight="bold")).grid(
@@ -837,18 +952,22 @@ class LogCompressorApp(_make_app_base()):
         self._detail_fs_btn.grid(row=0, column=2, padx=(6, 0), sticky="e")
         self._accent_buttons.append((self._detail_fs_btn, "accent"))
 
-        # 修复缺陷R6：列表宿主容器（经典滚动 / 虚拟滚动两模式切换）
+        # 修复缺陷R9：列表宿主容器（经典滚动 / 虚拟滚动两模式切换）
         self._list_host = ctk.CTkFrame(panel, fg_color="transparent")
         # 修复缺陷R7：宿主四向拉伸（sticky 补 e）+ 右边距 10 与
         # 全屏按钮右缘严格对齐，列表占满左列全部可用宽度（>90%）
+        # 修复缺陷R9：pady 压缩（2,8→2,4），列表可视高度更大
         self._list_host.grid(row=1, column=0, sticky="nsew", padx=(10, 10),
-                             pady=(2, 8))
+                             pady=(2, 4))
         self._list_host.grid_columnconfigure(0, weight=1)
         self._list_host.grid_rowconfigure(0, weight=1)
         self._bg_widgets.append((self._list_host, "window"))
         # 修复缺陷R7：去除固定 width=470（固定宽度导致右侧大量留白）
         self._cluster_list = ctk.CTkScrollableFrame(self._list_host)
         self._cluster_list.grid(row=0, column=0, sticky="nsew")
+        # 修复缺陷R9：水平滚动条（摘要单行不换行，左右滑动查看长摘要）
+        self._list_hbar = self._make_hscroll(self._cluster_list)
+        self._list_hbar.grid(row=1, column=0, sticky="ew")
         # 修复缺陷R5：详情字体放大到 13（摘要/堆栈/上下文更易读）
         self._detail_box = ctk.CTkTextbox(
             panel, font=ctk.CTkFont(family="Consolas", size=13), wrap="none")
@@ -856,6 +975,44 @@ class LogCompressorApp(_make_app_base()):
                               pady=(2, 8))
         self._bg_widgets.append((self._detail_box, "card"))
         self._setup_detail_tags()
+
+    def _make_hscroll(self, scrollable: "ctk.CTkScrollableFrame"
+                      ) -> "ctk.CTkScrollbar":
+        """为垂直方向 CTkScrollableFrame 补水平滚动（修复缺陷R9）。
+
+        CTkScrollableFrame 内部把内容窗口宽度锁死为画布宽（超宽内容
+        直接被裁剪、无横向滚动）。此处接入一条水平 CTkScrollbar：
+        - 画布 xscrollcommand <-> 滚动条（command=xview）双向联动；
+        - 画布/内容尺寸变化后把内容窗口宽度放宽到内容自然宽
+          （覆盖 CTk 内部的锁宽行为，绑定注册在其后、add=True）；
+        - Shift+滚轮横向滚动复用 CTk 内建处理（xview 有范围时生效）。
+        返回滚动条（调用方自行 grid/pack 到宿主底部）。
+        """
+        canvas = scrollable._parent_canvas
+        # 真正的宿主：CTkScrollableFrame 自身 master 是内部画布，
+        # 其外层 _parent_frame 的 master 才是调用方传入的宿主容器
+        host = scrollable._parent_frame.master
+        hbar = ctk.CTkScrollbar(host, orientation="horizontal",
+                                height=14, command=canvas.xview)
+        canvas.configure(xscrollcommand=hbar.set)
+
+        def fit(*_args) -> None:
+            try:
+                # 内容自然宽 = 内部行控件请求宽的最大值（不换行时为
+                # 完整文本宽）；与画布宽取大（窄内容时行仍占满视口）
+                need = canvas.winfo_width()
+                for child in scrollable.winfo_children():
+                    w = child.winfo_reqwidth()
+                    if w > need:
+                        need = w
+                canvas.itemconfigure(scrollable._create_window_id,
+                                     width=need)
+            except (tk.TclError, ValueError, AttributeError):
+                pass
+
+        canvas.bind("<Configure>", fit, add=True)
+        scrollable.bind("<Configure>", fit, add=True)
+        return hbar
 
     def _setup_detail_tags(self) -> None:
         """主面板详情标签配置（转发共享方法）。"""
@@ -892,7 +1049,7 @@ class LogCompressorApp(_make_app_base()):
         bar.grid_columnconfigure(0, weight=1)
         self._status_label = ctk.CTkLabel(bar, text="就绪 · 支持文件导入 / 文本粘贴 / 多文件对比",
                                           anchor="w")
-        self._status_label.grid(row=0, column=0, padx=12, pady=5, sticky="w")
+        self._status_label.grid(row=0, column=0, padx=12, pady=4, sticky="w")
         self._muted_labels.append(self._status_label)
 
     # ==================================================================
@@ -1318,17 +1475,20 @@ class LogCompressorApp(_make_app_base()):
         if self._virtual_list is not None:
             self._virtual_list.destroy()
             self._virtual_list = None
+        # 修复缺陷R9：恢复经典水平滚动条（虚拟模式自带独立的 hbar）
         if _widget_alive(self._cluster_list):
             self._cluster_list.grid()          # grid_remove 后恢复
+            if _widget_alive(self._list_hbar):
+                self._list_hbar.grid()
             for child in self._cluster_list.winfo_children():
                 child.destroy()
         self._cluster_rows = []
 
     def _render_cluster_list(self) -> None:
-        """左侧错误列表：Top N 行（图标/优先级/次数行 + 自动换行摘要行）。
+        """左侧错误列表：Top N 行（图标/优先级/次数行 + 单行摘要）。
 
         修复缺陷：原单行 CTkButton 长文本溢出右侧且无横向滚动能力，
-        改为摘要自动换行（wraplength 随列表宽度自适应），内容完整可见。
+        R9 起摘要单行不换行 + 底部水平滚动条左右滑动查看完整内容。
         修复缺陷R6：行数超过 VIRTUAL_LIST_THRESHOLD 切换虚拟滚动
         （池化复用可见区行控件，列表长度不再影响渲染耗时）。
         """
@@ -1349,6 +1509,9 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R6：大列表走虚拟滚动（控件池只建可见区行数）
         if len(self._displayed) > VIRTUAL_LIST_THRESHOLD:
             self._cluster_list.grid_remove()
+            # 修复缺陷R9：虚拟模式隐藏经典 hbar（虚拟列表自带 hbar）
+            if _widget_alive(self._list_hbar):
+                self._list_hbar.grid_remove()
             self._virtual_list = VirtualClusterList(self._list_host, self)
             self._cluster_rows = self._virtual_list.slots
             self._virtual_list.set_data(self._displayed)
@@ -1363,9 +1526,6 @@ class LogCompressorApp(_make_app_base()):
                 font=self._font_hint)
             more.pack(pady=6)
             self._muted_labels.append(more)
-        # 列表宽度变化时刷新换行宽度
-        self._cluster_list.unbind("<Configure>")
-        self._cluster_list.bind("<Configure>", self._on_list_resize)
 
     def _make_cluster_row(self, parent, idx: int, cluster: ErrorCluster,
                           register: bool = True,
@@ -1376,16 +1536,14 @@ class LogCompressorApp(_make_app_base()):
         """构建单条错误行（主列表与全屏列表复用，修复缺陷#7）。
 
         修复缺陷R2：字体放大、行距加大、选中态蓝色高亮（palette
-        row_selected）。修复缺陷R8：主列表头部 19 加粗 / 摘要 16。
-        修复缺陷R4：font_head/font_summary 覆盖字体（全屏 20/17）；
+        row_selected）。修复缺陷R9：主列表头部 22 加粗 / 摘要 18、
+        摘要单行不换行（水平滚动查看完整内容）。
+        修复缺陷R4：font_head/font_summary 覆盖字体（全屏 24/20）；
         on_toggle 提供时行首渲染「▶ ×N」可点击展开按钮（次数从
         行首元信息移入按钮）。
         修复缺陷R6：native=True 全原生 tk 控件（全屏列表用）——
         CTk 复合控件每行 4 个内部 Canvas 约 20ms/行，57 行全量
         渲染卡 4.5s；原生行约 8ms/行且无内部 Canvas。
-
-        摘要使用原生 tk.Label：wraplength 超限即折行（含超长
-        单词的字符级折行），长 token（超长路径 / 哈希串）完整可见。
 
         参数：
             register: 登记进 self._cluster_rows（主列表选中态管理）
@@ -1393,22 +1551,25 @@ class LogCompressorApp(_make_app_base()):
         """
         p = self._palette()
         f_head = font_head or self._font_row_head
-        f_sum = font_summary or self._font_row_summary
-        # 修复缺陷R7：初始换行宽度按列表实际宽度计算（列表加宽后
-        # 不再按固定 400 过早折行；后续由 <Configure> 自适应刷新）
-        wrap0 = max(280, parent.winfo_width() - 60)
+        # 修复缺陷R9：摘要字体施加 DPI 缩放（与 CTkLabel 渲染一致）
+        f_sum = self._scaled_font(font_summary or self._font_row_summary)
+        # 修复缺陷R9：摘要取消自动换行（wraplength=0 单行完整显示），
+        # 长摘要靠列表底部水平滚动条左右滑动查看（大字体下换行会使
+        # 单条错误占多行、可视错误数骤减）。
         toggle = None
         if native:
             # 全原生行（全屏列表）：bg/fg 直取调色板
+            # 修复缺陷R9：原生行头部同样施加 DPI 缩放（与经典 CTkLabel
+            # 渲染一致——命名字体直传 tk.Label 不缩放）
+            f_head = self._scaled_font(f_head)
             frame = tk.Frame(parent, bg=p["row_bg"], bd=0,
                              highlightthickness=0)
-            frame.pack(fill="x", padx=5, pady=4)
+            frame.pack(fill="x", padx=5, pady=3)
             if on_toggle is not None:
                 link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
                 line = tk.Frame(frame, bg=p["row_bg"], bd=0,
                                 highlightthickness=0)
-                # 修复缺陷R8：头部/摘要行距加大（大字体下不拥挤）
-                line.pack(fill="x", padx=(10, 10), pady=(12, 6))
+                line.pack(fill="x", padx=(10, 10), pady=(7, 2))
                 toggle = tk.Label(
                     line, text=f"\u25b6 \u00d7{cluster.count}",
                     font=f_head, bg=p["row_bg"], fg=link,
@@ -1426,12 +1587,12 @@ class LogCompressorApp(_make_app_base()):
                     frame, text=self._row_text(cluster), anchor="w",
                     font=f_head, bg=p["row_bg"],
                     fg=self._row_color(cluster) or p["row_text"])
-                head.pack(fill="x", padx=(10, 10), pady=(12, 6))
+                head.pack(fill="x", padx=(10, 10), pady=(7, 2))
             summary = tk.Label(
                 frame, text=cluster.summary, anchor="w", justify="left",
-                wraplength=wrap0, font=f_sum,
+                wraplength=0, font=f_sum,
                 bg=p["row_bg"], fg=p["row_text"])
-            summary.pack(fill="x", padx=(10, 4), pady=(6, 12))
+            summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
             select_cb = on_select or (lambda: self._select_cluster(idx))
             hover_cb = on_hover or (
                 lambda hovered: self._hover_row(idx, hovered))
@@ -1447,13 +1608,12 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R2：行距/内边距加大（大字体下行高充足不拥挤）
         frame = ctk.CTkFrame(parent, corner_radius=6,
                              fg_color=p["row_bg"])
-        frame.pack(fill="x", padx=5, pady=4)
+        frame.pack(fill="x", padx=5, pady=3)
         if on_toggle is not None:
             # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
             link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
             line = ctk.CTkFrame(frame, fg_color="transparent")
-            # 修复缺陷R8：头部/摘要行距加大（大字体下不拥挤）
-            line.pack(fill="x", padx=(10, 10), pady=(12, 6))
+            line.pack(fill="x", padx=(10, 10), pady=(7, 2))
             toggle = ctk.CTkLabel(
                 line, text=f"\u25b6 \u00d7{cluster.count}",
                 font=f_head, text_color=link, cursor="hand2")
@@ -1472,13 +1632,14 @@ class LogCompressorApp(_make_app_base()):
                 frame, text=self._row_text(cluster), anchor="w",
                 text_color=self._row_color(cluster) or None,
                 font=f_head)
-            head.pack(fill="x", padx=(10, 10), pady=(12, 6))
+            head.pack(fill="x", padx=(10, 10), pady=(7, 2))
+        # 修复缺陷R9：摘要单行不换行（wraplength=0）
         summary = tk.Label(
             frame, text=cluster.summary, anchor="w", justify="left",
-            wraplength=wrap0,
+            wraplength=0,
             font=f_sum,
             bg=p["row_bg"], fg=p["row_text"])
-        summary.pack(fill="x", padx=(10, 4), pady=(6, 12))
+        summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
         select_cb = on_select or (lambda: self._select_cluster(idx))
         hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
         # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
@@ -1563,12 +1724,6 @@ class LogCompressorApp(_make_app_base()):
             except (tk.TclError, ValueError):
                 continue
             return
-
-    def _on_list_resize(self, event) -> None:
-        """列表宽度变化 -> 自适应摘要换行宽度（保持内容完整可见）。"""
-        wrap = max(280, event.width - 60)
-        for row in getattr(self, "_cluster_rows", ()):
-            row["summary"].configure(wraplength=wrap)
 
     def _hover_row(self, idx: int, hovered: bool) -> None:
         """行悬停高亮（选中行保持选中色）。"""
@@ -1866,7 +2021,7 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R2：行距/内边距与主列表一致（大字体下行高充足）
         frame = ctk.CTkFrame(parent, corner_radius=6,
                              fg_color=p["row_bg"])
-        frame.pack(fill="x", padx=5, pady=4)
+        frame.pack(fill="x", padx=5, pady=3)
         if kind == "new":
             count_text = f"×{item.count_b} 次"
         elif kind == "gone":
@@ -1879,14 +2034,14 @@ class LogCompressorApp(_make_app_base()):
                   f"   {cmp.base_name} vs {cmp.other_name}"),
             anchor="w", text_color=self._CMP_COLOR[kind],
             font=self._font_row_head)
-        # 修复缺陷R8：行距与主列表一致 + 初始换行宽度按实际宽度计算
-        head.pack(fill="x", padx=(10, 10), pady=(12, 6))
+        # 修复缺陷R9：行距与主列表一致 + 摘要单行不换行（水平滚动查看）
+        head.pack(fill="x", padx=(10, 10), pady=(7, 2))
         summary = tk.Label(
             frame, text=item.summary, anchor="w", justify="left",
-            wraplength=max(280, parent.winfo_width() - 60),
+            wraplength=0,
             font=self._font_row_summary,
             bg=p["row_bg"], fg=p["row_text"])
-        summary.pack(fill="x", padx=(10, 4), pady=(6, 12))
+        summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
         return {"frame": frame, "summary": summary, "kind": kind,
                 "item": item, "text": f"{item.summary} {item.level} "
                                       f"{self._CMP_SYMBOL[kind]}"}
@@ -1910,9 +2065,6 @@ class LogCompressorApp(_make_app_base()):
             # 登记进 _cluster_rows：主题切换时统一刷新明暗配色（修复缺陷#12）
             self._cluster_rows.append(
                 self._make_compare_row(self._cluster_list, kind, cmp, item))
-        # 修复缺陷R7：对比列表宽度变化时刷新换行宽度（与主列表一致）
-        self._cluster_list.unbind("<Configure>")
-        self._cluster_list.bind("<Configure>", self._on_list_resize)
 
     # ==================================================================
     # 导出 / 复制 / 图表
@@ -2089,7 +2241,11 @@ class LogCompressorApp(_make_app_base()):
         body.grid_rowconfigure(0, weight=1)
 
         list_area = ctk.CTkScrollableFrame(body, width=520)
-        list_area.grid(row=0, column=0, sticky="nsw", padx=(6, 3))
+        # 修复缺陷R9：sticky 补 e —— 原缺失导致全屏左列仅 520px 固定宽
+        list_area.grid(row=0, column=0, sticky="nsew", padx=(6, 3))
+        # 修复缺陷R9：全屏列表水平滚动条（摘要单行完整显示）
+        fs_hbar = self._make_hscroll(list_area)
+        fs_hbar.grid(row=1, column=0, sticky="ew", padx=(6, 3))
 
         # 右侧详情面板（修复缺陷R4：点击簇/实例即时联动）
         detail_head = ctk.CTkFrame(body, fg_color="transparent")
@@ -2315,14 +2471,8 @@ class LogCompressorApp(_make_app_base()):
             # 首批也异步：窗口 deiconify 后即刻可见（点击响应 <300ms）
             render_jobs.append(win.after(1, add_batch))
 
-        def on_resize(event) -> None:
-            wrap = max(240, event.width - 90)
-            for row in fs_rows:
-                row["summary"].configure(wraplength=wrap)
-
         # 文本变化即过滤（trace 不依赖键盘事件，无焦点也可靠触发）
         search_var.trace_add("write", lambda *a: render(search_var.get()))
-        list_area.bind("<Configure>", on_resize)
         # 修复缺陷R6：登记刷新回调 + 数据签名（数据未变时跳过重渲染）
         self._fs_list_refresh = render
         self._fs_list_sig = (id(self._result), len(self._displayed),
@@ -2349,6 +2499,9 @@ class LogCompressorApp(_make_app_base()):
                      text_color="#8fa4b8").pack(side="right", padx=12)
         list_area = ctk.CTkScrollableFrame(win)
         list_area.pack(fill="both", expand=True)
+        # 修复缺陷R9：对比全屏列表水平滚动条（摘要单行完整显示）
+        cmp_hbar = self._make_hscroll(list_area)
+        cmp_hbar.pack(fill="x")
         fs_rows: List[dict] = []
 
         def render_compare(keyword: str = "") -> None:
@@ -2371,14 +2524,8 @@ class LogCompressorApp(_make_app_base()):
                     self._make_compare_row(list_area, kind, cmp, item))
             count_label.configure(text=f"显示 {shown} / {total} 条")
 
-        def on_resize_cmp(event) -> None:
-            wrap = max(240, event.width - 60)
-            for row in fs_rows:
-                row["summary"].configure(wraplength=wrap)
-
         search_var.trace_add(
             "write", lambda *a: render_compare(search_var.get()))
-        list_area.bind("<Configure>", on_resize_cmp)
         render_compare()
 
     def _open_detail_fullscreen(self) -> None:
