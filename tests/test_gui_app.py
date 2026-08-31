@@ -336,26 +336,26 @@ class TestClusterListWrap:
 # ---------------------------------------------------------------------------
 class TestClusterListFontAndWidth:
     def test_main_list_font_sizes(self, app):
-        """修复R7：主列表字体实际大小——头部 17 加粗 / 摘要 14。"""
-        assert int(app._font_row_head.cget("size")) == 17
+        """修复R8：主列表字体实际大小——头部 19 加粗 / 摘要 16。"""
+        assert int(app._font_row_head.cget("size")) == 19
         assert str(app._font_row_head.cget("weight")) == "bold"
-        assert int(app._font_row_summary.cget("size")) == 14
+        assert int(app._font_row_summary.cget("size")) == 16
         # 底层 tk 命名字体的实际像素尺寸（CTkFont 用负数表示像素）
         head_tk = tkfont.Font(root=app, name=str(app._font_row_head),
                               exists=True)
         sum_tk = tkfont.Font(root=app, name=str(app._font_row_summary),
                              exists=True)
-        assert int(head_tk.cget("size")) == -17
-        assert int(sum_tk.cget("size")) == -14
+        assert int(head_tk.cget("size")) == -19
+        assert int(sum_tk.cget("size")) == -16
 
     def test_fullscreen_list_font_sizes(self, app):
-        """修复R7：全屏列表字体实际大小——头部 18 加粗 / 摘要 16。"""
-        assert int(app._font_fs_head.cget("size")) == 18
+        """修复R8：全屏列表字体实际大小——头部 20 加粗 / 摘要 17。"""
+        assert int(app._font_fs_head.cget("size")) == 20
         assert str(app._font_fs_head.cget("weight")) == "bold"
-        assert int(app._font_fs_summary.cget("size")) == 16
+        assert int(app._font_fs_summary.cget("size")) == 17
 
     def test_classic_row_uses_enlarged_fonts(self, app):
-        """修复R7：经典模式行控件直接使用放大后的共享字体对象。"""
+        """修复R8：经典模式行控件直接使用放大后的共享字体对象。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
         head = app._cluster_rows[0]["frame"].winfo_children()[0]
         assert isinstance(head, ctk.CTkLabel)
@@ -364,7 +364,7 @@ class TestClusterListFontAndWidth:
             str(app._font_row_summary)
 
     def test_virtual_row_fonts_match_classic(self, app):
-        """修复R7：虚拟模式（>40 行）与经典模式字体一致（同一共享字体）。"""
+        """修复R8：虚拟模式（>40 行）与经典模式字体一致（同一共享字体）。"""
         _run_many_clusters(app)
         app.update()
         assert app._virtual_list is not None, "60 簇应启用虚拟列表"
@@ -374,13 +374,13 @@ class TestClusterListFontAndWidth:
             str(app._font_row_summary)
 
     def test_virtual_row_height_enlarged(self, app):
-        """修复R7：虚拟行高随字体放大（容纳 17 头部 + 多行 14 摘要）。"""
+        """修复R8：虚拟行高随字体放大（容纳 19 头部 + 多行 16 摘要）。"""
         from log_ai_compressor.gui.app import VirtualClusterList
-        assert VirtualClusterList.ROW_HEIGHT >= 108, \
+        assert VirtualClusterList.ROW_HEIGHT >= 125, \
             "行高应容纳放大后的头部与两行摘要"
 
     def test_fullscreen_rows_use_fs_fonts(self, app):
-        """修复R7：全屏列表行实际使用全屏字体（头部 18 / 摘要 16）。"""
+        """修复R8：全屏列表行实际使用全屏字体（头部 20 / 摘要 17）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
         app._open_list_fullscreen()
         for _ in range(20):
@@ -400,9 +400,9 @@ class TestClusterListFontAndWidth:
 
         walk(win)
         assert str(app._font_fs_head) in fonts_in_use, \
-            "全屏行头部应使用 18 号加粗字体"
+            "全屏行头部应使用 20 号加粗字体"
         assert str(app._font_fs_summary) in fonts_in_use, \
-            "全屏行摘要应使用 16 号字体"
+            "全屏行摘要应使用 17 号字体"
         win.event_generate("<Escape>")
         app.update()
 
