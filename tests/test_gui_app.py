@@ -808,6 +808,75 @@ class TestSplitter:
             f"详情最小宽度应 ≥{min_detail:.0f}物理px（实际 {app._detail_col.winfo_width()}）"
         assert app._list_col.winfo_width() >= min_list
 
+    def test_drag_back_from_rightmost(self, app):
+        """修复R12：拖到最右后仍能拖回左边（比例可恢复，不锁死）。
+
+        高DPI下旧实现（分隔条 rootx + event.x 反推指针）坐标系错乱，
+        拖到右极限后 ratio 卡死无法回拖。
+        """
+        app.update()
+        sp = app._splitter
+        panel = app._result_panel
+        pw = self._pw(app)
+        # 拖到右极限
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=5000, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=5000, y=40)
+        app.update()
+        assert app._splitter_ratio > 0.5, "拖到右极限比例应 >0.5"
+        # 从右极限拖回中间（重新按下，目标 40% 处）
+        target = int(pw * 0.4)
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        delta = target - (sp.winfo_rootx() - panel.winfo_rootx())
+        sp.event_generate("<B1-Motion>", x=3 + delta, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=3 + delta, y=40)
+        app.update()
+        assert abs(app._splitter_ratio - 0.4) < 0.02, \
+            f"右极限后应能拖回 0.4（实际 {app._splitter_ratio:.3f}）"
+        assert abs(app._list_col.winfo_width() - target) <= 8, \
+            f"拖回后左列应 ≈{target}px（实际 {app._list_col.winfo_width()}）"
+
+    def test_columns_compact_no_gap(self, app):
+        """修复R12：三列（列表|分隔条|详情）紧密占满结果区，无中间空白。
+
+        高DPI下旧实现 x（被CTk二次缩放）与 relwidth（不缩放）混用，
+        分隔条/详情列被推出面板外（详情消失、列表右侧大片空白）。
+        """
+        app.update()
+        panel = app._result_panel
+        pw = self._pw(app)
+        sp_w = max(1, app._splitter.winfo_width())
+
+        def check():
+            app.update_idletasks(); app.update()
+            lx = app._list_col.winfo_rootx() - panel.winfo_rootx()
+            sx = app._splitter.winfo_rootx() - panel.winfo_rootx()
+            dx = app._detail_col.winfo_rootx() - panel.winfo_rootx()
+            assert abs(sx - (lx + app._list_col.winfo_width())) <= 2, \
+                "列表右缘应紧贴分隔条左缘"
+            assert abs(dx - (sx + sp_w)) <= 2, "分隔条右缘应紧贴详情左缘"
+            assert abs(pw - (dx + app._detail_col.winfo_width())) <= 2, \
+                "详情右缘应贴齐面板右缘"
+            assert 0 < app._detail_col.winfo_width() < pw, \
+                f"详情列应可见（宽 {app._detail_col.winfo_width()}）"
+
+        check()                                   # 初始布局
+        sp = app._splitter
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=3 + 600, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=3 + 600, y=40)
+        app.update()
+        check()                                   # 拖动后布局
+        app._on_splitter_dblclick(None)
+        app.update()
+        check()                                   # 双击恢复后布局
+
     def test_double_click_restores_default(self, app):
         """修复R12：双击分隔条恢复默认比例（2:3）。"""
         app.update()

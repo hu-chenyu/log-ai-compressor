@@ -1140,59 +1140,70 @@ class LogCompressorApp(_make_app_base()):
             pass
 
     def _layout_splitter(self) -> None:
-        """按比例布局左右列与分隔条（窗口缩放时保持比例并钳制最小宽）。
+        """按比例布局左右列与分隔条（全部 relx/relwidth 比例参数）。
 
-        CTk place() 重写会对 x/y 施加控件缩放（逻辑坐标），而
-        winfo_* 返回物理像素 —— x 传入前需除以缩放系数；
-        relwidth/relx 为纯比例不受影响。
+        修复缺陷R12（高DPI错位）：CTk place() 会对显式 x/y 乘控件缩放
+        系数，而 relwidth/relheight 不缩放 —— x（像素）与 relwidth
+        （比例）混用在高 DPI（widget_scaling>1）下两套坐标系分裂：
+        左列按比例、分隔条/右列按被二次缩放的像素放置，整体被推出
+        面板外（详情面板消失、中间大片空白、拖动反馈错乱）。全部改用
+        比例参数后缩放天然无关；分隔条自身宽度由构造器 width=6
+        （逻辑 px，CTk 自动换算物理）承担。三列 relx 首尾相接占满面板。
         """
         panel = self._result_panel
         pw = panel.winfo_width()          # 物理像素
         r = self._splitter_ratio
         scale = max(1.0, getattr(self, "_font_scale", 1.0))
-        if pw < 60:
+        sp_w = _SPLITTER_WIDTH * scale    # 分隔条物理宽
+        # 面板太窄放不下「两列最小宽 + 分隔条」：按比例铺满但不改写
+        # 比例（<Configure> 中间态宽度逐级增长，此处钳制会把比例
+        # 污染成窄面板下的极值），等宽度足够时再按保存比例重排
+        if pw < (_SPLITTER_MIN_LIST + _SPLITTER_MIN_DETAIL
+                 + _SPLITTER_WIDTH) * scale:
+            sp_r = sp_w / max(1, pw)
             self._list_col.place(relx=0, rely=0, relwidth=r, relheight=1)
             self._splitter.place(relx=r, rely=0, relheight=1)
-            self._detail_col.place(relx=r, rely=0, relwidth=1 - r,
+            self._detail_col.place(relx=min(1.0, r + sp_r), rely=0,
+                                   relwidth=max(0.0, 1 - r - sp_r),
                                    relheight=1)
             return
-        sp_w = _SPLITTER_WIDTH * scale     # 分隔条物理宽
-        lo = _SPLITTER_MIN_LIST * scale    # 最小宽（逻辑值换算物理）
-        hi = max(lo, pw - _SPLITTER_MIN_DETAIL * scale - sp_w)
-        left = min(max(r * pw, lo), hi)
-        self._splitter_ratio = left / pw
-        self._list_col.place(x=0, rely=0, relwidth=left / pw,
-                             relheight=1)
-        self._splitter.place(x=round(left / scale), rely=0, relheight=1)
-        self._detail_col.place(
-            x=round((left + sp_w) / scale), rely=0,
-            relwidth=max(0.0, (pw - left - sp_w) / pw), relheight=1)
+        # 最小宽度换算为比例钳制（列表≥200 / 详情≥300 逻辑 px）
+        lo_r = _SPLITTER_MIN_LIST * scale / pw
+        hi_r = 1 - (_SPLITTER_MIN_DETAIL + _SPLITTER_WIDTH) * scale / pw
+        r = min(max(r, lo_r), hi_r)
+        self._splitter_ratio = r
+        sp_r = sp_w / pw
+        self._list_col.place(relx=0, rely=0, relwidth=r, relheight=1)
+        self._splitter.place(relx=r, rely=0, relheight=1)
+        self._detail_col.place(relx=r + sp_r, rely=0,
+                               relwidth=max(0.0, 1 - r - sp_r),
+                               relheight=1)
 
     def _on_splitter_press(self, event) -> None:
         self._splitter_dragging = True
         self._splitter_hover(True)
 
     def _on_splitter_drag(self, event) -> None:
-        """拖动实时调整左右宽度（指针位置即新左列边界）。
+        """拖动实时调整左右宽度（event.x_root 即指针屏幕绝对坐标）。
 
-        事件 x 相对分隔条当前位置（分隔条实时跟随指针，x 稳定为
-        按下偏移），指针绝对位置 = 分隔条 rootx + event.x。
-        最小宽度限制按物理像素（winfo_* 均为物理值）。
+        修复缺陷R12（拖动错位/拖不回）：事件接收窗口各异（分隔条
+        内部 canvas / 仅 2px 宽的握点），event.x 相对的窗口不确定，
+        用「分隔条 rootx + event.x」反推指针会随接收窗口漂移。x_root
+        是事件自带的屏幕绝对坐标，与接收窗口无关，直接换算相对面板
+        位置（最小宽度按物理像素钳制，winfo_* 均为物理值）。
         """
         if not self._splitter_dragging:
             return
         panel = self._result_panel
         pw = max(1, panel.winfo_width())
         scale = max(1.0, getattr(self, "_font_scale", 1.0))
-        try:
-            pointer = self._splitter.winfo_rootx() + event.x
-            base = panel.winfo_rootx()
-        except tk.TclError:
-            return
         sp_w = _SPLITTER_WIDTH * scale
-        x = pointer - base - sp_w // 2
+        try:
+            x = event.x_root - panel.winfo_rootx() - sp_w // 2
+        except AttributeError:
+            return
         lo = _SPLITTER_MIN_LIST * scale
-        hi = max(lo, pw - _SPLITTER_MIN_DETAIL * scale - sp_w)
+        hi = max(lo, pw - (_SPLITTER_MIN_DETAIL + _SPLITTER_WIDTH) * scale)
         left = min(max(x, lo), hi)
         self._splitter_ratio = left / pw
         self._layout_splitter()
