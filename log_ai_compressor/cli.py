@@ -57,8 +57,11 @@ EXIT_OK, EXIT_ERROR, EXIT_CANCELLED = 0, 1, 130
 # ---------------------------------------------------------------------------
 def _add_filter_options(p: argparse.ArgumentParser) -> None:
     """公共过滤参数（run / compare 共用）。"""
-    p.add_argument("--level", "-l", default="ERROR,FAIL",
-                   help="级别过滤（逗号分隔，默认 ERROR,FAIL；FATAL 始终保留）")
+    # 修复缺陷R10：默认级别含 FATAL（--level FATAL 同样受支持，
+    # 与 GUI 复选框语义一致：勾选/传入才显示）
+    p.add_argument("--level", "-l", default="FATAL,ERROR,FAIL",
+                   help="级别过滤（逗号分隔，默认 FATAL,ERROR,FAIL；"
+                        "可用值 FATAL/ERROR/FAIL/WARN/INFO/DEBUG/TRACE）")
     p.add_argument("--include", "-k", default="",
                    help="包含关键字（逗号分隔，任一命中保留）")
     p.add_argument("--exclude", default="",

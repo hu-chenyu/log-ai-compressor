@@ -368,10 +368,11 @@ class TestClusterListFontAndWidth:
         assert int(sum_tk.cget("size")) == -18
 
     def test_fullscreen_list_font_sizes(self, app):
-        """修复R9：全屏列表字体标称大小——头部 24 加粗 / 摘要 20。"""
-        assert int(app._font_fs_head.cget("size")) == 24
+        """修复R10：全屏列表字体标称大小——头部 28 加粗 / 摘要 24 / 实例 20。"""
+        assert int(app._font_fs_head.cget("size")) == 28
         assert str(app._font_fs_head.cget("weight")) == "bold"
-        assert int(app._font_fs_summary.cget("size")) == 20
+        assert int(app._font_fs_summary.cget("size")) == 24
+        assert int(app._font_fs_inst.cget("size")) == 20
 
     def test_summary_font_dpi_scaled(self, app):
         """修复R9：摘要字体随 DPI 缩放（渲染比例与头部一致）。
@@ -457,8 +458,8 @@ class TestClusterListFontAndWidth:
             time.sleep(0.005)
         win = app._fs_list_win
         assert win is not None and win.winfo_exists()
-        # 全屏行（原生 tk.Label）头部含级别文本；其渲染字号应 ≈ 24 号
-        #（经典 22 号基准 × 24/22，同一缩放系数）
+        # 全屏行（原生 tk.Label）头部含级别文本；其渲染字号应 ≈ 28 号
+        #（经典 22 号基准 × 28/22，同一缩放系数）
         heads = [w for w in _all_widgets(win)
                  if isinstance(w, tk.Label)
                  and ("ERROR" in str(w.cget("text"))
@@ -466,8 +467,68 @@ class TestClusterListFontAndWidth:
         assert heads, "全屏窗口应有行头部标签"
         fs_size = int(
             tkfont.Font(font=heads[0].cget("font")).cget("size"))
-        assert abs(fs_size - classic_size * 24 / 22) <= 2, \
-            f"全屏头部渲染 {fs_size} 应 ≈ 经典 {classic_size}×24/22"
+        assert abs(fs_size - classic_size * 28 / 22) <= 2, \
+            f"全屏头部渲染 {fs_size} 应 ≈ 经典 {classic_size}×28/22"
+        win.event_generate("<Escape>")
+        app.update()
+
+    def test_fullscreen_instance_row_font_and_nowrap(self, app):
+        """修复R10：全屏展开实例行 20 号 + DPI 缩放 + 单行不换行。"""
+        # 同簇多实例日志（×2 实例，展开后可见实例行）
+        multi = (SAMPLE_PASTE + "2024-01-01 09:02:00 FATAL [core] "
+                 "out of memory in worker 4\n")
+        _run_paste_analysis(app, multi)
+        app.update()
+        app._open_list_fullscreen()
+        for _ in range(25):
+            app.update()
+            time.sleep(0.005)
+        win = app._fs_list_win
+        assert win is not None and win.winfo_exists()
+        # 点击「▶ ×2」展开按钮（FATAL 簇 ×2；文本形如 "▶ ×2"）
+        toggles = [w for w in _all_widgets(win)
+                   if isinstance(w, tk.Label)
+                   and "\u00d72" in str(w.cget("text"))]
+        assert toggles, "全屏窗口应有 ×2 展开按钮"
+        toggles[0].event_generate("<Button-1>")
+        for _ in range(25):
+            app.update()
+            time.sleep(0.005)
+        # 实例行：时间戳开头（2024-01-01 …）的原生 Label
+        insts = [w for w in _all_widgets(win)
+                 if isinstance(w, tk.Label)
+                 and "out of memory" in str(w.cget("text"))
+                 and str(w.cget("text")).startswith("2024-")]
+        assert insts, "展开后应有实例行"
+        lbl = insts[0]
+        assert int(lbl.cget("wraplength")) == 0, "实例行应单行不换行"
+        size = int(tkfont.Font(font=lbl.cget("font")).cget("size"))
+        # 实例行渲染字号 ≈ 20 号（相对经典 22 号基准同缩放系数）
+        classic = app._cluster_rows[0]["frame"].winfo_children()[0]
+        inner = [c for c in classic.winfo_children()
+                 if c.winfo_class() == "Label"][0]
+        base = int(tkfont.Font(font=inner.cget("font")).cget("size"))
+        assert abs(size - base * 20 / 22) <= 2, \
+            f"实例行渲染 {size} 应 ≈ 经典 {base}×20/22"
+        win.event_generate("<Escape>")
+        app.update()
+
+    def test_fullscreen_search_font_enlarged(self, app):
+        """修复R10：全屏搜索框字体 18 号。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._open_list_fullscreen()
+        for _ in range(20):
+            app.update()
+            time.sleep(0.005)
+        win = app._fs_list_win
+        entries = [w for w in _all_widgets(win)
+                   if isinstance(w, ctk.CTkEntry)]
+        assert entries, "全屏窗口应有搜索输入框"
+        # CTkEntry.cget("font") 返回 CTkFont 对象（标称字号，DPI 无关）
+        font_obj = entries[0].cget("font")
+        assert int(font_obj.cget("size")) == 18, \
+            f"搜索框字号应为 18（实际 {font_obj.cget('size')}）"
         win.event_generate("<Escape>")
         app.update()
 
@@ -540,6 +601,117 @@ class TestClusterListFontAndWidth:
         list_w = app._cluster_list.winfo_width()
         assert list_w >= 0.9 * host_w, \
             f"列表宽 {list_w}px 应占宿主宽 {host_w}px 的 90% 以上"
+
+
+# ---------------------------------------------------------------------------
+# 修复R10：FATAL 级别筛选 + 字体大小档位
+# ---------------------------------------------------------------------------
+class TestFatalLevelFilter:
+    def test_fatal_checkbox_first_and_default_checked(self, app):
+        """修复R10：FATAL 复选框存在、位于 ERROR 左侧且默认勾选。"""
+        from log_ai_compressor.gui.app import LEVEL_CHECKS
+        assert LEVEL_CHECKS[0] == "FATAL"
+        assert LEVEL_CHECKS[1] == "ERROR"
+        assert "FATAL" in app._level_vars
+        assert app._level_vars["FATAL"].get() is True, "FATAL 应默认勾选"
+        assert app._level_vars["ERROR"].get() is True
+
+    def test_fatal_unchecked_filters_fatal_errors(self, app):
+        """修复R10：取消 FATAL 勾选后 FATAL 错误被过滤。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        levels = [c.level for c in app._displayed]
+        assert "FATAL" in levels, "默认勾选 FATAL 应显示致命错误"
+        # 取消 FATAL 勾选重新分析：FATAL 不再出现
+        app._level_vars["FATAL"].set(False)
+        app._tabview.set("文本粘贴")
+        app._paste_box.delete("1.0", "end")
+        app._paste_box.insert("1.0", SAMPLE_PASTE)
+        app._on_start()
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            app.update()
+            if app._result is not None:
+                break
+            time.sleep(0.02)
+        levels = [c.level for c in app._displayed]
+        assert "FATAL" not in levels, "取消勾选后 FATAL 应被过滤"
+        assert "ERROR" in levels, "ERROR 勾选不受影响"
+
+    def test_fatal_help_tooltip_registered(self, app):
+        """修复R10：FATAL 复选框旁 ⓘ 悬停说明已登记。"""
+        assert getattr(app, "_fatal_help_tooltip", None) is not None
+
+    def test_fatal_row_color_is_red(self, app):
+        """修复R10：FATAL 错误行文字为红色（比 ERROR 醒目）。"""
+        from log_ai_compressor.gui.app import LogCompressorApp
+        from log_ai_compressor.core.models import ErrorCluster
+        fatal = ErrorCluster(cluster_id="f", template="t", summary="boom",
+                              level="FATAL", count=1)
+        err = ErrorCluster(cluster_id="e", template="t", summary="bad",
+                            level="ERROR", count=1)
+        red = LogCompressorApp._row_color(fatal)
+        assert red and red.lower().startswith("#ff"), \
+            f"FATAL 应用红色（实际 {red}）"
+        assert LogCompressorApp._row_color(err) is None
+
+    def test_old_config_upgrades_fatal_checked(self, app):
+        """修复R10：旧配置（无 FATAL）一次性升级默认勾选。"""
+        assert app._config.get("fatal_level_upgraded") is True
+        assert app._level_vars["FATAL"].get() is True
+
+
+class TestFontSizeSelector:
+    def test_font_menu_exists_with_default(self, app):
+        """修复R10：字体大小选择器存在且默认「中」。"""
+        assert app._font_menu.get() == "中"
+        assert int(app._font_row_head.cget("size")) == 22, \
+            "「中」档头部应为基准 22 号"
+
+    def test_font_size_change_scales_fonts(self, app):
+        """修复R10：切换档位即时缩放主列表/全屏字体并保存配置。"""
+        app._apply_font_size("特大")
+        assert int(app._font_row_head.cget("size")) == 29, \
+            "特大档头部应 round(22×1.3)=29"
+        assert int(app._font_row_summary.cget("size")) == 23, \
+            "特大档摘要应 round(18×1.3)=23"
+        assert int(app._font_fs_head.cget("size")) == 36, \
+            "特大档全屏头部应 round(28×1.3)=36"
+        assert app._font_size == "特大"
+        assert app._config.get("font_size") == "特大", "档位应已持久化"
+        # 档位切换后行级原生标签重渲染（字号随档位）
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        inner = [c for c in head.winfo_children()
+                 if c.winfo_class() == "Label"][0]
+        size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
+        # 特大档 29 号 vs 基准 22 号（同 DPI 系数下比例 ≈ 29/22）
+        assert size >= 26, f"特大档经典头部渲染 {size} 应 ≥26"
+        # 恢复默认档位（避免影响其他用例）
+        app._apply_font_size("中")
+        assert int(app._font_row_head.cget("size")) == 22
+
+    def test_font_size_persisted_across_restart(self, app, tmp_path):
+        """修复R10：字体档位保存后新实例自动恢复（同一配置文件）。"""
+        app._apply_font_size("大")
+        from log_ai_compressor.gui.app import LogCompressorApp
+        # app fixture 已隔离配置文件；新实例读取同一份 -> 恢复「大」
+        app2 = LogCompressorApp()
+        try:
+            app2.update()
+            assert app2._font_size == "大", "重启应恢复上次档位"
+            assert app2._font_menu.get() == "大"
+            assert int(app2._font_row_head.cget("size")) == 25, \
+                "大档头部应 22×1.15≈25"
+        finally:
+            try:
+                app2._on_close()
+            except Exception:
+                try:
+                    app2.destroy()
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -1471,8 +1643,8 @@ class TestDetailPanelR5:
         text = box.get("1.0", "end")
         assert "已折叠" in text
 
-    def test_detail_fullscreen_font_13(self, app):
-        """修复R5：详情全屏窗口字体 13 号。"""
+    def test_detail_fullscreen_font_18(self, app):
+        """修复R10：详情全屏窗口字体放大到 18 号（全屏大字体）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
         self._select_db_cluster(app)
         app._open_detail_fullscreen()
@@ -1486,7 +1658,7 @@ class TestDetailPanelR5:
                      if isinstance(w, ctk.CTkTextbox)]
             font = boxes[0].cget("font")
             size = font.cget("size") if hasattr(font, "cget") else font
-            assert int(size) in (12, 13), f"全屏详情字体应 12~13 号，实际 {size}"
+            assert int(size) == 18, f"全屏详情字体应 18 号，实际 {size}"
         finally:
             for w in [w for w in app.winfo_children()
                       if isinstance(w, tk.Toplevel)]:

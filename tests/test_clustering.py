@@ -26,16 +26,26 @@ class TestFilter:
         f = EntryFilter(FilterConfig(levels=["ERROR", "FAIL"]))
         assert f.match(entry("x", level="ERROR"))
         assert f.match(entry("x", level="FAIL"))
+        # 修复缺陷R10：FATAL 取消「始终放行」，与普通级别一样受控
+        assert not f.match(entry("x", level="FATAL"))
         assert not f.match(entry("x", level="WARN"))
         assert not f.match(entry("x", level="INFO"))
 
     def test_fatal_always_passes_level_gate(self):
-        # 致命错误必须始终进入结果（自动前置要求）
+        # 修复缺陷R10：FATAL 改为受级别集合控制 —— 勾选才显示
         f = EntryFilter(FilterConfig(levels=["FAIL"]))
-        assert f.match(entry("x", level="FATAL"))
+        assert not f.match(entry("x", level="FATAL"))
+        # 勾选 FATAL 后正常放行
+        f_on = EntryFilter(FilterConfig(levels=["FATAL", "FAIL"]))
+        assert f_on.match(entry("x", level="FATAL"))
         # 但 include/exclude 关键字语义照常生效
         f2 = EntryFilter(FilterConfig(levels=["FAIL"], include=["timeout"]))
         assert not f2.match(entry("out of memory", level="FATAL"))
+
+    def test_default_config_includes_fatal(self):
+        # 修复缺陷R10：默认勾选级别为 FATAL/ERROR/FAIL 三核心
+        assert EntryFilter(FilterConfig()).match(entry("x", level="FATAL"))
+        assert EntryFilter(FilterConfig()).match(entry("x", level="ERROR"))
 
     def test_include_keyword(self):
         f = EntryFilter(FilterConfig(levels=["ERROR"], include=["timeout"]))
@@ -67,7 +77,8 @@ class TestFilter:
 
     def test_config_from_dict_invalid_tolerant(self):
         cfg = FilterConfig.from_dict({"levels": "bad", "top_n": "x"})
-        assert cfg.levels == ["ERROR", "FAIL"]
+        # 修复缺陷R10：默认级别升级为 FATAL/ERROR/FAIL
+        assert cfg.levels == ["FATAL", "ERROR", "FAIL"]
         assert cfg.top_n == 20
 
 
