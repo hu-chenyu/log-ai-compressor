@@ -142,7 +142,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "splitter": "#a6d2b9", "splitter_grip": "#5f9c7c",
     },
 }
-# 主题循环顺序（点击依次切换）
+# 主题顺序（下拉列表展示顺序；修复缺陷R13 后不再循环点击）
 THEME_ORDER = ("light", "dark", "blue", "green")
 # 兼容别名（旧配置 appearance 值）
 _THEME_ALIASES = {"dark": "dark", "light": "light", "blue": "blue",
@@ -808,11 +808,14 @@ class LogCompressorApp(_make_app_base()):
             font=ctk.CTkFont(size=12))
         subtitle.grid(row=0, column=2, padx=6, sticky="w")
         self._muted_labels.append(subtitle)
-        # 修复缺陷#12/R1：主题按钮显示当前主题（四态循环）
-        self._theme_btn = ctk.CTkButton(bar, text="🌙 暗色", width=96,
-                                        command=self._toggle_theme)
-        self._theme_btn.grid(row=0, column=3, padx=(6, 16))
-        self._accent_buttons.append((self._theme_btn, "accent"))
+        # 修复缺陷R13（第三轮#7）：主题切换改为下拉选择框 —— 可直接
+        # 选择任意主题（无需循环点击）；下拉列表只列其他三态（当前项
+        # 不重复出现），选中即触发原四态切换逻辑（调色板批量刷新）
+        self._theme_menu = ctk.CTkOptionMenu(
+            bar, values=self._theme_menu_values(), width=96, height=28,
+            command=self._on_theme_selected)
+        self._theme_menu.set(self._palette()["name"])
+        self._theme_menu.grid(row=0, column=3, padx=(6, 16))
 
     # ------------------------------------------------------------------
     def _build_tabs(self) -> None:
@@ -1512,13 +1515,26 @@ class LogCompressorApp(_make_app_base()):
                 self._status_label.configure(
                     text=f"已拖入文件：{paths[0]}（点击开始分析）")
 
-    def _toggle_theme(self) -> None:
-        """主题切换入口：四态循环 + 淡出 -> 切换 -> 淡入（平滑过渡）。
+    def _theme_menu_values(self) -> List[str]:
+        """主题下拉列表内容：除当前主题外的其他三态（保持循环顺序）。
 
-        修复缺陷R1：亮色 → 暗色 → 蓝调 → 绿调 依次循环。
+        修复缺陷R13：当前主题不重复出现在列表中（避免重复选择）；
+        列表顺序沿用 THEME_ORDER（亮色、暗色、蓝调、绿调）去掉当前项。
         """
-        idx = THEME_ORDER.index(self._theme) if self._theme in THEME_ORDER else 0
-        target = THEME_ORDER[(idx + 1) % len(THEME_ORDER)]
+        cur = self._palette()["name"]
+        return [THEMES[k]["name"] for k in THEME_ORDER
+                if THEMES[k]["name"] != cur]
+
+    def _on_theme_selected(self, choice: str) -> None:
+        """下拉选择主题：直接切换到所选主题（淡出 -> 切换 -> 淡入）。
+
+        修复缺陷R13（第三轮#7）：由循环点击改为下拉直达 —— 可跳过
+        中间主题直接选中任意目标；切换动画与底层刷新逻辑不变。
+        """
+        target = next((k for k in THEME_ORDER
+                       if THEMES[k]["name"] == choice), None)
+        if target is None or target == self._theme:
+            return
         self._fade_out(target, 0)
 
     # 主题过渡帧序列（窗口透明度）
@@ -1606,14 +1622,38 @@ class LogCompressorApp(_make_app_base()):
                 dot.configure(bg=p["splitter_grip"])
             except (tk.TclError, ValueError):
                 pass
+        # 修复缺陷R13：主题下拉选择框配色 —— OptionMenu 的选项名与
+        # 按钮不同（button_color/button_hover_color，无 hover_color），
+        # 不能走 _accent_buttons 通道；下拉列表用卡片底色 + 选中蓝
+        # 高亮 + 正文色，四态各自协调
+        menu = getattr(self, "_theme_menu", None)
+        if menu is not None:
+            try:
+                menu.configure(
+                    fg_color=p["accent"], button_color=p["accent"],
+                    button_hover_color=p["accent_hover"],
+                    text_color=p["accent_text"],
+                    dropdown_fg_color=p["card"],
+                    dropdown_hover_color=p["row_selected"],
+                    dropdown_text_color=p["text"])
+            except (tk.TclError, ValueError, AttributeError):
+                pass
         self._refresh_row_colors()
-        self._update_theme_button()
+        self._update_theme_menu()
 
-    def _update_theme_button(self) -> None:
-        """主题按钮显示当前主题状态（四态）。"""
-        if getattr(self, "_theme_btn", None) is None:
+    def _update_theme_menu(self) -> None:
+        """主题下拉选择框同步当前主题（显示值 + 列表排除当前项）。
+
+        修复缺陷R13：set() 不触发 command（避免回调递归）；列表值
+        每次切换后重算，保证当前主题不重复出现。
+        """
+        menu = getattr(self, "_theme_menu", None)
+        if menu is None:
             return
-        self._theme_btn.configure(text=self._palette()["name"])
+        name = self._palette()["name"]
+        if menu.get() != name:
+            menu.set(name)
+        menu.configure(values=self._theme_menu_values())
 
     def _refresh_row_colors(self) -> None:
         """主题切换后刷新列表行配色（原生 tk.Label 不随 CTk 主题）。"""
