@@ -43,7 +43,9 @@ class TestAnalyzeText:
         s = r.stats
         assert s.total_lines == 15
         assert s.error_lines == 7        # ERROR×6 + FATAL×1
-        assert s.error_entries == 7      # FATAL 始终放行
+        # 修复缺陷R10：默认级别含 FATAL（FATAL 取消始终放行后由
+        # 默认勾选保留可见性）
+        assert s.error_entries == 7
         assert s.time_start is not None and s.time_end is not None
         assert s.duration > 0
         assert s.truncated is False

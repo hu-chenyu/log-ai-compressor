@@ -27,6 +27,7 @@ import customtkinter as ctk
 from log_ai_compressor import __version__
 from log_ai_compressor.constants import (
     DEFAULT_CONTEXT_LINES,
+    DEFAULT_SELECTED_LEVELS,
     DEFAULT_TOP_N,
     HUMAN_NAME,
     MAX_CONTEXT_LINES,
@@ -77,9 +78,20 @@ def _make_app_base():
 
     return PlainApp
 
-LEVEL_CHECKS = ("ERROR", "FAIL", "WARN", "INFO", "DEBUG")
+# 修复缺陷R10：级别过滤增加 FATAL（最严重的级别放最前面）
+LEVEL_CHECKS = ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG")
 RULE_NAMES = ("generic", "embedded", "jenkins")
 _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
+
+# 修复缺陷R10：FATAL 级别悬停说明（复选框旁 ⓘ 图标）
+_FATAL_LEVEL_HELP = ("FATAL：致命错误，程序无法继续运行的严重故障，"
+                     "严重程度高于ERROR")
+
+# 修复缺陷R10：字体大小档位（配置区「字体大小」选择器，持久化）
+# - 「中」为基准档（主列表头部 22 加粗 / 摘要 18；全屏 28/24/20）
+# - 其余档位按系数整体缩放（经典 / 虚拟 / 全屏 / 对比同步生效）
+FONT_SIZE_OPTIONS = ("小", "中", "大", "特大")
+FONT_SIZE_SCALE = {"小": 0.85, "中": 1.0, "大": 1.15, "特大": 1.3}
 
 # 错误行智能图标：▲ 根因 / ● 爆发 / ○ 稀有 / ◆ 致命
 _CLUSTER_ICON = {"fatal": "\u25c6", "root": "\u25b2", "burst": "\u25cf",
@@ -646,16 +658,20 @@ class LogCompressorApp(_make_app_base()):
         self._queue: "queue.Queue" = queue.Queue()
         # 共享字体：行级字体必须复用（每行新建 CTkFont 会被 GC 在
         # 任意线程析构，tkinter.Font.__del__ 跨线程调用 Tk 造成死锁）
-        # 修复缺陷R9：列表字体再放大（级别/次数 22 加粗，摘要 18）
-        self._font_row_head = ctk.CTkFont(family="Consolas", size=22,
-                                          weight="bold")
-        self._font_row_summary = ctk.CTkFont(size=18)
+        # 修复缺陷R9：列表字体（级别/次数 22 加粗，摘要 18）
+        # 修复缺陷R10：字号随档位缩放（小/中/大/特大，默认中），并
+        # 全屏字体再放大（头部 28 加粗 / 摘要 24 / 实例行 20）
+        self._font_size = (self._config.get("font_size")
+                           if self._config.get("font_size") in FONT_SIZE_SCALE
+                           else "中")
+        self._font_row_head = ctk.CTkFont(
+            family="Consolas", size=self._font_px(22), weight="bold")
+        self._font_row_summary = ctk.CTkFont(size=self._font_px(18))
         self._font_hint = ctk.CTkFont(size=12)
-        # 修复缺陷R9：全屏窗口字体同步放大（级别/次数 24 加粗，摘要 20）
-        self._font_fs_head = ctk.CTkFont(family="Consolas", size=24,
-                                         weight="bold")
-        self._font_fs_summary = ctk.CTkFont(size=20)
-        self._font_fs_inst = ctk.CTkFont(size=13)
+        self._font_fs_head = ctk.CTkFont(
+            family="Consolas", size=self._font_px(28), weight="bold")
+        self._font_fs_summary = ctk.CTkFont(size=self._font_px(24))
+        self._font_fs_inst = ctk.CTkFont(size=self._font_px(20))
         self._cancel_event = threading.Event()
         self._worker: Optional[threading.Thread] = None
         self._chart_window: Optional[ctk.CTkToplevel] = None
@@ -701,6 +717,43 @@ class LogCompressorApp(_make_app_base()):
             return font_obj.create_scaled_tuple(self._font_scale)
         except (AttributeError, ValueError):
             return font_obj
+
+    def _font_px(self, base: int) -> int:
+        """基准字号 -> 当前档位实际字号（修复缺陷R10：四档缩放）。"""
+        return max(10, round(base * FONT_SIZE_SCALE.get(self._font_size, 1.0)))
+
+    def _apply_font_size(self, choice: str) -> None:
+        """字体大小档位切换（修复缺陷R10：小/中/大/特大，立即生效）。
+
+        - 共享 CTkFont 就地重配（CTk 控件自动跟随更新）；
+        - 原生 tk.Label 的缩放元组是创建时快照，需整表重渲染；
+        - 虚拟列表行高按字体度量计算，重建后自动适配新字号；
+        - 全屏窗口的内联字体（搜索框/详情框）随构建固化 —— 销毁
+          缓存窗口，下次打开按新字号重建（列表行随共享字体刷新）。
+        """
+        if choice not in FONT_SIZE_SCALE or choice == self._font_size:
+            return
+        self._font_size = choice
+        self._font_row_head.configure(size=self._font_px(22))
+        self._font_row_summary.configure(size=self._font_px(18))
+        self._font_fs_head.configure(size=self._font_px(28))
+        self._font_fs_summary.configure(size=self._font_px(24))
+        self._font_fs_inst.configure(size=self._font_px(20))
+        # 重渲染已有结果（经典 / 虚拟 / 对比模式的行级原生标签）
+        if self._compare_results:
+            self._render_compare_list()
+        elif self._result is not None:
+            self._render_cluster_list()
+        # 全屏窗口缓存销毁（内联字体下次打开重建）
+        for win_attr in ("_fs_list_win", "_fs_detail_win"):
+            win = getattr(self, win_attr, None)
+            if win is not None and win.winfo_exists():
+                win.destroy()
+            setattr(self, win_attr, None)
+        self._fs_list_refresh = None
+        self._fs_list_sig = None
+        self._fs_detail_box = None
+        self._save_config()
 
     # ==================================================================
     # UI 构建
@@ -813,13 +866,31 @@ class LogCompressorApp(_make_app_base()):
 
         ctk.CTkLabel(panel, text="级别过滤", font=ctk.CTkFont(weight="bold")
                      ).grid(row=0, column=0, padx=(12, 4), sticky="w")
+        # 修复缺陷R10：复选框集中容器（FATAL 置首 + 旁挂 ⓘ 说明）
         self._level_vars: Dict[str, tk.BooleanVar] = {}
-        for i, level in enumerate(LEVEL_CHECKS):
-            var = tk.BooleanVar(value=level in ("ERROR", "FAIL"))
+        level_box = ctk.CTkFrame(panel, fg_color="transparent")
+        level_box.grid(row=0, column=1, columnspan=6, sticky="w")
+        fatal_help = None
+        col = 0
+        for level in LEVEL_CHECKS:
+            # 修复缺陷R10：默认勾选 FATAL/ERROR/FAIL（FATAL 受控显示）
+            var = tk.BooleanVar(value=level in DEFAULT_SELECTED_LEVELS)
             self._level_vars[level] = var
-            ctk.CTkCheckBox(panel, text=level, variable=var,
+            ctk.CTkCheckBox(level_box, text=level, variable=var,
                             checkbox_width=18, checkbox_height=18).grid(
-                row=0, column=1 + i, padx=6, sticky="w")
+                row=0, column=col, padx=6, sticky="w")
+            col += 1
+            if level == "FATAL":
+                # 修复缺陷R10：FATAL 复选框旁 ⓘ 悬停说明
+                fatal_help = ctk.CTkLabel(
+                    level_box, text="ⓘ", text_color="#4dd0e1",
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                    cursor="question_arrow")
+                fatal_help.grid(row=0, column=col, padx=(0, 2), sticky="w")
+                col += 1
+        if fatal_help is not None:
+            self._fatal_help_tooltip = Tooltip(
+                fatal_help, lambda: _FATAL_LEVEL_HELP)
 
         self._include_entry = ctk.CTkEntry(panel, width=200,
                                            placeholder_text="包含关键字（逗号分隔）")
@@ -849,17 +920,28 @@ class LogCompressorApp(_make_app_base()):
                       pady=(0, 6), sticky="w")
         self._muted_labels.append(ctx_hint)
 
-        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=6, padx=(6, 2),
+        # 修复缺陷R10：字体大小档位（小/中/大/特大，控制错误列表字号）
+        ctk.CTkLabel(panel, text="字体大小").grid(
+            row=2, column=4, padx=(6, 2), pady=(0, 6), sticky="e")
+        self._font_menu = ctk.CTkOptionMenu(
+            panel, values=list(FONT_SIZE_OPTIONS), width=90,
+            command=self._apply_font_size)
+        self._font_menu.set(self._font_size)
+        self._font_menu.grid(row=2, column=5, padx=(2, 12), pady=(0, 6),
+                             sticky="w")
+
+        # 修复缺陷R10：级别复选框容器跨列 1~6，解析规则右移至列 7~9
+        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=7, padx=(6, 2),
                                                   sticky="e")
         self._rule_menu = ctk.CTkOptionMenu(panel, values=list(RULE_NAMES),
                                             width=130,
                                             command=self._on_rule_changed)
-        self._rule_menu.grid(row=0, column=7, padx=(2, 0), sticky="w")
+        self._rule_menu.grid(row=0, column=8, padx=(2, 0), sticky="w")
         # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
         rule_help = ctk.CTkLabel(
             panel, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        rule_help.grid(row=0, column=8, padx=(4, 12), sticky="w")
+        rule_help.grid(row=0, column=9, padx=(4, 12), sticky="w")
         self._rule_help_tooltip = Tooltip(
             rule_help,
             lambda: RULE_DESCRIPTIONS.get(self._rule_menu.get(), ""))
@@ -1018,11 +1100,14 @@ class LogCompressorApp(_make_app_base()):
         """主面板详情标签配置（转发共享方法）。"""
         self._apply_detail_tags(self._detail_box)
 
-    def _apply_detail_tags(self, box: ctk.CTkTextbox) -> None:
+    def _apply_detail_tags(self, box: ctk.CTkTextbox,
+                          big: bool = False) -> None:
         """详情文本高亮标签：关键字 / 业务栈帧 / 元信息 / 折叠提示 / 段落标题。
 
         修复缺陷R5：业务栈帧（bstack）琥珀色加粗，与普通日志行区分
         更明显；系统库折叠提示（fold）独立紫色，视觉清晰。
+        修复缺陷R10：big=True 时启用全屏大字号标签（摘要 20 加粗 /
+        元信息 16 / 栈帧 18 加粗——正文为 box 基础字体 18）。
 
         说明：CTkTextbox.tag_config 禁用 font 选项（与 DPI 缩放不
         兼容），加粗经内部 tk.Text 配置并手动缩放；失败时降级为
@@ -1034,11 +1119,20 @@ class LogCompressorApp(_make_app_base()):
             # 业务栈帧加粗（内部 tk.Text 支持 tag font）
             inner = getattr(box, "_textbox", None)
             if inner is not None:
-                font = ("Consolas", 13, "bold")
+                size_b = self._font_px(13 if not big else 18)
+                font = ("Consolas", size_b, "bold")
                 scaler = getattr(box, "_apply_font_scaling", None)
                 if callable(scaler):
                     font = scaler(font)
                 inner.tag_config("bstack", font=font)
+                if big:
+                    # 全屏详情大字号：段标题 20 加粗 / 元信息 16
+                    for tag, spec in (
+                            ("header", ("Consolas", self._font_px(20),
+                                        "bold")),
+                            ("meta", ("Consolas", self._font_px(16)))):
+                        f = scaler(spec) if callable(scaler) else spec
+                        inner.tag_config(tag, font=f)
         except (tk.TclError, AttributeError):
             pass
 
@@ -1057,8 +1151,16 @@ class LogCompressorApp(_make_app_base()):
     # ==================================================================
     def _restore_config(self) -> None:
         cfg = self._config
+        # 修复缺陷R10：旧配置一次性升级 —— 新增 FATAL 复选框前 FATAL
+        # 是「始终放行」语义（用户无感知），升级默认勾选保持 FATAL 可见
+        levels = list(cfg.get("levels") or DEFAULT_SELECTED_LEVELS)
+        if not cfg.get("fatal_level_upgraded"):
+            if "FATAL" not in levels:
+                levels.insert(0, "FATAL")
+            cfg["fatal_level_upgraded"] = True
+            cfg["levels"] = levels
         for level, var in self._level_vars.items():
-            var.set(level in (cfg.get("levels") or ["ERROR", "FAIL"]))
+            var.set(level in levels)
         if cfg.get("include"):
             self._include_entry.insert(0, ",".join(cfg["include"]))
         if cfg.get("exclude"):
@@ -1072,6 +1174,10 @@ class LogCompressorApp(_make_app_base()):
             self._ctx_entry.insert(0, str(cfg["context_lines"]))
         if cfg.get("rule") in RULE_NAMES:
             self._rule_menu.set(cfg["rule"])
+        # 修复缺陷R10：字体大小档位恢复（__init__ 已按档位建字体，
+        # 此处仅同步选择器显示；字号一致时回调为空操作）
+        if cfg.get("font_size") in FONT_SIZE_SCALE:
+            self._font_menu.set(cfg["font_size"])
         last = cfg.get("last_files") or []
         if last and self._file_entry.get() == "":
             self._file_entry.insert(0, str(last[0]))
@@ -1089,6 +1195,10 @@ class LogCompressorApp(_make_app_base()):
             "rule": self._rule_menu.get(),
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
+            # 修复缺陷R10：字体大小档位持久化（下次启动自动恢复）
+            "font_size": self._font_size,
+            "fatal_level_upgraded": self._config.get(
+                "fatal_level_upgraded", False),
             "window": {"width": self.winfo_width(),
                        "height": self.winfo_height()},
             "last_files": [self._file_entry.get()] +
@@ -1774,6 +1884,8 @@ class LogCompressorApp(_make_app_base()):
 
     @staticmethod
     def _row_color(cluster: ErrorCluster) -> Optional[str]:
+        # 修复缺陷R10：FATAL 红色（#ff5252）比 ERROR（默认行色）更醒目，
+        # 用户一眼区分致命错误
         if cluster.level == "FATAL":
             return "#ff5252"
         if cluster.is_root_cause:
@@ -2036,10 +2148,11 @@ class LogCompressorApp(_make_app_base()):
             font=self._font_row_head)
         # 修复缺陷R9：行距与主列表一致 + 摘要单行不换行（水平滚动查看）
         head.pack(fill="x", padx=(10, 10), pady=(7, 2))
+        # 修复缺陷R10：对比行摘要补 DPI 缩放（与主列表渲染一致）
         summary = tk.Label(
             frame, text=item.summary, anchor="w", justify="left",
             wraplength=0,
-            font=self._font_row_summary,
+            font=self._scaled_font(self._font_row_summary),
             bg=p["row_bg"], fg=p["row_text"])
         summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
         return {"frame": frame, "summary": summary, "kind": kind,
@@ -2223,10 +2336,14 @@ class LogCompressorApp(_make_app_base()):
 
         bar = ctk.CTkFrame(win, corner_radius=0)
         bar.pack(fill="x")
-        ctk.CTkLabel(bar, text="搜索：").pack(side="left", padx=(12, 4))
+        # 修复缺陷R10：全屏搜索框字体放大到 18（标签同步，视觉平衡）
+        ctk.CTkLabel(bar, text="搜索：",
+                     font=ctk.CTkFont(size=18)).pack(
+            side="left", padx=(12, 4))
         search_var = tk.StringVar()
         search = ctk.CTkEntry(bar, textvariable=search_var,
-                              placeholder_text="按摘要 / 模块 / 级别过滤…")
+                             font=ctk.CTkFont(size=18),
+                             placeholder_text="按摘要 / 模块 / 级别过滤…")
         search.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
         count_label = ctk.CTkLabel(bar, text="", text_color="#8fa4b8")
         count_label.pack(side="right", padx=12)
@@ -2250,16 +2367,19 @@ class LogCompressorApp(_make_app_base()):
         # 右侧详情面板（修复缺陷R4：点击簇/实例即时联动）
         detail_head = ctk.CTkFrame(body, fg_color="transparent")
         detail_head.grid(row=0, column=1, sticky="new", padx=(3, 6))
+        # 修复缺陷R10：全屏详情面板字体放大（正文 18，标题随行放大）
         ctk.CTkLabel(detail_head, text="详情（簇典型样例 / 实例原始日志）",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(
+                     font=ctk.CTkFont(size=15, weight="bold")).pack(
             side="left", pady=(4, 2))
         fs_detail = ctk.CTkTextbox(
-            body, font=ctk.CTkFont(family="Consolas", size=13),
+            body, font=ctk.CTkFont(family="Consolas",
+                                   size=self._font_px(18)),
             wrap="none")
         fs_detail.grid(row=0, column=1, sticky="nsew", padx=(3, 6),
                        pady=(26, 0))
         # 详情高亮标签（与主面板同一套配色，修复缺陷R5）
-        self._apply_detail_tags(fs_detail)
+        # 修复缺陷R10：全屏详情大字号标签（摘要 20 / 元信息 16 / 栈帧 18）
+        self._apply_detail_tags(fs_detail, big=True)
 
         fs_rows: List[dict] = []
         render_jobs: List[str] = []        # 分批渲染的挂起任务（重过滤时取消）
@@ -2326,11 +2446,13 @@ class LogCompressorApp(_make_app_base()):
             """实例行：原生 tk.Label（控件复用，轻量批量创建）。"""
             ts = format_timestamp(inst.timestamp)
             text = f"{ts}  L{inst.line_no}  {inst.summary}"
+            # 修复缺陷R10：实例行放大到 20 号 + DPI 缩放 + 单行不换行
+            # （长实例文本靠列表底部水平滚动条左右滑动查看完整内容）
             lbl = tk.Label(parent, text=text, anchor="w", justify="left",
-                           font=self._font_fs_inst,
+                           font=self._scaled_font(self._font_fs_inst),
                            bg=inst_bg, fg=p["row_text"],
-                           cursor="hand2", wraplength=440)
-            lbl.pack(fill="x", padx=(34, 8), pady=1)
+                           cursor="hand2", wraplength=0)
+            lbl.pack(fill="x", padx=(34, 8), pady=3)
             lbl.bind("<Button-1>",
                      lambda e, i=inst, l=lbl: select_instance(idx, i, l))
             lbl.bind("<Enter>", lambda e, l=lbl: l.configure(
@@ -2410,7 +2532,8 @@ class LogCompressorApp(_make_app_base()):
                             area,
                             text=f"…… 共 {cluster.count} 次，"
                                  f"仅展示前 {len(insts)} 条实例",
-                            font=self._font_fs_inst, bg=inst_bg,
+                            font=self._scaled_font(self._font_fs_inst),
+                            bg=inst_bg,
                             fg=p["muted"], anchor="w"
                         ).pack(fill="x", padx=(34, 8), pady=(2, 4))
             add_batch()
@@ -2485,10 +2608,14 @@ class LogCompressorApp(_make_app_base()):
         win = self._make_fullscreen_window("对比差异列表")
         bar = ctk.CTkFrame(win, corner_radius=0)
         bar.pack(fill="x")
-        ctk.CTkLabel(bar, text="搜索：").pack(side="left", padx=(12, 4))
+        # 修复缺陷R10：对比全屏搜索框字体 18（与全屏列表窗口一致）
+        ctk.CTkLabel(bar, text="搜索：",
+                     font=ctk.CTkFont(size=18)).pack(side="left",
+                                                      padx=(12, 4))
         search_var = tk.StringVar()
         search = ctk.CTkEntry(bar, textvariable=search_var,
-                              placeholder_text="按摘要 / 模块 / 级别过滤…")
+                             font=ctk.CTkFont(size=18),
+                             placeholder_text="按摘要 / 模块 / 级别过滤…")
         search.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
         count_label = ctk.CTkLabel(bar, text="", text_color="#8fa4b8")
         count_label.pack(side="right", padx=12)
@@ -2575,8 +2702,10 @@ class LogCompressorApp(_make_app_base()):
                                "支持上下左右滚动）").pack(side="left", padx=12)
         ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
                       command=hide).pack(side="right", padx=12, pady=8)
+        # 修复缺陷R10：详情全屏基础字号 13 -> 18（全屏窗口大字体）
         box = ctk.CTkTextbox(win, font=ctk.CTkFont(family="Consolas",
-                                                   size=13), wrap="none")
+                                                  size=self._font_px(18)),
+                             wrap="none")
         # 水平滚动条（垂直滚动条 CTkTextbox 自带）
         xbar = tk.Scrollbar(win, orient="horizontal", command=box.xview)
         box.configure(xscrollcommand=xbar.set)

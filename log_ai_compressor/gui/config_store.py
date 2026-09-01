@@ -16,12 +16,15 @@ from typing import Any, Dict, Optional
 from log_ai_compressor.constants import CONFIG_FILE
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "levels": ["ERROR", "FAIL"],
+    # 修复缺陷R10：默认级别含 FATAL（FATAL 受复选框控制）
+    "levels": ["FATAL", "ERROR", "FAIL"],
     "include": [],
     "exclude": [],
     "top_n": 20,
     # 修复缺陷#5：默认上下文行数 5 -> 50（详情可看内容太少）
     "context_lines": 50,
+    # 修复缺陷R10：字体大小档位（小/中/大/特大，持久化恢复）
+    "font_size": "中",
     "rule": "generic",
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},

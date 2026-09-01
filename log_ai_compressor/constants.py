@@ -34,8 +34,10 @@ LEVEL_WEIGHT = {
 # 错误类级别：参与错误统计、时间趋势与聚类
 ERROR_LEVELS = frozenset({"FATAL", "ERROR", "FAIL"})
 
-# GUI / CLI 默认勾选级别（ERROR + FAIL 双核心）
-DEFAULT_SELECTED_LEVELS = ("ERROR", "FAIL")
+# GUI / CLI 默认勾选级别（FATAL + ERROR + FAIL 三核心）
+# 修复缺陷R10：FATAL 纳入级别过滤复选框（默认勾选），取消
+# 「FATAL 始终放行」语义 —— 勾选才显示，取消即过滤。
+DEFAULT_SELECTED_LEVELS = ("FATAL", "ERROR", "FAIL")
 
 # 变体级别 -> 规范级别（大小写不敏感匹配，见 normalize_level）
 LEVEL_ALIASES = {
