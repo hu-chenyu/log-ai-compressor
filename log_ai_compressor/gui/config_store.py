@@ -25,6 +25,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "context_lines": 50,
     # 修复缺陷R10：字体大小档位（小/中/大/特大，持久化恢复）
     "font_size": "中",
+    # 修复缺陷R12：错误列表|详情面板 分隔条位置（左列宽度比例）
+    "splitter_ratio": 0.4,
     "rule": "generic",
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},
