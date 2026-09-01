@@ -914,21 +914,13 @@ class LogCompressorApp(_make_app_base()):
         self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
         self._ctx_entry.grid(row=2, column=1, padx=(2, 6), pady=(0, 6),
                              sticky="w")
+        # 修复缺陷R11：字体大小选择器移至错误列表标题栏后，提示文字
+        # 扩展跨列填充原空白（col 2~5，不留大块空隙）
         ctx_hint = ctk.CTkLabel(
             panel, text="典型样例前后各保留的上下文行数（5~200）")
-        ctx_hint.grid(row=2, column=2, columnspan=2, padx=(2, 6),
+        ctx_hint.grid(row=2, column=2, columnspan=4, padx=(2, 12),
                       pady=(0, 6), sticky="w")
         self._muted_labels.append(ctx_hint)
-
-        # 修复缺陷R10：字体大小档位（小/中/大/特大，控制错误列表字号）
-        ctk.CTkLabel(panel, text="字体大小").grid(
-            row=2, column=4, padx=(6, 2), pady=(0, 6), sticky="e")
-        self._font_menu = ctk.CTkOptionMenu(
-            panel, values=list(FONT_SIZE_OPTIONS), width=90,
-            command=self._apply_font_size)
-        self._font_menu.set(self._font_size)
-        self._font_menu.grid(row=2, column=5, padx=(2, 12), pady=(0, 6),
-                             sticky="w")
 
         # 修复缺陷R10：级别复选框容器跨列 1~6，解析规则右移至列 7~9
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=7, padx=(6, 2),
@@ -1001,16 +993,27 @@ class LogCompressorApp(_make_app_base()):
         panel.grid_rowconfigure(1, weight=1)
 
         # 修复缺陷#7：列表 / 详情标题行增加「全屏」按钮（独立最大化窗口）
+        # 修复缺陷R11：字体大小选择器移入标题栏（标题 → 字体大小 → 全屏）
         list_head = ctk.CTkFrame(panel, fg_color="transparent")
         list_head.grid(row=0, column=0, padx=10, pady=(4, 2), sticky="ew")
         list_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(list_head, text="错误分类列表（按优先级降序）",
                      font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=0, column=0, sticky="w")
+        # 修复缺陷R11：「字体大小」选择器（小/中/大/特大档，控制列表字号）
+        self._font_label = ctk.CTkLabel(list_head, text="字体大小",
+                                        font=ctk.CTkFont(size=12))
+        self._font_label.grid(row=0, column=1, padx=(10, 2), sticky="e")
+        self._muted_labels.append(self._font_label)
+        self._font_menu = ctk.CTkOptionMenu(
+            list_head, values=list(FONT_SIZE_OPTIONS), width=80, height=26,
+            command=self._apply_font_size)
+        self._font_menu.set(self._font_size)
+        self._font_menu.grid(row=0, column=2, padx=(0, 6), sticky="e")
         self._list_fs_btn = ctk.CTkButton(list_head, text="⛶ 全屏", width=84,
                                           height=26,
                                           command=self._open_list_fullscreen)
-        self._list_fs_btn.grid(row=0, column=1, padx=(6, 0), sticky="e")
+        self._list_fs_btn.grid(row=0, column=3, padx=(0, 0), sticky="e")
         self._accent_buttons.append((self._list_fs_btn, "accent"))
 
         # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
