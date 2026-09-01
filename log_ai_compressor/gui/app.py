@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox
@@ -110,7 +111,8 @@ _CLUSTER_ICON = {"fatal": "\u25c6", "root": "\u25b2", "burst": "\u25cf",
 # 可拖动分隔条底色与握点色（半透明观感的灰系，四态各自协调）
 THEMES: Dict[str, Dict[str, str]] = {
     "light": {
-        "name": "☀️ 亮色", "window": "#eef1f6", "card": "#ffffff",
+        "name": "☀️ 亮色", "icon": "☀️", "label": "亮色",
+        "window": "#eef1f6", "card": "#ffffff",
         "header": "#ffffff", "text": "#1f2937", "muted": "#6b7280",
         "accent": "#3B82F6", "accent_hover": "#2563EB", "accent_text": "#ffffff",
         "row_bg": "#ffffff", "row_hover": "#eff6ff", "row_selected": "#bfdbfe",
@@ -118,7 +120,8 @@ THEMES: Dict[str, Dict[str, str]] = {
         "splitter": "#c3ccd9", "splitter_grip": "#8a97a8",
     },
     "dark": {
-        "name": "🌙 暗色", "window": "#111827", "card": "#1c2433",
+        "name": "🌙 暗色", "icon": "🌙", "label": "暗色",
+        "window": "#111827", "card": "#1c2433",
         "header": "#161e2d", "text": "#e5e7eb", "muted": "#94a3b8",
         "accent": "#3B82F6", "accent_hover": "#60a5fa", "accent_text": "#ffffff",
         "row_bg": "#1c2433", "row_hover": "#2a3547", "row_selected": "#1d4ed8",
@@ -126,7 +129,8 @@ THEMES: Dict[str, Dict[str, str]] = {
         "splitter": "#3a485e", "splitter_grip": "#64758f",
     },
     "blue": {
-        "name": "🔵 蓝调", "window": "#cfe3fa", "card": "#e8f1fd",
+        "name": "🔵 蓝调", "icon": "🔵", "label": "蓝调",
+        "window": "#cfe3fa", "card": "#e8f1fd",
         "header": "#bcd6f5", "text": "#173a63", "muted": "#486e9c",
         "accent": "#ffffff", "accent_hover": "#f4f9ff", "accent_text": "#1d4ed8",
         "row_bg": "#e8f1fd", "row_hover": "#cfe0f5", "row_selected": "#8cbaf0",
@@ -134,7 +138,8 @@ THEMES: Dict[str, Dict[str, str]] = {
         "splitter": "#a9c4e4", "splitter_grip": "#6d95c2",
     },
     "green": {
-        "name": "🟢 绿调", "window": "#cdeeda", "card": "#e6f7ec",
+        "name": "🟢 绿调", "icon": "🟢", "label": "绿调",
+        "window": "#cdeeda", "card": "#e6f7ec",
         "header": "#b7e3c8", "text": "#14432a", "muted": "#3f7d59",
         "accent": "#ffffff", "accent_hover": "#f2fbf6", "accent_text": "#15803d",
         "row_bg": "#e6f7ec", "row_hover": "#cdecd9", "row_selected": "#8fdcab",
@@ -144,6 +149,10 @@ THEMES: Dict[str, Dict[str, str]] = {
 }
 # 主题顺序（下拉列表展示顺序；修复缺陷R13 后不再循环点击）
 THEME_ORDER = ("light", "dark", "blue", "green")
+# 修复缺陷R14：主题下拉图标列固定宽（逻辑 px，CTk 自动随 DPI 缩放）
+# —— 四个 emoji（☀️🌙🔵🟢）字形宽度不一，固定图标列后文字列起始
+# 位置完全一致（垂直对齐）；选择框与弹窗共用同一列宽
+_THEME_ICON_COL = 28
 # 兼容别名（旧配置 appearance 值）
 _THEME_ALIASES = {"dark": "dark", "light": "light", "blue": "blue",
                   "green": "green"}
@@ -808,14 +817,30 @@ class LogCompressorApp(_make_app_base()):
             font=ctk.CTkFont(size=12))
         subtitle.grid(row=0, column=2, padx=6, sticky="w")
         self._muted_labels.append(subtitle)
-        # 修复缺陷R13（第三轮#7）：主题切换改为下拉选择框 —— 可直接
-        # 选择任意主题（无需循环点击）；下拉列表只列其他三态（当前项
-        # 不重复出现），选中即触发原四态切换逻辑（调色板批量刷新）
-        self._theme_menu = ctk.CTkOptionMenu(
-            bar, values=self._theme_menu_values(), width=96, height=28,
-            command=self._on_theme_selected)
-        self._theme_menu.set(self._palette()["name"])
-        self._theme_menu.grid(row=0, column=3, padx=(6, 16))
+        # 修复缺陷R13（第三轮#7）：主题切换改为下拉选择 —— 可直接选择
+        # 任意主题（无需循环点击）；下拉列表只列其他三态（当前项不重复
+        # 出现），选中即触发原四态切换逻辑（调色板批量刷新）。
+        # 修复缺陷R14：选择框为复合控件（图标列固定宽 + 主题名 + ▼），
+        # 自定义弹窗两列布局 —— emoji 宽度不一不再影响文字对齐。
+        self._theme_box = ctk.CTkFrame(bar, corner_radius=6,
+                                        cursor="hand2")
+        self._theme_box.grid(row=0, column=3, padx=(6, 16))
+        p = self._palette()
+        self._theme_box_icon = ctk.CTkLabel(
+            self._theme_box, text=p["icon"],
+            width=self._measure_theme_icon_col(), anchor="center")
+        self._theme_box_icon.grid(row=0, column=0, padx=(8, 0), pady=(3, 3))
+        self._theme_box_name = ctk.CTkLabel(
+            self._theme_box, text=p["label"], anchor="w")
+        self._theme_box_name.grid(row=0, column=1, padx=(4, 4))
+        self._theme_box_arrow = ctk.CTkLabel(
+            self._theme_box, text="▼", anchor="center")
+        self._theme_box_arrow.grid(row=0, column=2, padx=(0, 8))
+        # 点击选择框任意区域（含图标/文字/箭头）弹出下拉
+        for w in (self._theme_box, self._theme_box_icon,
+                  self._theme_box_name, self._theme_box_arrow):
+            w.bind("<Button-1>", self._on_theme_box_click)
+        self._build_theme_popup()
 
     # ------------------------------------------------------------------
     def _build_tabs(self) -> None:
@@ -1515,27 +1540,137 @@ class LogCompressorApp(_make_app_base()):
                 self._status_label.configure(
                     text=f"已拖入文件：{paths[0]}（点击开始分析）")
 
-    def _theme_menu_values(self) -> List[str]:
-        """主题下拉列表内容：除当前主题外的其他三态（保持循环顺序）。
+    def _measure_theme_icon_col(self) -> int:
+        """实测主题 emoji 最宽渲染宽 → 图标列宽（逻辑 px，≥ 基准 28）。
+
+        修复缺陷R14：CTkLabel 的 width 只是**最小值** —— 内容更宽时
+        标签自动扩展（如 200% DPI 下 🔵 渲染 62 物理 px > 28 逻辑
+        ×2=56），固定列宽失效、文字错位。启动时按真实渲染宽度实测
+        取 max+余量，保证四行图标列宽严格一致且不裁剪图标。
+        """
+        if getattr(self, "_theme_icon_col", 0):
+            return self._theme_icon_col
+        scale = max(1.0, getattr(self, "_font_scale", 1.0))
+        probe = ctk.CTkFrame(self, fg_color="transparent")
+        labels = [ctk.CTkLabel(probe, text=THEMES[k]["icon"])
+                  for k in THEME_ORDER]
+        for i, lbl in enumerate(labels):
+            lbl.grid(row=0, column=i)
+        probe.update_idletasks()
+        try:
+            max_phys = max(lbl.winfo_reqwidth() for lbl in labels)
+        finally:
+            probe.destroy()
+        self._theme_icon_col = max(_THEME_ICON_COL,
+                                   int(-(-max_phys // scale)) + 2)
+        return self._theme_icon_col
+
+    def _build_theme_popup(self) -> None:
+        """构建主题下拉弹窗（两列对齐：固定宽图标列 + 左对齐文字列）。
+
+        修复缺陷R14：CTkOptionMenu 内部是 tkinter.Menu（纯文本项），
+        四个 emoji（☀️🌙🔵🟢）字形宽度不一导致文字起始位置错乱。
+        自定义 CTkToplevel 弹窗：每行 grid 两列 —— 图标列固定宽
+        _THEME_ICON_COL 且居中（图标宽度差异被列宽吸收），文字列
+        左对齐 —— 四行文字起始 x 完全一致。当前主题行打开时隐藏
+        （R13 排除当前项语义保留）。
+        """
+        win = ctk.CTkToplevel(self)
+        win.overrideredirect(True)          # 无边框原生弹窗
+        win.withdraw()
+        win.attributes("-topmost", True)
+        self._theme_popup = win
+        self._theme_popup_rows: Dict[str, dict] = {}
+        self._theme_popup_last_close = 0.0
+        win.grid_columnconfigure(0, weight=1)
+        # 失焦自动收起（点击别处 / 切窗口）
+        win.bind("<FocusOut>", lambda e: self._close_theme_popup())
+        icon_col = self._measure_theme_icon_col()
+        for i, key in enumerate(THEME_ORDER):
+            row = ctk.CTkFrame(win, corner_radius=4,
+                              fg_color="transparent", cursor="hand2")
+            row.grid(row=i, column=0, sticky="ew", padx=2, pady=1)
+            t = THEMES[key]
+            icon = ctk.CTkLabel(row, text=t["icon"], width=icon_col,
+                               anchor="center")
+            icon.grid(row=0, column=0, padx=(8, 0), pady=(4, 4))
+            name = ctk.CTkLabel(row, text=t["label"], anchor="w")
+            name.grid(row=0, column=1, padx=(4, 8))
+            # 行 + 子控件均可点击选择；悬停整行高亮。
+            # CTk 控件 bind 实际注册在内部 canvas（真实点击命中处），
+            # 外层 tk 部件再绑一份 —— event_generate 直发外层时不经过
+            # canvas，双注册保证两种派发路径都能触发（真实点击只命中
+            # canvas 一路，不会重复触发；与分隔条同方案）
+            for w in (row, icon, name):
+                w.bind("<Button-1>",
+                       lambda e, k=key: self._on_theme_selected(k))
+                w.bind("<Enter>",
+                       lambda e, r=row: self._theme_row_hover(r, True))
+                w.bind("<Leave>",
+                       lambda e, r=row: self._theme_row_hover(r, False))
+                tk.Frame.bind(w, "<Button-1>",
+                             lambda e, k=key: self._on_theme_selected(k))
+            self._theme_popup_rows[key] = {
+                "row": row, "icon": icon, "name": name}
+
+    def _theme_row_hover(self, row, hovered: bool) -> None:
+        """弹窗行悬停高亮（当前调色板 row_hover 色）。"""
+        try:
+            row.configure(fg_color=self._palette()["row_hover"]
+                          if hovered else "transparent")
+        except (tk.TclError, ValueError):
+            pass
+
+    def _on_theme_box_click(self, _event=None) -> None:
+        """点击选择框：切换弹窗开合（FocusOut 先收起，250ms 防抖）。"""
+        if time.perf_counter() - self._theme_popup_last_close < 0.25:
+            return      # 刚因失焦收起 —— 本次点击仅视为"关闭"
+        if self._theme_popup.state() == "normal":
+            self._close_theme_popup()
+        else:
+            self._open_theme_popup()
+
+    def _open_theme_popup(self) -> None:
+        """弹出下拉列表：贴选择框正下方（物理像素定位，DPI 精确）。"""
+        self._update_theme_menu()           # 刷新可见行（排除当前项）
+        box = self._theme_box
+        win = self._theme_popup
+        try:
+            x = box.winfo_rootx()
+            y = box.winfo_rooty() + box.winfo_height() + 2
+        except tk.TclError:
+            return
+        win.update_idletasks()
+        w = max(box.winfo_width(), win.winfo_reqwidth() + 8)
+        # wm_geometry 用物理像素（CTk 的 geometry 会二次缩放）
+        win.wm_geometry(f"{w}x{win.winfo_reqheight()}+{x}+{y}")
+        win.deiconify()
+        win.focus_set()                     # 获取焦点以触发失焦收起
+
+    def _close_theme_popup(self) -> None:
+        """收起下拉列表（记录时间戳用于点击防抖）。"""
+        if self._theme_popup.state() != "withdrawn":
+            self._theme_popup_last_close = time.perf_counter()
+        self._theme_popup.withdraw()
+
+    def _theme_popup_items(self) -> List[str]:
+        """下拉列表当前可见项（除当前主题外的其他三态，保持顺序）。
 
         修复缺陷R13：当前主题不重复出现在列表中（避免重复选择）；
         列表顺序沿用 THEME_ORDER（亮色、暗色、蓝调、绿调）去掉当前项。
         """
-        cur = self._palette()["name"]
-        return [THEMES[k]["name"] for k in THEME_ORDER
-                if THEMES[k]["name"] != cur]
+        return [k for k in THEME_ORDER if k != self._theme]
 
-    def _on_theme_selected(self, choice: str) -> None:
+    def _on_theme_selected(self, key: str) -> None:
         """下拉选择主题：直接切换到所选主题（淡出 -> 切换 -> 淡入）。
 
         修复缺陷R13（第三轮#7）：由循环点击改为下拉直达 —— 可跳过
         中间主题直接选中任意目标；切换动画与底层刷新逻辑不变。
         """
-        target = next((k for k in THEME_ORDER
-                       if THEMES[k]["name"] == choice), None)
-        if target is None or target == self._theme:
+        if key not in THEMES or key == self._theme:
             return
-        self._fade_out(target, 0)
+        self._close_theme_popup()
+        self._fade_out(key, 0)
 
     # 主题过渡帧序列（窗口透明度）
     _FADE_OUT_STEPS = (1.0, 0.82, 0.66, 0.55)
@@ -1622,38 +1757,49 @@ class LogCompressorApp(_make_app_base()):
                 dot.configure(bg=p["splitter_grip"])
             except (tk.TclError, ValueError):
                 pass
-        # 修复缺陷R13：主题下拉选择框配色 —— OptionMenu 的选项名与
-        # 按钮不同（button_color/button_hover_color，无 hover_color），
-        # 不能走 _accent_buttons 通道；下拉列表用卡片底色 + 选中蓝
-        # 高亮 + 正文色，四态各自协调
-        menu = getattr(self, "_theme_menu", None)
-        if menu is not None:
+        # 修复缺陷R13/R14：主题选择框（复合控件）+ 下拉弹窗配色 ——
+        # 框身用 accent 底色 + accent_text 文字（蓝调/绿调下为白底
+        # 深字）；弹窗用卡片底色 + 正文色，行悬停 row_hover，四态协调
+        box = getattr(self, "_theme_box", None)
+        if box is not None:
             try:
-                menu.configure(
-                    fg_color=p["accent"], button_color=p["accent"],
-                    button_hover_color=p["accent_hover"],
-                    text_color=p["accent_text"],
-                    dropdown_fg_color=p["card"],
-                    dropdown_hover_color=p["row_selected"],
-                    dropdown_text_color=p["text"])
+                box.configure(fg_color=p["accent"])
+                for lbl in (self._theme_box_icon, self._theme_box_name):
+                    lbl.configure(text_color=p["accent_text"])
+                self._theme_box_arrow.configure(text_color=p["accent_text"])
+                self._theme_popup.configure(fg_color=p["card"])
+                for entry in self._theme_popup_rows.values():
+                    entry["icon"].configure(text_color=p["text"])
+                    entry["name"].configure(text_color=p["text"])
             except (tk.TclError, ValueError, AttributeError):
                 pass
         self._refresh_row_colors()
         self._update_theme_menu()
 
     def _update_theme_menu(self) -> None:
-        """主题下拉选择框同步当前主题（显示值 + 列表排除当前项）。
+        """同步选择框显示与弹窗可见行（当前主题不重复出现）。
 
-        修复缺陷R13：set() 不触发 command（避免回调递归）；列表值
-        每次切换后重算，保证当前主题不重复出现。
+        修复缺陷R14：图标/文字分列显示（两列布局对齐）；弹窗当前
+        主题行 grid_remove 隐藏（其余行按 THEME_ORDER 原顺序重排，
+        图标列固定宽不受行增删影响）。
         """
-        menu = getattr(self, "_theme_menu", None)
-        if menu is None:
+        box = getattr(self, "_theme_box", None)
+        if box is None:
             return
-        name = self._palette()["name"]
-        if menu.get() != name:
-            menu.set(name)
-        menu.configure(values=self._theme_menu_values())
+        p = self._palette()
+        if self._theme_box_icon.cget("text") != p["icon"]:
+            self._theme_box_icon.configure(text=p["icon"])
+        if self._theme_box_name.cget("text") != p["label"]:
+            self._theme_box_name.configure(text=p["label"])
+        vis = 0
+        for key in THEME_ORDER:
+            row = self._theme_popup_rows[key]["row"]
+            if key == self._theme:
+                row.grid_remove()          # 排除当前项（R13 语义）
+            else:
+                row.grid()
+                row.grid_configure(row=vis)   # 压实行序不留空行
+                vis += 1
 
     def _refresh_row_colors(self) -> None:
         """主题切换后刷新列表行配色（原生 tk.Label 不随 CTk 主题）。"""
