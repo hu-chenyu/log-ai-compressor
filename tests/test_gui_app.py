@@ -781,12 +781,14 @@ class TestSplitter:
             "左右列 + 分隔条应占满面板宽"
 
     def test_drag_min_width_limits(self, app):
-        """修复R12：拖到最左/最右受最小宽度限制（列表≥200 / 详情≥300 逻辑px）。"""
+        """修复R12：拖到最左/最右受最小宽度限制（动态实测标题栏宽）。"""
         app.update()
         sp = app._splitter
         scale = max(1.0, app._font_scale)
-        min_list = _SPLITTER_MIN_LIST * scale - 4     # 逻辑值换算物理像素
-        min_detail = _SPLITTER_MIN_DETAIL * scale - 4
+        # 动态最小宽（标题栏实测）为下限；固定常量兜底值也应满足
+        left_min, right_min = app._splitter_min_widths()
+        min_list = max(_SPLITTER_MIN_LIST * scale, left_min) - 4
+        min_detail = max(_SPLITTER_MIN_DETAIL * scale, right_min) - 4
         # 拖到最左
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
@@ -807,6 +809,63 @@ class TestSplitter:
         assert app._detail_col.winfo_width() >= min_detail, \
             f"详情最小宽度应 ≥{min_detail:.0f}物理px（实际 {app._detail_col.winfo_width()}）"
         assert app._list_col.winfo_width() >= min_list
+
+    def test_extremes_keep_titlebars_visible(self, app):
+        """修复R12：拖到左右极限时标题栏控件完整可见（不被遮挡）。
+
+        旧固定最小宽（200/300）小于标题栏内容宽：最左时「错误分类
+        列表（按优先级降序）」整体被裁，最右时「详情」起首两字被
+        分隔条挡住。断言：极限列宽 ≥ 标题栏请求宽 + padx，且标题栏
+        每个子控件完全落在列内。
+        """
+        app.update()
+        sp = app._splitter
+        scale = max(1.0, app._font_scale)
+        pad = 10 * scale * 2        # 标题栏 grid padx（物理，两侧）
+
+        def check_visible(col, head, tag):
+            app.update_idletasks(); app.update()
+            assert col.winfo_width() >= head.winfo_reqwidth() + pad - 2, \
+                f"{tag}: 列宽 {col.winfo_width()} 应 ≥ 标题栏需求 " \
+                f"{head.winfo_reqwidth() + pad}"
+            # 标题栏每个子控件完整落在列内（几何不遮挡的强断言）
+            col_l = col.winfo_rootx()
+            col_r = col_l + col.winfo_width()
+            for child in head.winfo_children():
+                cl = child.winfo_rootx()
+                cr = cl + child.winfo_width()
+                assert cl >= col_l - 2, f"{tag}: 子控件左缘越界"
+                assert cr <= col_r + 2, f"{tag}: 子控件右缘越界（被裁剪）"
+
+        # 拖到最左：左列表标题完整可见
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=-5000, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=-5000, y=40)
+        app.update()
+        check_visible(app._list_col, app._list_head, "最左极限")
+        check_visible(app._detail_col, app._detail_head, "最左极限右列")
+
+        # 拖到最右：右详情标题完整可见
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=5000, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=5000, y=40)
+        app.update()
+        check_visible(app._detail_col, app._detail_head, "最右极限")
+        check_visible(app._list_col, app._list_head, "最右极限左列")
+
+        # 极限后仍能拖回（不锁死）
+        pw = max(1, app._result_panel.winfo_width())
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=3 - int(pw * 0.3), y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=3 - int(pw * 0.3), y=40)
+        app.update()
+        assert app._splitter_ratio < 0.75, "从右极限应能拖回"
 
     def test_drag_back_from_rightmost(self, app):
         """修复R12：拖到最右后仍能拖回左边（比例可恢复，不锁死）。

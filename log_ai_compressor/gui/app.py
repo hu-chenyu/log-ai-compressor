@@ -156,8 +156,10 @@ VIRTUAL_LIST_THRESHOLD = 40
 
 # 修复缺陷R12：错误列表 | 详情面板 可拖动分隔条参数
 _SPLITTER_WIDTH = 6            # 分隔条宽度（像素）
-_SPLITTER_MIN_LIST = 200       # 错误列表列最小宽度（像素）
-_SPLITTER_MIN_DETAIL = 300     # 详情面板列最小宽度（像素）
+# 列最小宽兜底值（逻辑像素）—— 实际以标题栏内容动态实测为准
+# （_splitter_min_widths；200/300 旧值小于标题栏内容宽导致极限遮挡）
+_SPLITTER_MIN_LIST = 420       # 左列兜底（实测标题栏 ~412 + 余量）
+_SPLITTER_MIN_DETAIL = 360     # 右列兜底（实测标题栏 ~325 + padx + 余量）
 _SPLITTER_DEFAULT_RATIO = 0.4  # 默认左右宽度比（列表:详情 = 2:3）
 
 # 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7/R5）
@@ -1025,6 +1027,8 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷#7：列表 / 详情标题行增加「全屏」按钮（独立最大化窗口）
         # 修复缺陷R11：字体大小选择器移入标题栏（标题 → 字体大小 → 全屏）
         list_head = ctk.CTkFrame(self._list_col, fg_color="transparent")
+        # 修复缺陷R12：留存标题栏引用（动态最小宽度实测依据）
+        self._list_head = list_head
         list_head.grid(row=0, column=0, padx=10, pady=(4, 2), sticky="ew")
         list_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(list_head, text="错误分类列表（按优先级降序）",
@@ -1048,6 +1052,8 @@ class LogCompressorApp(_make_app_base()):
 
         # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
         detail_head = ctk.CTkFrame(self._detail_col, fg_color="transparent")
+        # 修复缺陷R12：留存标题栏引用（动态最小宽度实测依据）
+        self._detail_head = detail_head
         detail_head.grid(row=0, column=0, padx=10, pady=(4, 2), sticky="ew")
         detail_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(detail_head, text="详情（典型样例 · 上下文 · 降噪堆栈）",
@@ -1139,6 +1145,28 @@ class LogCompressorApp(_make_app_base()):
         except (tk.TclError, ValueError):
             pass
 
+    def _splitter_min_widths(self):
+        """动态测量左右列最小宽度（标题栏内容实测宽 + 边距，物理像素）。
+
+        修复缺陷R12（极限遮挡）：固定 200/300 逻辑像素小于标题栏
+        内容宽度 —— 拖到最左时左列标题「错误分类列表（按优先级
+        降序）」整体被裁，拖到最右时右列「详情」起首两字被分隔条
+        挡住。以标题栏请求宽度实测为准（winfo_reqwidth 物理值，
+        DPI 缩放已含其中），文案/字号/按钮尺寸变化自动适配；标题
+        栏尚未布局完成（请求宽 ≤1）时回退保守常量。
+        """
+        scale = max(1.0, getattr(self, "_font_scale", 1.0))
+        # 标题栏 grid padx 单侧 10 逻辑 px + 两侧；再加 20 逻辑 px 余量
+        base = 10 * scale * 2 + 20 * scale
+        try:
+            lreq = self._list_head.winfo_reqwidth()
+            rreq = self._detail_head.winfo_reqwidth()
+        except (tk.TclError, AttributeError):
+            lreq = rreq = 0
+        if lreq <= 1 or rreq <= 1:        # 标题栏尚未布局完成
+            return _SPLITTER_MIN_LIST * scale, _SPLITTER_MIN_DETAIL * scale
+        return lreq + base, rreq + base
+
     def _layout_splitter(self) -> None:
         """按比例布局左右列与分隔条（全部 relx/relwidth 比例参数）。
 
@@ -1149,17 +1177,18 @@ class LogCompressorApp(_make_app_base()):
         面板外（详情面板消失、中间大片空白、拖动反馈错乱）。全部改用
         比例参数后缩放天然无关；分隔条自身宽度由构造器 width=6
         （逻辑 px，CTk 自动换算物理）承担。三列 relx 首尾相接占满面板。
+        最小宽度以标题栏实测动态值为准（防极限遮挡）。
         """
         panel = self._result_panel
         pw = panel.winfo_width()          # 物理像素
         r = self._splitter_ratio
         scale = max(1.0, getattr(self, "_font_scale", 1.0))
         sp_w = _SPLITTER_WIDTH * scale    # 分隔条物理宽
+        left_min, right_min = self._splitter_min_widths()
         # 面板太窄放不下「两列最小宽 + 分隔条」：按比例铺满但不改写
         # 比例（<Configure> 中间态宽度逐级增长，此处钳制会把比例
         # 污染成窄面板下的极值），等宽度足够时再按保存比例重排
-        if pw < (_SPLITTER_MIN_LIST + _SPLITTER_MIN_DETAIL
-                 + _SPLITTER_WIDTH) * scale:
+        if pw < left_min + right_min + sp_w:
             sp_r = sp_w / max(1, pw)
             self._list_col.place(relx=0, rely=0, relwidth=r, relheight=1)
             self._splitter.place(relx=r, rely=0, relheight=1)
@@ -1167,9 +1196,9 @@ class LogCompressorApp(_make_app_base()):
                                    relwidth=max(0.0, 1 - r - sp_r),
                                    relheight=1)
             return
-        # 最小宽度换算为比例钳制（列表≥200 / 详情≥300 逻辑 px）
-        lo_r = _SPLITTER_MIN_LIST * scale / pw
-        hi_r = 1 - (_SPLITTER_MIN_DETAIL + _SPLITTER_WIDTH) * scale / pw
+        # 最小宽度换算为比例钳制（左≥标题栏实测宽 / 右≥标题栏实测宽）
+        lo_r = left_min / pw
+        hi_r = 1 - (right_min + sp_w) / pw
         r = min(max(r, lo_r), hi_r)
         self._splitter_ratio = r
         sp_r = sp_w / pw
@@ -1190,20 +1219,23 @@ class LogCompressorApp(_make_app_base()):
         内部 canvas / 仅 2px 宽的握点），event.x 相对的窗口不确定，
         用「分隔条 rootx + event.x」反推指针会随接收窗口漂移。x_root
         是事件自带的屏幕绝对坐标，与接收窗口无关，直接换算相对面板
-        位置（最小宽度按物理像素钳制，winfo_* 均为物理值）。
+        位置。最小宽度以标题栏实测动态值钳制（防极限遮挡）；窗口
+        放不下两列最小宽时禁止拖动（分隔条锁定，不挤压任何一边）。
         """
         if not self._splitter_dragging:
             return
         panel = self._result_panel
         pw = max(1, panel.winfo_width())
-        scale = max(1.0, getattr(self, "_font_scale", 1.0))
-        sp_w = _SPLITTER_WIDTH * scale
+        sp_w = _SPLITTER_WIDTH * max(1.0, getattr(self, "_font_scale", 1.0))
+        left_min, right_min = self._splitter_min_widths()
+        lo = left_min
+        hi = pw - right_min - sp_w
+        if hi < lo:      # 窗口太窄：锁定分隔条，不允许拖动
+            return
         try:
             x = event.x_root - panel.winfo_rootx() - sp_w // 2
         except AttributeError:
             return
-        lo = _SPLITTER_MIN_LIST * scale
-        hi = max(lo, pw - (_SPLITTER_MIN_DETAIL + _SPLITTER_WIDTH) * scale)
         left = min(max(x, lo), hi)
         self._splitter_ratio = left / pw
         self._layout_splitter()
