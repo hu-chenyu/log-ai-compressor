@@ -2329,42 +2329,75 @@ class TestPasteMode:
 # 修复12：主题切换体验（状态标识 + 平滑过渡 + 持久化 + 对比度）
 # ---------------------------------------------------------------------------
 class TestThemeSwitch:
-    # 四态主题名（修复R1：亮色 → 暗色 → 蓝调 → 绿调 循环）
+    # 四态主题名（修复R13 后由下拉选择框直接选择）
     THEME_NAMES = ("☀️ 亮色", "🌙 暗色", "🔵 蓝调", "🟢 绿调")
 
-    def test_theme_button_shows_current_mode(self, app):
-        """主题按钮必须显示当前主题（四态之一）。"""
-        text = str(app._theme_btn.cget("text"))
-        assert text in self.THEME_NAMES, \
-            f"按钮应显示当前主题状态，实际: {text}"
+    def _wait_theme(self, app, key, timeout=3.0):
+        """推进淡出/淡入过渡帧直至主题到达目标（28ms/帧）。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            app.update()
+            if app._theme == key:
+                break
+            time.sleep(0.02)
+        return app._theme == key
 
-    def test_toggle_updates_button_text(self, app):
-        """切换后按钮文本随主题变化。"""
-        before = str(app._theme_btn.cget("text"))
+    def test_theme_menu_shows_current_mode(self, app):
+        """修复R13：选择框显示当前主题（四态之一）。"""
+        assert app._theme_menu.get() in self.THEME_NAMES, \
+            f"选择框应显示当前主题，实际: {app._theme_menu.get()}"
+
+    def test_theme_menu_values_exclude_current(self, app):
+        """修复R13：下拉列表只列其他三态（当前项不重复，顺序保持）。"""
+        from log_ai_compressor.gui.app import THEME_ORDER, THEMES
+        order_names = [THEMES[k]["name"] for k in THEME_ORDER]
+        for key in THEME_ORDER:
+            app._apply_theme_switch(key)
+            app.update()
+            expected = [n for n in order_names
+                         if n != THEMES[key]["name"]]
+            assert list(app._theme_menu.cget("values")) == expected, \
+                f"{key} 下拉列表应为 {expected}，" \
+                f"实际 {app._theme_menu.cget('values')}"
+        app._apply_theme_switch("dark")
+
+    def test_theme_menu_select_switches_directly(self, app):
+        """修复R13：下拉可跳过中间主题直达任意目标（无需循环点击）。"""
+        from log_ai_compressor.gui.app import THEMES
+        app._apply_theme_switch("dark")
+        app.update()
+        # 暗色 → 绿调（跳过亮色、蓝调两步）
+        app._on_theme_selected(THEMES["green"]["name"])
+        assert self._wait_theme(app, "green"), "应直接切换到绿调"
+        assert app._theme_menu.get() == THEMES["green"]["name"]
+        # 绿调 → 亮色（反向跳过）
+        app._on_theme_selected(THEMES["light"]["name"])
+        assert self._wait_theme(app, "light"), "应直接切换到亮色"
+        assert app._theme_menu.get() == THEMES["light"]["name"]
+        app._apply_theme_switch("dark")
+
+    def test_theme_menu_updates_after_switch(self, app):
+        """修复R13：切换后选择框显示值与列表内容同步更新。"""
+        from log_ai_compressor.gui.app import THEMES
+        before = app._theme_menu.get()
         app._apply_theme_switch("light" if app._is_dark_mode() else "dark")
         app.update()
-        after = str(app._theme_btn.cget("text"))
+        after = app._theme_menu.get()
         assert before != after
         assert {before, after} <= set(self.THEME_NAMES)
+        # 当前主题不出现在列表中
+        assert after not in app._theme_menu.cget("values")
 
-    def test_toggle_cycles_through_four_themes(self, app):
-        """修复R1：_toggle_theme 应按 亮色→暗色→蓝调→绿调→亮色 循环。"""
-        from log_ai_compressor.gui.app import THEME_ORDER
+    def test_theme_menu_all_four_selectable(self, app):
+        """修复R13：四种主题都能从下拉直达（逐项选择并验证显示）。"""
+        from log_ai_compressor.gui.app import THEME_ORDER, THEMES
         app._apply_theme_switch("light")
         app.update()
         for expected in ("dark", "blue", "green", "light"):
-            app._toggle_theme()
-            # 推进过渡动画帧（淡出4帧+谷底切换+淡入4帧，28ms/帧）
-            for _ in range(30):
-                app.update()
-                time.sleep(0.005)
-            deadline = time.time() + 3
-            while time.time() < deadline and app._theme != expected:
-                app.update()
-                time.sleep(0.02)
-            assert app._theme == expected, \
+            app._on_theme_selected(THEMES[expected]["name"])
+            assert self._wait_theme(app, expected), \
                 f"切换后应为 {expected}，实际 {app._theme}"
-            assert str(app._theme_btn.cget("text")) == \
+            assert app._theme_menu.get() == \
                 dict(zip(THEME_ORDER, self.THEME_NAMES))[expected]
         app._apply_theme_switch("dark")
 
@@ -2378,17 +2411,17 @@ class TestThemeSwitch:
         for key, palette in THEMES.items():
             assert required <= set(palette), f"{key} 缺字段: {required - set(palette)}"
 
-    def test_blue_green_themes_button_white(self, app):
-        """修复R1：蓝调/绿调主题下主按钮为白底深色字（accent 白色）。"""
+    def test_blue_green_themes_menu_white(self, app):
+        """修复R1/R13：蓝调/绿调下选择框为白底深色字（accent 白色）。"""
         from log_ai_compressor.gui.app import THEMES
         for key in ("blue", "green"):
             app._apply_theme_switch(key)
             app.update()
             assert THEMES[key]["accent"] == "#ffffff"
-            # 实际按钮 fg_color 应用为白色（CTk 返回元组 (r,g,b) 或 hex）
-            color = str(app._theme_btn.cget("fg_color"))
+            # 选择框 fg_color 应用为白色（CTk 返回元组 (r,g,b) 或 hex）
+            color = str(app._theme_menu.cget("fg_color"))
             assert "255, 255, 255" in color or color == "#ffffff", \
-                f"{key} 主题按钮应为白色，实际 {color}"
+                f"{key} 主题选择框应为白色，实际 {color}"
         app._apply_theme_switch("dark")
 
     def test_theme_persisted_immediately(self, app):
@@ -2414,16 +2447,18 @@ class TestThemeSwitch:
         cfg = ConfigStore(app._store.path).load()
         _ctk.set_appearance_mode(cfg.get("appearance", "dark"))
         assert _ctk.get_appearance_mode().lower() == "light"
-        # 3) 按钮标识与主题一致
-        app._update_theme_button()
-        assert str(app._theme_btn.cget("text")) == "☀️ 亮色"
+        # 3) 选择框显示与主题一致
+        app._update_theme_menu()
+        assert app._theme_menu.get() == "☀️ 亮色"
         # 恢复默认暗色
         app._apply_theme_switch("dark")
 
-    def test_toggle_with_animation_completes(self, app):
-        """_toggle_theme（含过渡动画）最终完成主题切换且恢复不透明。"""
+    def test_selection_with_animation_completes(self, app):
+        """修复R13：下拉选择（含过渡动画）最终完成切换且恢复不透明。"""
+        from log_ai_compressor.gui.app import THEMES
         before_dark = app._is_dark_mode()
-        app._toggle_theme()
+        target = "light" if before_dark else "dark"
+        app._on_theme_selected(THEMES[target]["name"])
         # 推进动画帧（淡出 4 帧 + 谷底切换 + 淡入 4 帧）
         for _ in range(40):
             app.update()
