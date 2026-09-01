@@ -668,6 +668,22 @@ class TestFontSizeSelector:
         assert int(app._font_row_head.cget("size")) == 22, \
             "「中」档头部应为基准 22 号"
 
+    def test_font_menu_in_list_title_bar(self, app):
+        """修复R11：字体选择器在错误列表标题栏（标题→字体大小→全屏）。"""
+        app.update()
+        if app._list_fs_btn.winfo_rootx() == 0:
+            pytest.skip("窗口未完成布局")
+        # 1) 与全屏按钮同一容器（列表标题栏）
+        assert (app._font_menu.master is app._list_fs_btn.master), \
+            "字体选择器应与全屏按钮同在列表标题栏"
+        # 2) 横向顺序：标题 → 字体大小选择器 → 全屏按钮
+        font_x = app._font_menu.winfo_rootx()
+        btn_x = app._list_fs_btn.winfo_rootx()
+        assert font_x < btn_x, "字体选择器应在全屏按钮左边"
+        # 3) 不在配置区（父容器不是配置面板）
+        assert app._font_menu.master is not app._rule_menu.master, \
+            "字体选择器应已从配置区移除"
+
     def test_font_size_change_scales_fonts(self, app):
         """修复R10：切换档位即时缩放主列表/全屏字体并保存配置。"""
         app._apply_font_size("特大")
