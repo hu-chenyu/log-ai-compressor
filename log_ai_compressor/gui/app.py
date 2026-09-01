@@ -822,17 +822,21 @@ class LogCompressorApp(_make_app_base()):
         # 出现），选中即触发原四态切换逻辑（调色板批量刷新）。
         # 修复缺陷R14：选择框为复合控件（图标列固定宽 + 主题名 + ▼），
         # 自定义弹窗两列布局 —— emoji 宽度不一不再影响文字对齐。
-        self._theme_box = ctk.CTkFrame(bar, corner_radius=6,
+        # 修复缺陷R15：主题名居中 —— 中间列弹性（weight=1）+ 文字
+        # anchor="center"，字样始终位于左侧图标与右侧▼箭头的正中间。
+        self._theme_box = ctk.CTkFrame(bar, corner_radius=6, width=120,
                                         cursor="hand2")
         self._theme_box.grid(row=0, column=3, padx=(6, 16))
+        self._theme_box.grid_columnconfigure(1, weight=1)  # 中间弹性列
         p = self._palette()
         self._theme_box_icon = ctk.CTkLabel(
             self._theme_box, text=p["icon"],
             width=self._measure_theme_icon_col(), anchor="center")
         self._theme_box_icon.grid(row=0, column=0, padx=(8, 0), pady=(3, 3))
         self._theme_box_name = ctk.CTkLabel(
-            self._theme_box, text=p["label"], anchor="w")
-        self._theme_box_name.grid(row=0, column=1, padx=(4, 4))
+            self._theme_box, text=p["label"], anchor="center")
+        self._theme_box_name.grid(row=0, column=1, sticky="ew",
+                                  padx=(4, 4))
         self._theme_box_arrow = ctk.CTkLabel(
             self._theme_box, text="▼", anchor="center")
         self._theme_box_arrow.grid(row=0, column=2, padx=(0, 8))
@@ -1581,10 +1585,14 @@ class LogCompressorApp(_make_app_base()):
         win.attributes("-topmost", True)
         self._theme_popup = win
         self._theme_popup_rows: Dict[str, dict] = {}
-        self._theme_popup_last_close = 0.0
+        self._theme_popup_opened_at = 0.0
         win.grid_columnconfigure(0, weight=1)
-        # 失焦自动收起（点击别处 / 切窗口）
-        win.bind("<FocusOut>", lambda e: self._close_theme_popup())
+        # 修复缺陷R15：全局点击收起（常驻 all 绑定，弹窗未开时
+        # 直接返回；与焦点解耦，不受 CTkToplevel 全局 set_focus
+        # 干扰 —— FocusOut 方案会被它立即误触发关闭）
+        self.bind_all("<Button-1>", self._on_theme_global_click, add=True)
+        # 主窗口最小化时同步收起（弹窗 topmost 不随主窗隐藏）
+        self.bind("<Unmap>", lambda e: self._close_theme_popup())
         icon_col = self._measure_theme_icon_col()
         for i, key in enumerate(THEME_ORDER):
             row = ctk.CTkFrame(win, corner_radius=4,
@@ -1622,16 +1630,22 @@ class LogCompressorApp(_make_app_base()):
             pass
 
     def _on_theme_box_click(self, _event=None) -> None:
-        """点击选择框：切换弹窗开合（FocusOut 先收起，250ms 防抖）。"""
-        if time.perf_counter() - self._theme_popup_last_close < 0.25:
-            return      # 刚因失焦收起 —— 本次点击仅视为"关闭"
+        """点击选择框：切换弹窗开合。"""
         if self._theme_popup.state() == "normal":
             self._close_theme_popup()
         else:
             self._open_theme_popup()
 
     def _open_theme_popup(self) -> None:
-        """弹出下拉列表：贴选择框正下方（物理像素定位，DPI 精确）。"""
+        """弹出下拉列表：贴选择框正下方（物理像素定位，DPI 精确）。
+
+        修复缺陷R15（点击无反应）：不用 focus/FocusOut 收起 ——
+        CTkToplevel.__init__ 注册了全局 bind_all("<Button-1>",
+        set_focus)，每次点击把焦点强制设回被点击控件；弹窗
+        deiconify 的瞬间焦点先到弹窗、随即被其抢回 → FocusOut
+        立即收起（表现为点击无反应、列表闪没）。改为全局点击
+        收起机制（_on_theme_global_click），与焦点完全解耦。
+        """
         self._update_theme_menu()           # 刷新可见行（排除当前项）
         box = self._theme_box
         win = self._theme_popup
@@ -1644,14 +1658,32 @@ class LogCompressorApp(_make_app_base()):
         w = max(box.winfo_width(), win.winfo_reqwidth() + 8)
         # wm_geometry 用物理像素（CTk 的 geometry 会二次缩放）
         win.wm_geometry(f"{w}x{win.winfo_reqheight()}+{x}+{y}")
+        self._theme_popup_opened_at = time.perf_counter()
         win.deiconify()
-        win.focus_set()                     # 获取焦点以触发失焦收起
+
+    def _on_theme_global_click(self, event) -> None:
+        """全局点击收起下拉（弹窗外任意点击；不依赖焦点）。
+
+        豁免两类点击：弹窗打开后 150ms 内（打开动作本身的同一
+        事件链，all bindtag 在 widget 绑定之后触发，若不豁免会
+        开了立刻关）与落点在弹窗内的点击（行间隙等空白区）。
+        """
+        try:
+            if self._theme_popup.state() != "normal":
+                return
+            if time.perf_counter() - self._theme_popup_opened_at < 0.15:
+                return
+            hit = self.winfo_containing(event.x_root, event.y_root)
+            if hit is not None and hit.winfo_toplevel() is self._theme_popup:
+                return          # 点在弹窗内（行间隙）
+        except tk.TclError:
+            return
+        self._close_theme_popup()
 
     def _close_theme_popup(self) -> None:
-        """收起下拉列表（记录时间戳用于点击防抖）。"""
+        """收起下拉列表。"""
         if self._theme_popup.state() != "withdrawn":
-            self._theme_popup_last_close = time.perf_counter()
-        self._theme_popup.withdraw()
+            self._theme_popup.withdraw()
 
     def _theme_popup_items(self) -> List[str]:
         """下拉列表当前可见项（除当前主题外的其他三态，保持顺序）。

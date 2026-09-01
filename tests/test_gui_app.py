@@ -2466,6 +2466,53 @@ class TestThemeSwitch:
         finally:
             app._close_theme_popup()
 
+    def test_theme_box_click_opens_popup_realpath(self, app):
+        """修复R15：真实点击路径打开弹窗、点击别处收起（焦点解耦）。
+
+        修复前 FocusOut 收起被 CTkToplevel 全局 bind_all(set_focus)
+        干扰：点击打开的瞬间焦点被抢回主窗口 → 弹窗立即失焦收起
+        （表现为点击无反应）。现改为全局点击收起，与焦点无关。
+        """
+        app.update()
+        # 模拟真实点击：命中选择框内部 canvas（bind 实际注册处）
+        app._theme_box._canvas.event_generate("<Button-1>", x=10, y=10)
+        app.update()
+        assert app._theme_popup.state() == "normal", \
+            "点击选择框后弹窗应打开（R15：不得被立即收起）"
+        # CTkToplevel 全局 set_focus 抢焦点（真实链路必然发生），
+        # 弹窗不应受焦点变化影响
+        app._theme_box._canvas.focus_set()
+        app.update()
+        assert app._theme_popup.state() == "normal", \
+            "焦点被抢回主窗口后弹窗应保持打开（焦点解耦）"
+        # 再次点击选择框：切换为收起
+        app._theme_box._canvas.event_generate("<Button-1>", x=10, y=10)
+        app.update()
+        assert app._theme_popup.state() == "withdrawn", "再点应收起"
+        # 打开后点击主窗口其他区域：全局点击收起
+        app._theme_box._canvas.event_generate("<Button-1>", x=10, y=10)
+        app.update()
+        assert app._theme_popup.state() == "normal"
+        time.sleep(0.2)                     # 越过 150ms 打开豁免窗口
+        app._status_label.event_generate("<Button-1>", x=5, y=5)
+        app.update()
+        assert app._theme_popup.state() == "withdrawn", \
+            "点击别处应收起弹窗（全局点击收起）"
+
+    def test_theme_box_name_centered(self, app):
+        """修复R15：主题名在图标与▼箭头的正中间（水平居中）。"""
+        app.update()
+        app.update_idletasks()
+        icon = app._theme_box_icon
+        name = app._theme_box_name
+        arrow = app._theme_box_arrow
+        icon_r = icon.winfo_rootx() + icon.winfo_width()
+        arrow_l = arrow.winfo_rootx()
+        name_c = name.winfo_rootx() + name.winfo_width() / 2
+        mid = (icon_r + arrow_l) / 2
+        assert abs(name_c - mid) <= 4, \
+            f"主题名中心 {name_c} 应在图标右缘与箭头左缘中点 {mid}"
+
     def test_palette_roles_complete(self, app):
         """修复R1：每个主题调色板字段齐全（缺角色会导致刷新异常）。"""
         from log_ai_compressor.gui.app import THEMES
