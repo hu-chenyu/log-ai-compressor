@@ -2342,70 +2342,135 @@ class TestThemeSwitch:
             time.sleep(0.02)
         return app._theme == key
 
+    def _box_text(self, app):
+        """选择框当前显示文字（图标 + 主题名）。"""
+        return (f"{app._theme_box_icon.cget('text')} "
+                f"{app._theme_box_name.cget('text')}")
+
     def test_theme_menu_shows_current_mode(self, app):
         """修复R13：选择框显示当前主题（四态之一）。"""
-        assert app._theme_menu.get() in self.THEME_NAMES, \
-            f"选择框应显示当前主题，实际: {app._theme_menu.get()}"
+        assert self._box_text(app) in self.THEME_NAMES, \
+            f"选择框应显示当前主题，实际: {self._box_text(app)}"
 
     def test_theme_menu_values_exclude_current(self, app):
         """修复R13：下拉列表只列其他三态（当前项不重复，顺序保持）。"""
-        from log_ai_compressor.gui.app import THEME_ORDER, THEMES
-        order_names = [THEMES[k]["name"] for k in THEME_ORDER]
+        from log_ai_compressor.gui.app import THEME_ORDER
         for key in THEME_ORDER:
             app._apply_theme_switch(key)
             app.update()
-            expected = [n for n in order_names
-                         if n != THEMES[key]["name"]]
-            assert list(app._theme_menu.cget("values")) == expected, \
+            expected = [k for k in THEME_ORDER if k != key]
+            assert app._theme_popup_items() == expected, \
                 f"{key} 下拉列表应为 {expected}，" \
-                f"实际 {app._theme_menu.cget('values')}"
+                f"实际 {app._theme_popup_items()}"
         app._apply_theme_switch("dark")
 
     def test_theme_menu_select_switches_directly(self, app):
         """修复R13：下拉可跳过中间主题直达任意目标（无需循环点击）。"""
-        from log_ai_compressor.gui.app import THEMES
         app._apply_theme_switch("dark")
         app.update()
         # 暗色 → 绿调（跳过亮色、蓝调两步）
-        app._on_theme_selected(THEMES["green"]["name"])
+        app._on_theme_selected("green")
         assert self._wait_theme(app, "green"), "应直接切换到绿调"
-        assert app._theme_menu.get() == THEMES["green"]["name"]
+        assert self._box_text(app) == "🟢 绿调"
         # 绿调 → 亮色（反向跳过）
-        app._on_theme_selected(THEMES["light"]["name"])
+        app._on_theme_selected("light")
         assert self._wait_theme(app, "light"), "应直接切换到亮色"
-        assert app._theme_menu.get() == THEMES["light"]["name"]
+        assert self._box_text(app) == "☀️ 亮色"
         app._apply_theme_switch("dark")
 
     def test_theme_menu_updates_after_switch(self, app):
         """修复R13：切换后选择框显示值与列表内容同步更新。"""
-        from log_ai_compressor.gui.app import THEMES
-        before = app._theme_menu.get()
+        before = self._box_text(app)
         app._apply_theme_switch("light" if app._is_dark_mode() else "dark")
         app.update()
-        after = app._theme_menu.get()
+        after = self._box_text(app)
         assert before != after
         assert {before, after} <= set(self.THEME_NAMES)
         # 当前主题不出现在列表中
-        assert after not in app._theme_menu.cget("values")
+        assert app._theme not in app._theme_popup_items()
 
     def test_theme_menu_all_four_selectable(self, app):
         """修复R13：四种主题都能从下拉直达（逐项选择并验证显示）。"""
-        from log_ai_compressor.gui.app import THEME_ORDER, THEMES
+        from log_ai_compressor.gui.app import THEME_ORDER
         app._apply_theme_switch("light")
         app.update()
         for expected in ("dark", "blue", "green", "light"):
-            app._on_theme_selected(THEMES[expected]["name"])
+            app._on_theme_selected(expected)
             assert self._wait_theme(app, expected), \
                 f"切换后应为 {expected}，实际 {app._theme}"
-            assert app._theme_menu.get() == \
+            assert self._box_text(app) == \
                 dict(zip(THEME_ORDER, self.THEME_NAMES))[expected]
         app._apply_theme_switch("dark")
+
+    def test_theme_popup_text_aligned(self, app):
+        """修复R14：下拉列表四个选项文字起始 x 坐标完全一致（对齐）。
+
+        emoji（☀️🌙🔵🟢）字形宽度不一，纯文本菜单会错位；两列布局
+        （固定宽图标列 + 左对齐文字列）后文字列起始 x 应严格相等。
+        """
+        from log_ai_compressor.gui.app import THEME_ORDER
+        app._open_theme_popup()
+        app.update_idletasks()
+        app.update()
+        try:
+            xs = []
+            for key in THEME_ORDER:
+                row = app._theme_popup_rows[key]["row"]
+                if key == app._theme:
+                    continue          # 当前项隐藏
+                xs.append(
+                    app._theme_popup_rows[key]["name"].winfo_rootx())
+            assert len(xs) == 3, "应显示三个选项"
+            assert max(xs) - min(xs) == 0, \
+                f"文字起始 x 应完全一致，实际 {xs}"
+            # 图标列宽固定（各行图标控件宽度一致）
+            icons = [app._theme_popup_rows[key]["icon"].winfo_width()
+                     for key in THEME_ORDER if key != app._theme]
+            assert max(icons) - min(icons) == 0, \
+                f"图标列宽应固定，实际 {icons}"
+        finally:
+            app._close_theme_popup()
+
+    def test_theme_popup_select_by_click(self, app):
+        """修复R14：点击弹窗行控件（图标/文字）触发主题切换并收起。"""
+        app._apply_theme_switch("dark")
+        app.update()
+        app._open_theme_popup()
+        app.update()
+        name_lbl = app._theme_popup_rows["green"]["name"]
+        name_lbl.event_generate("<Button-1>", x=5, y=5)
+        app.update()
+        assert self._wait_theme(app, "green"), "点击行应切换主题"
+        assert app._theme_popup.state() == "withdrawn", "选择后应自动收起"
+        app._apply_theme_switch("dark")
+
+    def test_theme_box_icon_col_matches_popup(self, app):
+        """修复R14：选择框与下拉列表图标列宽一致（显示位置统一）。"""
+        from log_ai_compressor.gui.app import _THEME_ICON_COL
+        scale = max(1.0, app._font_scale)
+        col = app._theme_icon_col
+        assert col >= _THEME_ICON_COL, \
+            f"实测图标列宽 {col} 应 ≥ 基准 {_THEME_ICON_COL}"
+        app._open_theme_popup()
+        app.update_idletasks()
+        app.update()
+        try:
+            for key in app._theme_popup_items():
+                icon = app._theme_popup_rows[key]["icon"]
+                assert icon.winfo_width() == pytest.approx(
+                    col * scale, abs=2), \
+                    f"弹窗图标列宽 {icon.winfo_width()} 应为 " \
+                    f"{col * scale:.0f}"
+            assert app._theme_box_icon.winfo_width() == pytest.approx(
+                col * scale, abs=2), "选择框图标列宽应一致"
+        finally:
+            app._close_theme_popup()
 
     def test_palette_roles_complete(self, app):
         """修复R1：每个主题调色板字段齐全（缺角色会导致刷新异常）。"""
         from log_ai_compressor.gui.app import THEMES
-        required = {"name", "window", "card", "header", "text", "muted",
-                    "accent", "accent_hover", "accent_text",
+        required = {"name", "icon", "label", "window", "card", "header",
+                    "text", "muted", "accent", "accent_hover", "accent_text",
                     "row_bg", "row_hover", "row_selected", "row_text",
                     "is_dark"}
         for key, palette in THEMES.items():
@@ -2419,7 +2484,7 @@ class TestThemeSwitch:
             app.update()
             assert THEMES[key]["accent"] == "#ffffff"
             # 选择框 fg_color 应用为白色（CTk 返回元组 (r,g,b) 或 hex）
-            color = str(app._theme_menu.cget("fg_color"))
+            color = str(app._theme_box.cget("fg_color"))
             assert "255, 255, 255" in color or color == "#ffffff", \
                 f"{key} 主题选择框应为白色，实际 {color}"
         app._apply_theme_switch("dark")
@@ -2449,16 +2514,15 @@ class TestThemeSwitch:
         assert _ctk.get_appearance_mode().lower() == "light"
         # 3) 选择框显示与主题一致
         app._update_theme_menu()
-        assert app._theme_menu.get() == "☀️ 亮色"
+        assert self._box_text(app) == "☀️ 亮色"
         # 恢复默认暗色
         app._apply_theme_switch("dark")
 
     def test_selection_with_animation_completes(self, app):
         """修复R13：下拉选择（含过渡动画）最终完成切换且恢复不透明。"""
-        from log_ai_compressor.gui.app import THEMES
         before_dark = app._is_dark_mode()
         target = "light" if before_dark else "dark"
-        app._on_theme_selected(THEMES[target]["name"])
+        app._on_theme_selected(target)
         # 推进动画帧（淡出 4 帧 + 谷底切换 + 淡入 4 帧）
         for _ in range(40):
             app.update()
