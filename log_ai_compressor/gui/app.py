@@ -106,6 +106,8 @@ _CLUSTER_ICON = {"fatal": "\u25c6", "root": "\u25b2", "burst": "\u25cf",
 # - accent: 主按钮底色 / accent_text: 主按钮文字 / accent_hover: 悬停
 # - muted: 次要文字（提示/说明）
 # - row_*: 错误列表行 背景/悬停/选中/文字
+# 修复缺陷R12：splitter/splitter_grip —— 错误列表与详情面板间的
+# 可拖动分隔条底色与握点色（半透明观感的灰系，四态各自协调）
 THEMES: Dict[str, Dict[str, str]] = {
     "light": {
         "name": "☀️ 亮色", "window": "#eef1f6", "card": "#ffffff",
@@ -113,6 +115,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "accent": "#3B82F6", "accent_hover": "#2563EB", "accent_text": "#ffffff",
         "row_bg": "#ffffff", "row_hover": "#eff6ff", "row_selected": "#bfdbfe",
         "row_text": "#2d333b", "is_dark": "0",
+        "splitter": "#c3ccd9", "splitter_grip": "#8a97a8",
     },
     "dark": {
         "name": "🌙 暗色", "window": "#111827", "card": "#1c2433",
@@ -120,6 +123,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "accent": "#3B82F6", "accent_hover": "#60a5fa", "accent_text": "#ffffff",
         "row_bg": "#1c2433", "row_hover": "#2a3547", "row_selected": "#1d4ed8",
         "row_text": "#c8cdd4", "is_dark": "1",
+        "splitter": "#3a485e", "splitter_grip": "#64758f",
     },
     "blue": {
         "name": "🔵 蓝调", "window": "#cfe3fa", "card": "#e8f1fd",
@@ -127,6 +131,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "accent": "#ffffff", "accent_hover": "#f4f9ff", "accent_text": "#1d4ed8",
         "row_bg": "#e8f1fd", "row_hover": "#cfe0f5", "row_selected": "#8cbaf0",
         "row_text": "#173a63", "is_dark": "0",
+        "splitter": "#a9c4e4", "splitter_grip": "#6d95c2",
     },
     "green": {
         "name": "🟢 绿调", "window": "#cdeeda", "card": "#e6f7ec",
@@ -134,6 +139,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "accent": "#ffffff", "accent_hover": "#f2fbf6", "accent_text": "#15803d",
         "row_bg": "#e6f7ec", "row_hover": "#cdecd9", "row_selected": "#8fdcab",
         "row_text": "#14432a", "is_dark": "0",
+        "splitter": "#a6d2b9", "splitter_grip": "#5f9c7c",
     },
 }
 # 主题循环顺序（点击依次切换）
@@ -147,6 +153,12 @@ _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
 
 # 修复缺陷R6：主列表虚拟滚动阈值（超过则切换池化虚拟渲染）
 VIRTUAL_LIST_THRESHOLD = 40
+
+# 修复缺陷R12：错误列表 | 详情面板 可拖动分隔条参数
+_SPLITTER_WIDTH = 6            # 分隔条宽度（像素）
+_SPLITTER_MIN_LIST = 200       # 错误列表列最小宽度（像素）
+_SPLITTER_MIN_DETAIL = 300     # 详情面板列最小宽度（像素）
+_SPLITTER_DEFAULT_RATIO = 0.4  # 默认左右宽度比（列表:详情 = 2:3）
 
 # 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7/R5）
 # 修复缺陷R5：业务栈帧提亮加粗更明显；系统库折叠提示独立配色更清晰
@@ -688,6 +700,14 @@ class LogCompressorApp(_make_app_base()):
         self._muted_labels: List = []            # 次要文字标签
         self._accent_buttons: List[tuple] = []   # (按钮, "accent"/"danger")
 
+        # 修复缺陷R12：分隔条位置（左右宽度比例）持久化恢复
+        try:
+            r = float(self._config.get("splitter_ratio",
+                                       _SPLITTER_DEFAULT_RATIO))
+        except (TypeError, ValueError):
+            r = _SPLITTER_DEFAULT_RATIO
+        self._splitter_ratio = min(max(r, 0.05), 0.95)
+
         self._build_ui()
         self._apply_palette()
         self._setup_drag_and_drop()
@@ -988,13 +1008,23 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R9：结果区上下留白压缩（列表/详情获得更大高度）
         panel.grid(row=4, column=0, sticky="nsew", padx=10, pady=(2, 2))
         self._bg_widgets.append((panel, "card"))
-        panel.grid_columnconfigure(0, weight=2)
-        panel.grid_columnconfigure(1, weight=3)
-        panel.grid_rowconfigure(1, weight=1)
+        # 修复缺陷R12：左右分栏改为 place 比例布局 —— panel 内三个并列
+        # 子部件（列表列 / 分隔条 / 详情列），宽度由 _splitter_ratio
+        # 精确控制（grid weight 无法保证比例精确且受内容请求宽度干扰）。
+        self._result_panel = panel
+        self._list_col = ctk.CTkFrame(panel, fg_color="transparent")
+        self._detail_col = ctk.CTkFrame(panel, fg_color="transparent")
+        for col in (self._list_col, self._detail_col):
+            col.grid_columnconfigure(0, weight=1)
+            col.grid_rowconfigure(1, weight=1)
+        self._build_splitter(panel)
+        # 窗口缩放（最大化/还原/手动调整）时按比例重排（最小宽度钳制）
+        panel.bind("<Configure>", lambda e: self._layout_splitter())
+        self._layout_splitter()
 
         # 修复缺陷#7：列表 / 详情标题行增加「全屏」按钮（独立最大化窗口）
         # 修复缺陷R11：字体大小选择器移入标题栏（标题 → 字体大小 → 全屏）
-        list_head = ctk.CTkFrame(panel, fg_color="transparent")
+        list_head = ctk.CTkFrame(self._list_col, fg_color="transparent")
         list_head.grid(row=0, column=0, padx=10, pady=(4, 2), sticky="ew")
         list_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(list_head, text="错误分类列表（按优先级降序）",
@@ -1017,8 +1047,8 @@ class LogCompressorApp(_make_app_base()):
         self._accent_buttons.append((self._list_fs_btn, "accent"))
 
         # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
-        detail_head = ctk.CTkFrame(panel, fg_color="transparent")
-        detail_head.grid(row=0, column=1, padx=10, pady=(4, 2), sticky="ew")
+        detail_head = ctk.CTkFrame(self._detail_col, fg_color="transparent")
+        detail_head.grid(row=0, column=0, padx=10, pady=(4, 2), sticky="ew")
         detail_head.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(detail_head, text="详情（典型样例 · 上下文 · 降噪堆栈）",
                      font=ctk.CTkFont(size=13, weight="bold")).grid(
@@ -1038,7 +1068,7 @@ class LogCompressorApp(_make_app_base()):
         self._accent_buttons.append((self._detail_fs_btn, "accent"))
 
         # 修复缺陷R9：列表宿主容器（经典滚动 / 虚拟滚动两模式切换）
-        self._list_host = ctk.CTkFrame(panel, fg_color="transparent")
+        self._list_host = ctk.CTkFrame(self._list_col, fg_color="transparent")
         # 修复缺陷R7：宿主四向拉伸（sticky 补 e）+ 右边距 10 与
         # 全屏按钮右缘严格对齐，列表占满左列全部可用宽度（>90%）
         # 修复缺陷R9：pady 压缩（2,8→2,4），列表可视高度更大
@@ -1055,11 +1085,143 @@ class LogCompressorApp(_make_app_base()):
         self._list_hbar.grid(row=1, column=0, sticky="ew")
         # 修复缺陷R5：详情字体放大到 13（摘要/堆栈/上下文更易读）
         self._detail_box = ctk.CTkTextbox(
-            panel, font=ctk.CTkFont(family="Consolas", size=13), wrap="none")
-        self._detail_box.grid(row=1, column=1, sticky="nsew", padx=(4, 10),
+            self._detail_col, font=ctk.CTkFont(family="Consolas", size=13),
+            wrap="none")
+        self._detail_box.grid(row=1, column=0, sticky="nsew", padx=(4, 10),
                               pady=(2, 8))
         self._bg_widgets.append((self._detail_box, "card"))
         self._setup_detail_tags()
+
+    # ------------------------------------------------------------------
+    # 修复缺陷R12：错误列表 | 详情面板 可拖动分隔条
+    # ------------------------------------------------------------------
+    def _build_splitter(self, panel) -> None:
+        """构建分隔条（宽 6px 圆角条 + 三个握点 + ↔ 光标）。"""
+        p = self._palette()
+        self._splitter_dragging = False
+        self._splitter = ctk.CTkFrame(
+            panel, width=_SPLITTER_WIDTH, corner_radius=3,
+            fg_color=p["splitter"], cursor="sb_h_double_arrow")
+        # 三个小握点（视觉提示可拖动；绑同一组事件不阻断拖动）
+        self._splitter_dots = []
+        for dy in (-8, 0, 8):
+            dot = tk.Frame(self._splitter, width=2, height=2, bd=0,
+                           highlightthickness=0, bg=p["splitter_grip"],
+                           cursor="sb_h_double_arrow")
+            dot.place(relx=0.5, rely=0.5, y=dy, anchor="center")
+            self._splitter_dots.append(dot)
+        for target in [self._splitter] + self._splitter_dots:
+            target.bind("<ButtonPress-1>", self._on_splitter_press)
+            target.bind("<B1-Motion>", self._on_splitter_drag)
+            target.bind("<ButtonRelease-1>", self._on_splitter_release)
+            target.bind("<Double-Button-1>", self._on_splitter_dblclick)
+            target.bind("<Enter>", lambda e: self._splitter_hover(True))
+            target.bind("<Leave>", lambda e: self._splitter_hover(False))
+        # CTkFrame.bind 实际注册在其内部 canvas（真实点击的命中目标）；
+        # 外层 tk.Frame 再绑一份 —— event_generate 直发外层时不经过
+        # canvas，双注册保证两种派发路径都能触发（真实点击只命中
+        # canvas 一路，不会重复触发）
+        for seq, handler in (
+                ("<ButtonPress-1>", self._on_splitter_press),
+                ("<B1-Motion>", self._on_splitter_drag),
+                ("<ButtonRelease-1>", self._on_splitter_release),
+                ("<Double-Button-1>", self._on_splitter_dblclick)):
+            tk.Frame.bind(self._splitter, seq, handler)
+
+    def _splitter_hover(self, hovered: bool) -> None:
+        """悬停/拖动高亮（选中蓝，提示可拖动）。"""
+        if self._splitter_dragging and not hovered:
+            return          # 拖动中离开仍保持高亮
+        try:
+            p = self._palette()
+            self._splitter.configure(
+                fg_color=p["row_selected"] if hovered else p["splitter"])
+        except (tk.TclError, ValueError):
+            pass
+
+    def _layout_splitter(self) -> None:
+        """按比例布局左右列与分隔条（窗口缩放时保持比例并钳制最小宽）。
+
+        CTk place() 重写会对 x/y 施加控件缩放（逻辑坐标），而
+        winfo_* 返回物理像素 —— x 传入前需除以缩放系数；
+        relwidth/relx 为纯比例不受影响。
+        """
+        panel = self._result_panel
+        pw = panel.winfo_width()          # 物理像素
+        r = self._splitter_ratio
+        scale = max(1.0, getattr(self, "_font_scale", 1.0))
+        if pw < 60:
+            self._list_col.place(relx=0, rely=0, relwidth=r, relheight=1)
+            self._splitter.place(relx=r, rely=0, relheight=1)
+            self._detail_col.place(relx=r, rely=0, relwidth=1 - r,
+                                   relheight=1)
+            return
+        sp_w = _SPLITTER_WIDTH * scale     # 分隔条物理宽
+        lo = _SPLITTER_MIN_LIST * scale    # 最小宽（逻辑值换算物理）
+        hi = max(lo, pw - _SPLITTER_MIN_DETAIL * scale - sp_w)
+        left = min(max(r * pw, lo), hi)
+        self._splitter_ratio = left / pw
+        self._list_col.place(x=0, rely=0, relwidth=left / pw,
+                             relheight=1)
+        self._splitter.place(x=round(left / scale), rely=0, relheight=1)
+        self._detail_col.place(
+            x=round((left + sp_w) / scale), rely=0,
+            relwidth=max(0.0, (pw - left - sp_w) / pw), relheight=1)
+
+    def _on_splitter_press(self, event) -> None:
+        self._splitter_dragging = True
+        self._splitter_hover(True)
+
+    def _on_splitter_drag(self, event) -> None:
+        """拖动实时调整左右宽度（指针位置即新左列边界）。
+
+        事件 x 相对分隔条当前位置（分隔条实时跟随指针，x 稳定为
+        按下偏移），指针绝对位置 = 分隔条 rootx + event.x。
+        最小宽度限制按物理像素（winfo_* 均为物理值）。
+        """
+        if not self._splitter_dragging:
+            return
+        panel = self._result_panel
+        pw = max(1, panel.winfo_width())
+        scale = max(1.0, getattr(self, "_font_scale", 1.0))
+        try:
+            pointer = self._splitter.winfo_rootx() + event.x
+            base = panel.winfo_rootx()
+        except tk.TclError:
+            return
+        sp_w = _SPLITTER_WIDTH * scale
+        x = pointer - base - sp_w // 2
+        lo = _SPLITTER_MIN_LIST * scale
+        hi = max(lo, pw - _SPLITTER_MIN_DETAIL * scale - sp_w)
+        left = min(max(x, lo), hi)
+        self._splitter_ratio = left / pw
+        self._layout_splitter()
+
+    def _on_splitter_release(self, event) -> None:
+        """松开鼠标：结束拖动并保存位置到配置。"""
+        if not self._splitter_dragging:
+            return
+        self._splitter_dragging = False
+        self._splitter_hover(False)
+        self._save_config()
+
+    def _on_splitter_dblclick(self, event) -> None:
+        """双击恢复默认比例（2:3）并闪烁反馈。"""
+        self._splitter_dragging = False
+        self._splitter_ratio = _SPLITTER_DEFAULT_RATIO
+        self._layout_splitter()
+        self._flash_splitter()
+        self._save_config()
+
+    def _flash_splitter(self) -> None:
+        """分隔条闪烁（高亮 150ms 后回落主题色）。"""
+        try:
+            p = self._palette()
+            self._splitter.configure(fg_color=p["accent"])
+            self.after(150, lambda: self._splitter.configure(
+                fg_color=self._palette()["splitter"]))
+        except (tk.TclError, ValueError):
+            pass
 
     def _make_hscroll(self, scrollable: "ctk.CTkScrollableFrame"
                       ) -> "ctk.CTkScrollbar":
@@ -1200,6 +1362,8 @@ class LogCompressorApp(_make_app_base()):
             "appearance": self._theme,
             # 修复缺陷R10：字体大小档位持久化（下次启动自动恢复）
             "font_size": self._font_size,
+            # 修复缺陷R12：分隔条位置持久化（左右宽度比例）
+            "splitter_ratio": self._splitter_ratio,
             "fatal_level_upgraded": self._config.get(
                 "fatal_level_upgraded", False),
             "window": {"width": self.winfo_width(),
@@ -1389,6 +1553,16 @@ class LogCompressorApp(_make_app_base()):
                                   text_color=p["accent_text"])
             except (tk.TclError, ValueError, AttributeError):
                 continue
+        # 修复缺陷R12：分隔条主题色刷新（条身 + 握点）
+        try:
+            self._splitter.configure(fg_color=p["splitter"])
+        except (tk.TclError, ValueError, AttributeError):
+            pass
+        for dot in getattr(self, "_splitter_dots", []):
+            try:
+                dot.configure(bg=p["splitter_grip"])
+            except (tk.TclError, ValueError):
+                pass
         self._refresh_row_colors()
         self._update_theme_button()
 

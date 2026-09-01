@@ -15,6 +15,13 @@ import pytest
 
 ctk = pytest.importorskip("customtkinter")
 
+# 修复R12：分隔条参数（宽度/最小宽度限制）
+from log_ai_compressor.gui.app import (  # noqa: E402
+    _SPLITTER_MIN_DETAIL,
+    _SPLITTER_MIN_LIST,
+    _SPLITTER_WIDTH,
+)
+
 
 def _display_available() -> bool:
     """探测能否创建 Tk 窗口（无头 CI 返回 False）。"""
@@ -728,6 +735,187 @@ class TestFontSizeSelector:
                     app2.destroy()
                 except Exception:
                     pass
+
+
+# ---------------------------------------------------------------------------
+# 修复R12：错误列表 | 详情面板 可拖动分隔条
+# ---------------------------------------------------------------------------
+class TestSplitter:
+    def _pw(self, app):
+        return max(1, app._result_panel.winfo_width())
+
+    def test_splitter_exists_with_cursor(self, app):
+        """修复R12：分隔条存在、宽 4~6px、光标为左右箭头。"""
+        sp = app._splitter
+        assert sp.winfo_exists()
+        assert 4 <= int(sp.cget("width")) <= 6, \
+            f"分隔条宽度应 4~6px（实际 {sp.cget('width')}）"
+        assert str(sp.cget("cursor")) == "sb_h_double_arrow", \
+            "光标应为左右双箭头"
+        # 三个握点（视觉提示）
+        assert len(app._splitter_dots) == 3
+
+    def test_drag_resizes_columns(self, app):
+        """修复R12：拖动分隔条实时调整左右列宽。"""
+        app.update()
+        sp = app._splitter
+        panel = app._result_panel
+        pw = self._pw(app)
+        left0 = app._list_col.winfo_width()
+        # 拖动：把分隔条移到面板 65% 处（相对偏移 = 目标 - 当前）
+        target = int(pw * 0.65)
+        delta = target - (sp.winfo_rootx() - panel.winfo_rootx())
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=3 + delta, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=3 + delta, y=40)
+        app.update()
+        left1 = app._list_col.winfo_width()
+        detail1 = app._detail_col.winfo_width()
+        scale = max(1.0, app._font_scale)
+        assert abs(left1 - target) <= 8, \
+            f"拖动后左列应 ≈{target}px（实际 {left1}px）"
+        assert left1 > left0, "往右拖列表应变宽"
+        assert abs((left1 + detail1 + _SPLITTER_WIDTH * scale) - pw) <= 6, \
+            "左右列 + 分隔条应占满面板宽"
+
+    def test_drag_min_width_limits(self, app):
+        """修复R12：拖到最左/最右受最小宽度限制（列表≥200 / 详情≥300 逻辑px）。"""
+        app.update()
+        sp = app._splitter
+        scale = max(1.0, app._font_scale)
+        min_list = _SPLITTER_MIN_LIST * scale - 4     # 逻辑值换算物理像素
+        min_detail = _SPLITTER_MIN_DETAIL * scale - 4
+        # 拖到最左
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=-5000, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=-5000, y=40)
+        app.update()
+        assert app._list_col.winfo_width() >= min_list, \
+            f"列表最小宽度应 ≥{min_list:.0f}物理px（实际 {app._list_col.winfo_width()}）"
+        assert app._detail_col.winfo_width() >= min_detail
+        # 拖到最右
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=5000, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=5000, y=40)
+        app.update()
+        assert app._detail_col.winfo_width() >= min_detail, \
+            f"详情最小宽度应 ≥{min_detail:.0f}物理px（实际 {app._detail_col.winfo_width()}）"
+        assert app._list_col.winfo_width() >= min_list
+
+    def test_double_click_restores_default(self, app):
+        """修复R12：双击分隔条恢复默认比例（2:3）。"""
+        app.update()
+        sp = app._splitter
+        # 先拖到非默认位置
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=3 + 200, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=3 + 200, y=40)
+        app.update()
+        assert abs(app._splitter_ratio - 0.4) > 0.05, "先偏离默认比例"
+        # 双击恢复（event_generate 无法合成 Double 事件，直接调 handler）
+        app._on_splitter_dblclick(None)
+        app.update()
+        # 闪缩回调（150ms）后回落主题色
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            app.update()
+            time.sleep(0.05)
+        assert abs(app._splitter_ratio - 0.4) < 0.02, \
+            f"双击应恢复默认比例 0.4（实际 {app._splitter_ratio:.3f}）"
+        pw = self._pw(app)
+        assert abs(app._list_col.winfo_width() / pw - 0.4) < 0.02
+
+    def test_splitter_position_persisted(self, app):
+        """修复R12：拖动后位置保存，重启自动恢复。"""
+        app.update()
+        sp = app._splitter
+        panel = app._result_panel
+        pw = self._pw(app)
+        target = int(pw * 0.6)
+        delta = target - (sp.winfo_rootx() - panel.winfo_rootx())
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=3 + delta, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=3 + delta, y=40)
+        app.update()
+        assert abs(app._splitter_ratio - 0.6) < 0.02
+        assert app._config.get("splitter_ratio") is not None
+        # 新实例读同一份配置
+        from log_ai_compressor.gui.app import LogCompressorApp
+        app2 = LogCompressorApp()
+        try:
+            app2.update()
+            assert abs(app2._splitter_ratio - 0.6) < 0.03, \
+                f"重启应恢复 0.6（实际 {app2._splitter_ratio:.3f}）"
+        finally:
+            try:
+                app2._on_close()
+            except Exception:
+                try:
+                    app2.destroy()
+                except Exception:
+                    pass
+
+    def test_splitter_theme_colors(self, app):
+        """修复R12：四态主题切换分隔条颜色跟随调色板。"""
+        from log_ai_compressor.gui.app import THEMES
+        for theme in ("dark", "light", "blue", "green"):
+            app._theme = theme
+            app._apply_palette()
+            app.update()
+            sp_color = app._splitter.cget("fg_color")
+            # CTk 颜色可能是元组（暗/亮）；归一化取当前模式的值
+            if isinstance(sp_color, (tuple, list)):
+                idx = 1 if theme == "dark" else 0
+                sp_color = sp_color[idx]
+            assert str(sp_color).lower() == THEMES[theme]["splitter"].lower(), \
+                f"{theme} 主题分隔条色 {sp_color} 应为 {THEMES[theme]['splitter']}"
+
+    def test_splitter_works_in_virtual_mode(self, app):
+        """修复R12：虚拟列表模式下拖动分隔条正常。"""
+        _run_many_clusters(app)
+        app.update()
+        assert app._virtual_list is not None
+        sp = app._splitter
+        panel = app._result_panel
+        pw = self._pw(app)
+        target = int(pw * 0.55)
+        delta = target - (sp.winfo_rootx() - panel.winfo_rootx())
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        sp.event_generate("<B1-Motion>", x=3 + delta, y=40)
+        app.update()
+        sp.event_generate("<ButtonRelease-1>", x=3 + delta, y=40)
+        app.update()
+        assert app._virtual_list is not None, "拖动后虚拟列表应仍在"
+        assert abs(app._list_col.winfo_width() - target) <= 8
+        # 虚拟列表画布随左列变宽
+        assert app._virtual_list._canvas.winfo_width() <= \
+            app._list_col.winfo_width()
+
+    def test_splitter_no_overlap_with_scrollbars(self, app):
+        """修复R12：分隔条不遮挡列表滚动条（列间留白 ≥2px）。"""
+        app.update()
+        sp = app._splitter
+        sp_x = sp.winfo_rootx()
+        sp_w = max(1, app._splitter.winfo_width())
+        # 列表宿主右缘（含垂直滚动条）在分隔条左侧且留有间隙
+        list_right = (app._list_host.winfo_rootx()
+                      + app._list_host.winfo_width())
+        assert list_right <= sp_x + 1, "列表区域不应越过分隔条"
+        # 详情框左缘在分隔条右侧
+        detail_left = app._detail_box.winfo_rootx()
+        assert detail_left >= sp_x + sp_w - 1, \
+            "详情面板不应被分隔条遮挡"
 
 
 # ---------------------------------------------------------------------------
