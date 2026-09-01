@@ -2330,7 +2330,7 @@ class TestPasteMode:
 # ---------------------------------------------------------------------------
 class TestThemeSwitch:
     # 四态主题名（修复R13 后由下拉选择框直接选择）
-    THEME_NAMES = ("☀️ 亮色", "🌙 暗色", "🔵 蓝调", "🟢 绿调")
+    THEME_NAMES = ("☀ 亮色", "🌙 暗色", "🔵 蓝调", "🟢 绿调")
 
     def _wait_theme(self, app, key, timeout=3.0):
         """推进淡出/淡入过渡帧直至主题到达目标（28ms/帧）。"""
@@ -2375,7 +2375,7 @@ class TestThemeSwitch:
         # 绿调 → 亮色（反向跳过）
         app._on_theme_selected("light")
         assert self._wait_theme(app, "light"), "应直接切换到亮色"
-        assert self._box_text(app) == "☀️ 亮色"
+        assert self._box_text(app) == "☀ 亮色"
         app._apply_theme_switch("dark")
 
     def test_theme_menu_updates_after_switch(self, app):
@@ -2499,6 +2499,58 @@ class TestThemeSwitch:
         assert app._theme_popup.state() == "withdrawn", \
             "点击别处应收起弹窗（全局点击收起）"
 
+    def test_theme_popup_icon_advances_uniform(self, app):
+        """修复R16：四个图标 advance（内部 label 宽）一致，无隐形空白。
+
+        "☀️" 的 FE0F 变体选择符被 Tk 渲染成 ~36 物理px 空白尾迹，
+        advance（62）是其他图标（30）的 2 倍 —— advance 盒居中后
+        可见太阳偏左 ~18px。去掉 FE0F 后 advance 应与其他接近
+        （最大/最小 ≤ 1.5 倍）。
+        """
+        app._open_theme_popup()
+        app.update_idletasks()
+        app.update()
+        try:
+            widths = []
+            for key in app._theme_popup_items():
+                inner = app._theme_popup_rows[key]["icon"]._label
+                widths.append(inner.winfo_width())
+            assert len(widths) == 3
+            assert max(widths) / max(1, min(widths)) <= 1.5, \
+                f"图标 advance 差异过大（{widths}），存在隐形空白尾迹"
+            # 修复R16 的直接断言：太阳不带 FE0F
+            from log_ai_compressor.gui.app import THEMES
+            assert "\ufe0f" not in THEMES["light"]["icon"]
+        finally:
+            app._close_theme_popup()
+
+    def test_theme_button_icon_col_aligns_popup(self, app):
+        """修复R16（续）：主按钮图标列与弹窗图标列同起点、同宽。
+
+        弹窗行 padx=2 + 图标 padx=8 = 10 逻辑 px，主按钮图标原为
+        padx=8 —— 按钮图标列比弹窗图标列左偏 2 逻辑 px（200% DPI
+        下 4 物理 px，实测太阳墨迹中心偏左 4px）。改为 padx=10 后
+        两列完全重合：按钮图标与弹窗图标垂直对齐成一条线。
+        """
+        app.update()
+        app.update_idletasks()
+        app._open_theme_popup()
+        app.update_idletasks()
+        app.update()
+        try:
+            btn = app._theme_box_icon
+            btn_x = btn.winfo_rootx()
+            btn_w = btn.winfo_width()
+            for key in app._theme_popup_items():
+                icon = app._theme_popup_rows[key]["icon"]
+                assert abs(icon.winfo_rootx() - btn_x) <= 2, (
+                    f"弹窗行 {key} 图标列起点 {icon.winfo_rootx()} 与主按钮"
+                    f"图标列起点 {btn_x} 未对齐（应同为 10 逻辑 px 内距）")
+                assert icon.winfo_width() == btn_w, \
+                    f"弹窗行 {key} 图标列宽与主按钮图标列宽不一致"
+        finally:
+            app._close_theme_popup()
+
     def test_theme_box_name_centered(self, app):
         """修复R15：主题名在图标与▼箭头的正中间（水平居中）。"""
         app.update()
@@ -2561,7 +2613,7 @@ class TestThemeSwitch:
         assert _ctk.get_appearance_mode().lower() == "light"
         # 3) 选择框显示与主题一致
         app._update_theme_menu()
-        assert self._box_text(app) == "☀️ 亮色"
+        assert self._box_text(app) == "☀ 亮色"
         # 恢复默认暗色
         app._apply_theme_switch("dark")
 

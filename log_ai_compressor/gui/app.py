@@ -111,7 +111,11 @@ _CLUSTER_ICON = {"fatal": "\u25c6", "root": "\u25b2", "burst": "\u25cf",
 # 可拖动分隔条底色与握点色（半透明观感的灰系，四态各自协调）
 THEMES: Dict[str, Dict[str, str]] = {
     "light": {
-        "name": "☀️ 亮色", "icon": "☀️", "label": "亮色",
+        # 修复缺陷R16：icon 不带 FE0F —— Tk 会把变体选择符渲染成
+        # 36 物理px 的空白尾迹，"☀️" 的 advance（62）远大于其他图标
+        # （30），advance 盒居中后可见太阳被推到左半边（视觉偏左 18px）。
+        # 去掉 FE0F 字形不变（同高 32px），advance 26 与其他一致，居中对齐
+        "name": "☀ 亮色", "icon": "☀", "label": "亮色",
         "window": "#eef1f6", "card": "#ffffff",
         "header": "#ffffff", "text": "#1f2937", "muted": "#6b7280",
         "accent": "#3B82F6", "accent_hover": "#2563EB", "accent_text": "#ffffff",
@@ -832,7 +836,11 @@ class LogCompressorApp(_make_app_base()):
         self._theme_box_icon = ctk.CTkLabel(
             self._theme_box, text=p["icon"],
             width=self._measure_theme_icon_col(), anchor="center")
-        self._theme_box_icon.grid(row=0, column=0, padx=(8, 0), pady=(3, 3))
+        # 修复缺陷R16（续）：图标列左距 10 逻辑 px 与弹窗行对齐 ——
+        # 弹窗行 padx=2 + 图标 padx=8 = 10，此前按钮为 8，导致按钮
+        # 图标列比弹窗图标列左偏 2 逻辑 px（200% DPI 下 4 物理 px，
+        # 太阳/月亮可见中心随之偏左），两者左缘同起点后完全重合
+        self._theme_box_icon.grid(row=0, column=0, padx=(10, 0), pady=(3, 3))
         self._theme_box_name = ctk.CTkLabel(
             self._theme_box, text=p["label"], anchor="center")
         self._theme_box_name.grid(row=0, column=1, sticky="ew",
