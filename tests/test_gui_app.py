@@ -829,46 +829,120 @@ class TestSplitter:
         assert abs((left1 + detail1 + _SPLITTER_WIDTH * scale) - pw) <= 6, \
             "左右列 + 分隔条应占满面板宽"
 
-    def test_drag_realtime_updates_columns_per_motion(self, app):
-        """优化：实时拖动 —— 每个 motion 后真实列宽立即跟随（无指示线/覆盖层/节流）。
+    def test_drag_proxy_visual_realtime(self, app):
+        """优化：位图快照代理 —— 按下建层，拖动只动视口/裁剪框，松开一次到位。
 
-        拖动中每个 <B1-Motion> 直接 place 更新左右列真实宽度 +
-        update_idletasks 立即刷新：鼠标每移动 1px 布局跟着变 1px，
-        松开时无任何跳变（布局早已实时到位）。
+        撕裂根源是拖动中逐 motion 真实重排全部 CTk/Text 子窗口。
+        位图代理：按下截屏建「右固定画布（视口滚动）+ 左裁剪框」，
+        拖动中只改裁剪框宽 + 右画布视口（GDI BitBlt 级，零真实控件
+        触碰 → 零重排 → 零撕裂的物质基础），左右列视觉宽度逐 motion
+        实时跟手；松开时真实容器一次 place 到最终位置。
         """
+        app.update()
+        sp = app._splitter
+        pw = self._pw(app)
+        assert not hasattr(app, "_splitter_ghost"), "指示线方案应已移除"
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        proxy = app._splitter_proxy
+        if proxy is None:
+            pytest.skip("位图代理不可用（无桌面截图 / PIL 缺失）")
+        lw0 = proxy["lw"]
+        frozen = app._list_col.winfo_width()
+        calls = []
+        orig = app._layout_splitter
+        app._layout_splitter = lambda: calls.append(1)
+        try:
+            for dx in (80, 160, 240):
+                sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
+                app.update()
+                expect = app._splitter_ratio * pw
+                # 左裁剪框宽度逐 motion 实时跟随（= 左列视觉宽度）
+                assert abs(proxy["clip"].winfo_width() - expect) <= 2, \
+                    "左裁剪框宽度应逐 motion 实时跟随鼠标"
+                # 右画布视口滚到 lw−expect：右列内容左缘精确贴住
+                # 分隔条（屏幕 s 显示截图像素 s + lw − left）
+                assert abs(proxy["right"].canvasx(0)
+                           - (lw0 - expect)) <= 2, \
+                    "右画布视口应实时滚动（右列内容贴住分隔条）"
+            # 拖动中零真实布局触碰（零重排 → 零撕裂的物质基础）
+            assert calls == [], "拖动中不应触碰真实布局"
+            assert app._list_col.winfo_width() == frozen, \
+                "拖动中真实列冻结（代理之下，松开时一次应用）"
+        finally:
+            app._layout_splitter = orig
+        sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
+        app.update()
+        assert app._splitter_proxy is None, "释放后代理应销毁"
+        assert abs(app._splitter_ratio * pw
+                   - app._list_col.winfo_width()) <= 8, \
+            "释放后真实列一次性到最终位置"
+
+    def test_drag_proxy_photo_freed_on_release(self, app):
+        """优化：代理 PhotoImage 生命周期 —— 释放后引用置空防泄漏。"""
+        app.update()
+        sp = app._splitter
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        if app._splitter_proxy is None:
+            pytest.skip("位图代理不可用")
+        photo = app._splitter_proxy["photo"]
+        assert photo is not None
+        sp.event_generate("<ButtonRelease-1>", x=3 + 100, y=40)
+        app.update()
+        assert app._splitter_proxy is None
+
+    def test_drag_fallback_realtime_place(self, app):
+        """优化：截图不可用回退 —— 逐 motion 实时 place 真实布局。"""
         app.update()
         sp = app._splitter
         panel = app._result_panel
         pw = self._pw(app)
-        assert not hasattr(app, "_splitter_ghost"), "指示线方案应已移除"
-        assert getattr(app, "_splitter_overlay", None) is None, \
-            "覆盖层方案应已移除（拖动中不允许任何中间视觉元素）"
+        # 强制代理构建失败（模拟无头 / 远程会话 / 窗口出屏）
+        app._splitter_proxy_begin = lambda: False
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
+        assert app._splitter_proxy is None, "回退路径不应创建代理"
         for dx in (80, 160, 240):
             sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
-            app.update()      # 处理 idle 几何（place 的实际生效点）
+            app.update()
             expect = app._splitter_ratio * pw
             assert abs(app._list_col.winfo_width() - expect) <= 8, \
-                "motion 后真实列宽应立即跟随（无需等松开）"
+                "回退路径：motion 后真实列宽应实时跟随"
             sx = sp.winfo_rootx() - panel.winfo_rootx()
             assert abs(sx - app._list_col.winfo_width()) <= 2, \
-                "分隔条应实时贴住左列右缘"
-        left_before_release = app._list_col.winfo_width()
+                "回退路径：分隔条应实时贴住左列右缘"
         sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
         app.update()
-        assert app._list_col.winfo_width() == left_before_release, \
-            "松开后布局不应再跳变（拖动中已实时到位）"
         assert abs(app._splitter_ratio * pw
                    - app._list_col.winfo_width()) <= 8, \
-            "最终列宽应与比例一致"
+            "释放后列宽应与最终比例一致"
+
+    def test_drag_focusout_ends_drag(self, app):
+        """兼容性：拖动中窗口失焦 → 结束拖动并应用当前位置。"""
+        app.update()
+        sp = app._splitter
+        pw = self._pw(app)
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        if app._splitter_proxy is None:
+            pytest.skip("位图代理不可用")
+        sp.event_generate("<B1-Motion>", x=3 + 160, y=40)
+        app.update()
+        app.event_generate("<FocusOut>")
+        app.update()
+        assert not app._splitter_dragging, "失焦应结束拖动"
+        assert app._splitter_proxy is None, "失焦应销毁代理"
+        assert abs(app._splitter_ratio * pw
+                   - app._list_col.winfo_width()) <= 8, \
+            "失焦应应用当前位置"
 
     def test_drag_realtime_fast_perf(self, app):
         """优化：实时拖动性能 —— 单帧（motion+idle 级联）<16ms（60fps）。
 
-        虚拟列表 + 快速往返拖动：每 motion 后 update() 处理 place
-        几何与空闲帧级联（虚拟列表快速路径只改行宽），单帧成本
-        应远低于 16ms。
+        虚拟列表 + 快速往返拖动：代理路径每帧仅画布几何操作 +
+        子画布 BitBlt 重绘，单帧成本应远低于 16ms（无代理回退路径
+        走 place 快速路径同样应达标）。
         """
         _run_many_clusters(app)
         app.update()
@@ -877,8 +951,7 @@ class TestSplitter:
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
         pw = self._pw(app)
-        # 预热：首个大幅 motion 触发详情 Text/字体度量等一次性
-        # 冷启动重排（缓存后不再发生），不计入稳态帧耗时
+        # 预热：首帧冷启动（代理建层 / 回退路径的字体度量缓存）
         for frac in (0.25, 0.6, 0.25):
             sp.event_generate("<B1-Motion>", x=3 + int(pw * frac), y=40)
             app.update()

@@ -1417,6 +1417,9 @@ class LogCompressorApp(_make_app_base()):
         # 优化（实时拖动）：按下时缓存的拖动几何（motion 内零
         # winfo 查询，纯算术 + place 比例参数直接几何更新）
         self._splitter_drag_ctx = None
+        # 优化（位图快照代理）：拖动期截图代理覆盖层（见
+        # _splitter_proxy_begin；None = 未激活/截图失败回退直拖）
+        self._splitter_proxy = None
         self._splitter = ctk.CTkFrame(
             panel, width=_SPLITTER_WIDTH, corner_radius=3,
             fg_color=p["splitter"], cursor="sb_h_double_arrow")
@@ -1527,13 +1530,20 @@ class LogCompressorApp(_make_app_base()):
                                relheight=1)
 
     def _on_splitter_press(self, event) -> None:
-        """按下：缓存拖动几何（motion 内零 winfo 查询）。
+        """按下：缓存拖动几何 + 构建位图快照代理（视觉实时 + 零撕裂）。
 
-        优化（实时拖动）：无任何指示线/覆盖层/节流 —— 拖动中每个
-        motion 直接对真实布局做 place 几何更新并立即刷新屏幕。
-        面板宽/rootx/最小宽一次缓存；虚拟列表切拖动快速路径
-        （_sync 只改行宽不重填文本，即「拖动中禁用内部重排、只做
-        几何裁剪」）；窗口太窄锁定语义不变。
+        优化（位图快照代理）：撕裂根源是拖动中逐 motion 真实重排
+        左右两列的全部 CTk/Text 子窗口（大字体+200%DPI 单帧全量
+        重绘 100ms+，多窗口异步重绘交错上屏 → 撕裂/残影/文字重叠）。
+        现按下时对结果区截屏一次，用「右固定画布（视口滚动）+
+        左裁剪框」代理展示拖动全程（资源管理器 / VS Code 分隔条
+        拖拽的标准做法）：左右列视觉宽度逐 motion 实时跟手、内容
+        按容器正常裁剪/填充，且每帧只有 GDI BitBlt 级画布视口操作
+        —— 零真实控件重排 → 物理上不可能撕裂。松开时真实容器
+        一次性 place 到最终位置（在代理之下完成重排重绘后再销毁
+        代理，无闪变）。PIL/截图不可用（无头/远程/窗口出屏）时
+        静默回退为逐 motion 实时 place 真实布局（仍实时，大内容
+        下可能有轻微撕裂）。详见 _splitter_proxy_begin。
         """
         self._splitter_dragging = True
         self._splitter_hover(True)
@@ -1549,26 +1559,136 @@ class LogCompressorApp(_make_app_base()):
         self._splitter_drag_ctx = {"pw": pw, "rootx": rootx,
                                    "sp_w": sp_w, "lo": lo, "hi": hi}
         self._splitter_drag_mins = (left_min, right_min)
+        if hi >= lo:
+            self._splitter_proxy_begin()
+        # 拖动中窗口失焦（alt-tab 等）→ 结束拖动并应用当前位置
+        self.bind("<FocusOut>", self._on_splitter_focusout)
         if self._virtual_list is not None:
             self._virtual_list.set_splitter_drag(True)
 
+    def _splitter_proxy_begin(self) -> bool:
+        """构建位图快照代理（详见 _on_splitter_press 说明）。
+
+        结构（实测择优：画布 xview 视口滚动 ~2-4ms，画布/窗口
+        resize/move 全量失效 ~5-18ms，小图元 coords ~2ms）：
+        - 右画布：固定全幅、逐帧只滚动视口（GDI BitBlt 级）；高亮
+          竖线与握点用「固定内容坐标」图元 —— 内容坐标随视口平移
+          自动贴住分隔条，零逐帧图元更新；视口右端越过截图右缘时
+          露出画布底色（card）= 右列自然填充。
+        - 左裁剪框：可变宽 Frame（纯色填充 + 子画布只重绘新暴露
+          窄条）；框内左画布固定宽（永不缩放 → 永不全量失效），
+          视口锁 0 显示截图左列静态内容；其右侧遮罩图元在拖宽时
+          露出左列背景填充（card + 列表区 window 色带）。
+        - 两窗口叠放次序：右画布（底）< 左裁剪框（顶），覆盖全部
+          真实控件；真实分隔条被完整遮住，无重影。
+        """
+        try:
+            from PIL import ImageGrab, ImageTk
+        except Exception:
+            return False
+        panel = self._result_panel
+        ctx = getattr(self, "_splitter_drag_ctx", None) or {}
+        pw = ctx.get("pw") or max(1, panel.winfo_width())
+        sp_w = ctx.get("sp_w") or _SPLITTER_WIDTH
+        lo, hi = ctx.get("lo", 0), ctx.get("hi", pw)
+        try:
+            panel.update_idletasks()     # 截图前确保当前布局已完全绘制
+            px, py = panel.winfo_rootx(), panel.winfo_rooty()
+            ph = panel.winfo_height()
+            lw = self._list_col.winfo_width()
+            if min(pw, ph, lw) <= 2 or pw - lw - sp_w <= 2:
+                return False
+            shot = ImageGrab.grab(bbox=(px, py, px + pw, py + ph))
+            # 进程 DPI 感知下 Tk 坐标即物理像素，截图 1:1；尺寸不符
+            # （窗口部分出屏 / 远程会话缩放异常）时放弃代理走回退
+            if shot.size != (pw, ph):
+                return False
+            photo = ImageTk.PhotoImage(shot)
+        except Exception:
+            return False
+        p = self._palette()
+        hi = max(hi, lw)             # 布局未完成等极端时的保守修正
+        # --- 右画布：固定全幅 + 视口滚动（内容映射：屏幕 s ↔ 截图
+        # 像素 s + lw − left，右列内容左缘精确贴住分隔条） ---
+        right_c = tk.Canvas(panel, bd=0, highlightthickness=0,
+                            bg=p["card"], cursor="sb_h_double_arrow")
+        right_c.place(x=0, y=0, relwidth=1, relheight=1)
+        # 滚动区域向两侧扩展：视口目标 lw−left ∈ [lw−hi, lw−lo]
+        m2 = max(0, hi - lw)         # 左侧余量（拖右时视口为负）
+        m1 = max(0, lw - lo)         # 右侧余量（拖左时视口越过右缘）
+        right_c.configure(scrollregion=(-m2, 0, pw + m1, ph),
+                         xscrollincrement=1)
+        right_c.create_image(0, 0, anchor="nw", image=photo)
+        # 高亮分隔条竖线 + 握点：固定内容坐标 [lw, lw+sp]，随视口
+        # 平移自动出现在屏幕 [left, left+sp]（并盖住截图里的旧
+        # 分隔条像素，杜绝重影）；初始视口 0 即正确（left=lw）
+        right_c.create_rectangle(lw, 0, lw + sp_w, ph,
+                                 fill=p["row_selected"], width=0)
+        for dy in (-8, 0, 8):
+            right_c.create_rectangle(
+                lw + sp_w / 2 - 1, ph / 2 + dy - 1,
+                lw + sp_w / 2 + 1, ph / 2 + dy + 1,
+                fill=p["splitter_grip"], width=0)
+        # --- 左裁剪框 + 固定宽左画布（视口锁 0，静态左列） ---
+        left_clip = tk.Frame(panel, bg=p["window"], bd=0,
+                             highlightthickness=0,
+                             cursor="sb_h_double_arrow")
+        left_clip.place(x=0, y=0, width=lw, relheight=1)
+        left_c = tk.Canvas(left_clip, bd=0, highlightthickness=0,
+                           bg=p["window"], width=hi)
+        left_c.place(x=0, y=0, relheight=1)
+        left_c.create_image(0, 0, anchor="nw", image=photo)
+        # 左列右侧遮罩：拖宽时 [lw, left] 露出左列背景（card + 列表
+        # 区 window 色带）而非右列内容 —— 单行列表真实拖宽正是行
+        # 背景延伸，该近似与真实重排视觉一致；拖窄时被裁剪框
+        # 遮住，自动不可见
+        try:
+            y0 = self._list_col.winfo_y() + self._list_host.winfo_y()
+            y1 = y0 + self._list_host.winfo_height()
+        except (tk.TclError, AttributeError):
+            y0, y1 = 0, ph
+        left_c.create_rectangle(lw, 0, hi, ph, fill=p["card"], width=0)
+        left_c.create_rectangle(lw, y0, hi, max(y1, y0 + 1),
+                                fill=p["window"], width=0)
+        self._splitter_proxy = {
+            "clip": left_clip, "left": left_c, "right": right_c,
+            "photo": photo, "lw": lw, "sp_w": sp_w, "ph": ph}
+        return True
+
+    def _splitter_proxy_end(self) -> None:
+        """销毁位图快照代理（幂等；截图失败回退时为空操作）。"""
+        proxy = getattr(self, "_splitter_proxy", None)
+        self._splitter_proxy = None
+        if proxy is None:
+            return
+        proxy["photo"] = None      # 显式释放 PhotoImage 引用（防泄漏）
+        for key in ("right", "clip"):
+            try:
+                proxy[key].destroy()  # 左画布随裁剪框一并销毁
+            except (tk.TclError, KeyError):
+                pass
+
+    def _on_splitter_focusout(self, _event) -> None:
+        """拖动中窗口失焦：结束拖动并应用当前位置（兼容性边界）。"""
+        if self._splitter_dragging:
+            self._on_splitter_release(None)
+
     def _on_splitter_drag(self, event) -> None:
-        """拖动：每个 motion 立即更新真实布局（place 直接几何操作）。
+        """拖动：只滚动右画布视口 + 调整左裁剪框（视觉实时、零重排）。
 
         修复缺陷R12（拖动错位/拖不回）：x_root 是事件自带的屏幕
         绝对坐标，与事件接收窗口（分隔条内部 canvas / 2px 握点）
         无关。
-        优化（实时拖动）：motion 内零 winfo 查询（几何已在按下时
-        缓存），钳制算术后直接 _layout_splitter() —— 三列 place
-        比例参数（relx/relwidth）是直接几何操作（不触发 grid 布局
-        重算、高 DPI 下无坐标分裂），没有任何延迟/节流/指示线/
-        覆盖层。此处刻意不调 update()/update_idletasks() 强制逐帧
-        同步绘制 —— 那会在大字体+高 DPI+满载环境下把 motion 事件
-        处理阻塞数百毫秒（每帧全量重绘 CTk/Text），造成事件积压
-        与跟手延迟；place 请求即时生效，Tk 主循环在处理完积压
-        motion 后的空闲帧统一计算几何并重绘（中间帧损坏区域自动
-        合并），布局始终跟随鼠标最新位置且事件流不被阻塞。虚拟
-        列表拖动快速路径只改行宽（几何裁剪），松开时补全量重排。
+        优化（位图快照代理）：motion 内钳制算术后只做两步 ——
+        左裁剪框 place_configure(width)（子画布固定不缩放，只重绘
+        新暴露窄条）+ 右画布 xview_scroll 到 lw−left（视口平移
+        使右列内容/高亮竖线/握点整体精确贴住分隔条；实测画布视口
+        滚动 ~2-4ms，画布 resize/move 全量失效 ~5-18ms，故视口是
+        唯一逐帧操作的原语）。不触碰任何真实控件、不触发 CTk/Text
+        重绘，也不调用 update()/update_idletasks()（Tk 主循环空闲
+        帧自然刷新，事件流永不被阻塞）—— 鼠标每移动 1px 左右列宽
+        立即跟着变 1px，完全跟手。无代理（截图失败）时回退为逐
+        motion 实时 place 真实布局。
         """
         if not self._splitter_dragging:
             return
@@ -1583,20 +1703,44 @@ class LogCompressorApp(_make_app_base()):
             return
         left = min(max(x, ctx["lo"]), ctx["hi"])
         self._splitter_ratio = left / ctx["pw"]
-        self._layout_splitter()
+        proxy = getattr(self, "_splitter_proxy", None)
+        if proxy is not None:
+            # 每帧仅两步（全部 GDI BitBlt 级）：左裁剪框变宽（子画布
+            # 只重绘新暴露窄条）+ 右画布视口滚到 lw−left（内容随视口
+            # 平移：右列内容/高亮竖线/握点整体精确贴住分隔条）
+            try:
+                proxy["clip"].place_configure(width=left)
+                target = proxy["lw"] - left
+                cur = proxy["right"].canvasx(0)
+                delta = int(round(target - cur))
+                if delta:
+                    proxy["right"].xview_scroll(delta, "units")
+            except (tk.TclError, KeyError):
+                pass
+            return
+        self._layout_splitter()      # 无代理回退：实时 place 真实布局
 
     def _on_splitter_release(self, event) -> None:
-        """松开：布局已在拖动中实时到位，仅收尾。
+        """松开：真实容器一次性 place 到最终位置并销毁代理。
 
-        优化（实时拖动）：真实布局逐 motion 应用，松开时无任何
-        跳变 —— 只保存比例到配置，并让虚拟列表补一次全量 _sync
-        （拖动期快速路径跳过的文本重排在此补齐）。
+        优化（位图快照代理）：先 _layout_splitter() + 一次
+        update_idletasks() 让真实列在覆盖层之下完成几何应用与
+        重绘，再销毁覆盖层 —— 顺序颠倒会闪现一帧拖动前旧布局。
+        虚拟列表补一次全量 _sync 并持久化比例。
         """
         if not self._splitter_dragging:
             return
         self._splitter_dragging = False
         self._splitter_hover(False)
         self._splitter_drag_ctx = None
+        self._splitter_drag_mins = None
+        self.unbind("<FocusOut>")
+        self._layout_splitter()
+        try:
+            self._result_panel.update_idletasks()
+        except (tk.TclError, AttributeError):
+            pass
+        self._splitter_proxy_end()
         if self._virtual_list is not None:
             self._virtual_list.set_splitter_drag(False)
         self._save_config()
@@ -1606,6 +1750,8 @@ class LogCompressorApp(_make_app_base()):
         self._splitter_dragging = False
         self._splitter_drag_ctx = None
         self._splitter_drag_mins = None
+        self.unbind("<FocusOut>")
+        self._splitter_proxy_end()
         if self._virtual_list is not None:
             self._virtual_list.set_splitter_drag(False)
         self._splitter_ratio = _SPLITTER_DEFAULT_RATIO
