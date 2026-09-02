@@ -174,6 +174,11 @@ _SPLITTER_WIDTH = 6            # 分隔条宽度（像素）
 _SPLITTER_MIN_LIST = 420       # 左列兜底（实测标题栏 ~412 + 余量）
 _SPLITTER_MIN_DETAIL = 360     # 右列兜底（实测标题栏 ~325 + padx + 余量）
 _SPLITTER_DEFAULT_RATIO = 0.4  # 默认左右宽度比（列表:详情 = 2:3）
+# 修复缺陷R17：拖动布局合帧间隔（ms）—— 鼠标 motion 事件 60~125Hz，
+# 每事件同步重排整棵列子树（列表行重填 + 详情全文重排）远超事件
+# 间隔，事件排队 + 各子窗口分区异步重绘 → 拖动撕裂/卡顿。
+# 16ms 内多次 motion 合并为一次布局（≤60fps，应用最新位置）。
+_SPLITTER_DRAG_FRAME_MS = 16
 
 # 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7/R5）
 # 修复缺陷R5：业务栈帧提亮加粗更明显；系统库折叠提示独立配色更清晰
@@ -1145,6 +1150,8 @@ class LogCompressorApp(_make_app_base()):
         """构建分隔条（宽 6px 圆角条 + 三个握点 + ↔ 光标）。"""
         p = self._palette()
         self._splitter_dragging = False
+        # 修复缺陷R17：拖动布局合帧定时器（None=无挂起帧）
+        self._splitter_layout_job = None
         self._splitter = ctk.CTkFrame(
             panel, width=_SPLITTER_WIDTH, corner_radius=3,
             fg_color=p["splitter"], cursor="sb_h_double_arrow")
@@ -1278,7 +1285,41 @@ class LogCompressorApp(_make_app_base()):
             return
         left = min(max(x, lo), hi)
         self._splitter_ratio = left / pw
-        self._layout_splitter()
+        # 修复缺陷R17：不再每事件同步重排（撕裂/卡顿根因）——
+        # 只记录最新比例，交由 _schedule_splitter_layout 合帧应用
+        self._schedule_splitter_layout()
+
+    def _schedule_splitter_layout(self) -> None:
+        """修复缺陷R17：拖动布局合帧 —— 16ms 窗口内多次 motion 只布局一次。
+
+        每事件同步 place() 会级联重排左右列整棵子树（列表行重填 +
+        详情全文重排），耗时超过 motion 事件间隔（60~125Hz）导致
+        事件排队与子窗口分区异步重绘（画面撕裂、拖动跟手感差）。
+        定时器窗口内新到的 motion 只更新比例（最新位置总是被应用），
+        布局频率上限 60fps；单帧布局慢时事件循环仍能持续取走输入
+        事件，指针不跟手的现象随之消失。
+        """
+        if self._splitter_layout_job is not None:
+            return                  # 已有挂起帧：复用，只等最新比例
+        def _apply() -> None:
+            self._splitter_layout_job = None
+            self._layout_splitter()
+        self._splitter_layout_job = self.after(
+            _SPLITTER_DRAG_FRAME_MS, _apply)
+
+    def _flush_splitter_layout(self) -> None:
+        """修复缺陷R17：冲刷挂起的合帧布局（拖动结束/双击复位时）。
+
+        取消挂起定时器（其回调携带的是冲刷前的旧几何，放行会造成
+        双重布局）—— 由调用方随即同步应用最终布局。
+        """
+        job = getattr(self, "_splitter_layout_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+            self._splitter_layout_job = None
 
     def _on_splitter_release(self, event) -> None:
         """松开鼠标：结束拖动并保存位置到配置。"""
@@ -1286,11 +1327,16 @@ class LogCompressorApp(_make_app_base()):
             return
         self._splitter_dragging = False
         self._splitter_hover(False)
+        # 修复缺陷R17：冲刷挂起帧并同步应用最终布局（落点精确）
+        self._flush_splitter_layout()
+        self._layout_splitter()
         self._save_config()
 
     def _on_splitter_dblclick(self, event) -> None:
         """双击恢复默认比例（2:3）并闪烁反馈。"""
         self._splitter_dragging = False
+        # 修复缺陷R17：冲刷挂起帧（其回调会以旧比例双重布局）
+        self._flush_splitter_layout()
         self._splitter_ratio = _SPLITTER_DEFAULT_RATIO
         self._layout_splitter()
         self._flash_splitter()
@@ -3192,6 +3238,8 @@ class LogCompressorApp(_make_app_base()):
 
     def _on_close(self) -> None:
         self._save_config()
+        # 修复缺陷R17：取消挂起的拖动合帧定时器（销毁后触发 bgerror）
+        self._flush_splitter_layout()
         # 修复缺陷R6：清理虚拟列表与全屏缓存窗口（释放控件/句柄）
         self._fs_list_refresh = None
         for win in (self._fs_list_win, self._fs_detail_win,
