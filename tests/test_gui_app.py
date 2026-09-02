@@ -646,8 +646,57 @@ class TestFatalLevelFilter:
         assert "ERROR" in levels, "ERROR 勾选不受影响"
 
     def test_fatal_help_tooltip_registered(self, app):
-        """修复R10：FATAL 复选框旁 ⓘ 悬停说明已登记。"""
-        assert getattr(app, "_fatal_help_tooltip", None) is not None
+        """优化：六个级别复选框左侧都有 ⓘ 且悬停说明已登记。"""
+        tooltips = getattr(app, "_level_tooltips", {})
+        assert len(tooltips) == 6, \
+            f"六个级别都应有 ⓘ 悬停说明（实际 {len(tooltips)} 个）"
+        for level in ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
+            assert level in tooltips, f"{level} 缺少 ⓘ 悬停说明"
+            assert tooltips[level] is not None
+
+    def test_level_help_texts_match(self, app):
+        """优化：每个 ⓘ 的悬停解释文字与其级别精确对应。"""
+        from log_ai_compressor.gui.app import _LEVEL_HELP
+        expected = {
+            "FATAL": "FATAL：致命错误，程序无法继续运行的严重故障，"
+                     "严重程度高于ERROR",
+            "ERROR": "ERROR：错误，程序运行中出现的异常，"
+                     "可能导致功能异常但程序仍可继续运行",
+            "FAIL": "FAIL：失败，操作或测试未成功完成的结果",
+            "WARN": "WARN：警告，可能存在问题但不影响程序正常运行，"
+                    "需要关注",
+            "INFO": "INFO：信息，程序正常运行时的一般性记录",
+            "DEBUG": "DEBUG：调试，开发调试用的详细信息，"
+                     "通常生产环境不显示",
+        }
+        for level, text in expected.items():
+            tip = app._level_tooltips[level]
+            assert tip._current_text() == text, \
+                f"{level} 的解释文字不匹配（实际 {tip._current_text()!r}）"
+
+    def test_level_info_icons_left_of_checkboxes(self, app):
+        """优化：六个 ⓘ 位于对应复选框左侧且样式统一（蓝/手型光标）。"""
+        app.update()
+        level_box = app._level_tooltips["FATAL"]._widget.master
+        boxes = {}
+        infos = {}
+        for child in level_box.winfo_children():
+            txt = str(child.cget("text"))
+            if txt == "ⓘ":
+                infos[child] = child.winfo_x()
+            elif txt in ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
+                boxes[txt] = child.winfo_x()
+        assert len(infos) == 6, f"应有六个 ⓘ 图标（实际 {len(infos)}）"
+        assert len(boxes) == 6, f"应有六个复选框（实际 {len(boxes)}）"
+        for icon, ix in infos.items():
+            # 每个 ⓘ 紧邻其右侧最近的复选框（同一级别组）
+            right = min(bx for bx in boxes.values() if bx > ix - 5)
+            assert right - ix <= 60, "ⓘ 应紧邻复选框左侧"
+            assert str(icon.cget("cursor")) == "hand2", \
+                "ⓘ 悬停光标应为手型"
+            color = str(icon.cget("text_color"))
+            assert color.lower() == "#3b82f6", \
+                f"ⓘ 颜色应统一为 #3B82F6（实际 {color}）"
 
     def test_fatal_row_color_is_red(self, app):
         """修复R10：FATAL 错误行文字为红色（比 ERROR 醒目）。"""
@@ -1328,7 +1377,7 @@ class TestSampleHelpTooltip:
         canvas = tip._tip.winfo_children()[0]
         item = canvas.find_withtag("text")[0]
         assert canvas.itemcget(item, "text") == SAMPLE_HELP_TEXT
-        tip._hide()
+        tip._hide_now()
         app.update()
         assert tip._tip is None
 
@@ -1341,15 +1390,15 @@ class TestSampleHelpTooltip:
         tip._show()
         app.update()
         assert tip._tip is not None
-        tip._hide()
+        tip._hide_now()
 
     def test_tooltip_leak_free_after_destroy(self, app):
         """关联控件销毁后 hide 不抛异常（健壮性）。"""
         tip = app._sample_help_tooltip
         tip._show()
         app.update()
-        tip._hide()   # 常规销毁
-        tip._hide()   # 二次销毁应幂等
+        tip._hide_now()   # 常规销毁
+        tip._hide_now()   # 二次销毁应幂等
         assert tip._tip is None
 
 
@@ -1360,7 +1409,7 @@ class TestTooltipR3:
     """悬停说明的可读性与定位（典型样例说明 / 解析规则说明共用）。"""
 
     def test_tooltip_font_size_enlarged(self, app):
-        """修复R3：tooltip 字体放大到 12~13 号（原 10 号过小）。"""
+        """优化：tooltip 字体放大到 14~16 号（原 12 号用户反馈看不清）。"""
         tip = app._sample_help_tooltip
         tip._show()
         app.update()
@@ -1368,9 +1417,28 @@ class TestTooltipR3:
             canvas = tip._tip.winfo_children()[0]
             item = canvas.find_withtag("text")[0]
             font = str(canvas.itemcget(item, "font"))
-            assert "12" in font or "13" in font, f"字体应为 12/13 号，实际 {font}"
+            sizes = [int(t) for t in
+                     __import__("re").findall(r"-?\d+", font)]
+            assert any(14 <= s <= 16 for s in sizes), \
+                f"字体应为 14~16 号，实际 {font}"
         finally:
-            tip._hide()
+            tip._hide_now()
+
+    def test_level_tooltip_font_size_enlarged(self, app):
+        """优化：级别 ⓘ 悬停说明的字体同样放大到 14~16 号。"""
+        tip = app._level_tooltips["FATAL"]
+        tip._show()
+        app.update()
+        try:
+            canvas = tip._tip.winfo_children()[0]
+            item = canvas.find_withtag("text")[0]
+            font = str(canvas.itemcget(item, "font"))
+            sizes = [int(t) for t in
+                     __import__("re").findall(r"-?\d+", font)]
+            assert any(14 <= s <= 16 for s in sizes), \
+                f"级别说明字体应为 14~16 号，实际 {font}"
+        finally:
+            tip._hide_now()
 
     def test_tooltip_wrap_width_in_range(self, app):
         """修复R3：tooltip 宽度限制在 400~500px（长文本自动换行）。"""
@@ -1386,7 +1454,7 @@ class TestTooltipR3:
             # 画布宽度不超 500 + 边距
             assert canvas.winfo_width() <= 530
         finally:
-            tip._hide()
+            tip._hide_now()
 
     def test_tooltip_light_bg_dark_text(self, app):
         """修复R3：tooltip 白底深字（视觉清晰）。"""
@@ -1406,7 +1474,7 @@ class TestTooltipR3:
             fill_colors = {str(canvas.itemcget(c, "fill")) for c in cards}
             assert "#ffffff" in fill_colors or str(canvas.cget("bg")) == "#ffffff"
         finally:
-            tip._hide()
+            tip._hide_now()
 
     def test_tooltip_within_screen_bounds(self, app):
         """修复R3：tooltip 完整可见（不溢出屏幕右/下边缘）。"""
@@ -1423,7 +1491,7 @@ class TestTooltipR3:
             assert x + w <= sw + 2, f"右边缘溢出（{x + w} > {sw}）"
             assert y + h <= sh + 2, f"下边缘溢出（{y + h} > {sh}）"
         finally:
-            tip._hide()
+            tip._hide_now()
 
     def _tooltip_on_edge_widget(self, app, geometry: str):
         """在指定屏幕位置创建宿主控件并显示 tooltip。"""
@@ -1455,7 +1523,7 @@ class TestTooltipR3:
                 assert tw.winfo_x() < lbl.winfo_rootx(), \
                     "右边缘情形应在控件左侧弹出"
             finally:
-                tip._hide()
+                tip._hide_now()
         finally:
             host.destroy()
             app.update()
@@ -1477,7 +1545,7 @@ class TestTooltipR3:
                 assert tw.winfo_y() < lbl.winfo_rooty(), \
                     "下边缘情形应在控件上方弹出"
             finally:
-                tip._hide()
+                tip._hide_now()
         finally:
             host.destroy()
             app.update()
@@ -2155,7 +2223,7 @@ class TestRuleTooltips:
         canvas = tip._tip.winfo_children()[0]
         item = canvas.find_withtag("text")[0]
         assert canvas.itemcget(item, "text") == RULE_TOOLTIPS["embedded"]
-        tip._hide()
+        tip._hide_now()
 
     def test_all_rules_have_descriptions(self):
         """三个内置规则都必须有说明文本。"""

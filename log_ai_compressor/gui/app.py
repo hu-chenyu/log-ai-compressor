@@ -84,9 +84,19 @@ LEVEL_CHECKS = ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG")
 RULE_NAMES = ("generic", "embedded", "jenkins")
 _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
 
-# 修复缺陷R10：FATAL 级别悬停说明（复选框旁 ⓘ 图标）
-_FATAL_LEVEL_HELP = ("FATAL：致命错误，程序无法继续运行的严重故障，"
-                     "严重程度高于ERROR")
+# 优化：六个级别复选框旁的 ⓘ 悬停说明（每个级别对应自己的解释）
+_LEVEL_HELP = {
+    "FATAL": "FATAL：致命错误，程序无法继续运行的严重故障，"
+             "严重程度高于ERROR",
+    "ERROR": "ERROR：错误，程序运行中出现的异常，"
+             "可能导致功能异常但程序仍可继续运行",
+    "FAIL": "FAIL：失败，操作或测试未成功完成的结果",
+    "WARN": "WARN：警告，可能存在问题但不影响程序正常运行，"
+            "需要关注",
+    "INFO": "INFO：信息，程序正常运行时的一般性记录",
+    "DEBUG": "DEBUG：调试，开发调试用的详细信息，"
+             "通常生产环境不显示",
+}
 
 # 修复缺陷R10：字体大小档位（配置区「字体大小」选择器，持久化）
 # - 「中」为基准档（主列表头部 22 加粗 / 摘要 18；全屏 28/24/20）
@@ -223,8 +233,8 @@ class Tooltip:
     Leave / 按下时立即销毁。
     """
 
-    # 修复缺陷R3：字号 12（原 10）；宽度 420（400~500 区间）
-    _FONT = ("Microsoft YaHei UI", 12)
+    # 优化：字号 15（原 12，用户反馈看不清）；宽度 420（不截断自动换行）
+    _FONT = ("Microsoft YaHei UI", 15)
     _WRAP = 420
     _BG = "#ffffff"          # 浅色背景
     _FG = "#1f2937"          # 深色文字
@@ -233,14 +243,18 @@ class Tooltip:
     _SHADOW2 = "#98a5b3"     # 阴影外层
     _CORNER = 10             # 圆角半径
     _MAGIC = "#ff00ff"       # 透明色（Windows -transparentcolor）
-    _PAD = 12                # 文本内边距
+    _PAD = 14                # 文本内边距（指令：上下左右 12~16px）
     _MARGIN = 5              # 阴影外溢边距
+    _DELAY_SHOW = 300        # 悬停显示延迟（ms）
+    _DELAY_HIDE = 200        # 移出消失延迟（ms）
 
-    def __init__(self, widget, text, delay: int = 400,
+    def __init__(self, widget, text, delay: int = _DELAY_SHOW,
                  wrap: int = _WRAP):
         """text 支持静态字符串或返回字符串的可调用对象（动态提示）。
 
         修复缺陷#8：解析规则说明需跟随当前选中规则动态变化。
+        优化：显示延迟 300ms（原 400）；移出后 200ms 延迟消失
+        （原立即销毁，快速划过多个 ⓘ 时更连贯）。
         """
         self._widget = widget
         self._text = text
@@ -248,9 +262,10 @@ class Tooltip:
         self._wrap = wrap
         self._tip: Optional[tk.Toplevel] = None
         self._after_id: Optional[str] = None
+        self._hide_after_id: Optional[str] = None
         widget.bind("<Enter>", self._schedule, add="+")
         widget.bind("<Leave>", self._hide, add="+")
-        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide_now, add="+")
 
     # ------------------------------------------------------------------
     def _current_text(self) -> str:
@@ -285,6 +300,8 @@ class Tooltip:
     def _show(self) -> None:
         if self._tip is not None:
             return
+        # 优化：显示时取消挂起的延迟消失（快速划回同一 ⓘ）
+        self._cancel_hide()
         text = self._current_text()
         if not text:
             return
@@ -308,6 +325,8 @@ class Tooltip:
             bg=self._MAGIC if rounded else self._BG)
         canvas.pack(fill="both", expand=True)
         # 1) 先创建文本测尺寸（tag "text" 便于测试取用）
+        # 优化：15 号微软雅黑默认行高 ~1.33 倍（canvas text 无
+        # spacing 选项；字号放大后行高自然舒展，多行不拥挤）
         tip_id = canvas.create_text(
             1 + self._PAD, 1 + self._PAD, text=text, anchor="nw",
             justify="left", width=self._wrap, tags="text",
@@ -362,7 +381,29 @@ class Tooltip:
             return False
 
     def _hide(self, _event=None) -> None:
+        """移出：200ms 延迟消失（原立即销毁；快速划过时更连贯）。"""
         self._cancel()
+        if self._hide_after_id is not None:
+            return
+        self._hide_after_id = self._widget.after(
+            self._DELAY_HIDE, self._destroy_tip)
+
+    def _hide_now(self, _event=None) -> None:
+        """按下：立即销毁（不遮挡点击）。"""
+        self._cancel()
+        self._cancel_hide()
+        self._destroy_tip()
+
+    def _cancel_hide(self) -> None:
+        if self._hide_after_id is not None:
+            try:
+                self._widget.after_cancel(self._hide_after_id)
+            except tk.TclError:
+                pass
+            self._hide_after_id = None
+
+    def _destroy_tip(self) -> None:
+        self._hide_after_id = None
         if self._tip is not None:
             try:
                 self._tip.destroy()
@@ -931,31 +972,36 @@ class LogCompressorApp(_make_app_base()):
 
         ctk.CTkLabel(panel, text="级别过滤", font=ctk.CTkFont(weight="bold")
                      ).grid(row=0, column=0, padx=(12, 4), sticky="w")
-        # 修复缺陷R10：复选框集中容器（FATAL 置首 + 旁挂 ⓘ 说明）
+        # 修复缺陷R10：复选框集中容器（FATAL 置首）
+        # 优化：六个级别复选框左侧各挂一个 ⓘ 悬停说明
+        # （原仅 FATAL 右侧一个；样式统一 #3B82F6 + 手型光标 +
+        # 悬停加深，垂直与复选框居中对齐）
         self._level_vars: Dict[str, tk.BooleanVar] = {}
+        self._level_tooltips: Dict[str, Tooltip] = {}
         level_box = ctk.CTkFrame(panel, fg_color="transparent")
         level_box.grid(row=0, column=1, columnspan=6, sticky="w")
-        fatal_help = None
         col = 0
         for level in LEVEL_CHECKS:
             # 修复缺陷R10：默认勾选 FATAL/ERROR/FAIL（FATAL 受控显示）
             var = tk.BooleanVar(value=level in DEFAULT_SELECTED_LEVELS)
             self._level_vars[level] = var
+            # 优化：每个级别复选框左侧 ⓘ（与详情面板 ⓘ 同款蓝色）
+            info = ctk.CTkLabel(
+                level_box, text="ⓘ", text_color="#3B82F6",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                cursor="hand2")
+            info.grid(row=0, column=col, padx=(5, 2), sticky="e")
+            info.bind("<Enter>", lambda e, w=info: w.configure(
+                text_color="#2563EB"))
+            info.bind("<Leave>", lambda e, w=info: w.configure(
+                text_color="#3B82F6"))
+            col += 1
             ctk.CTkCheckBox(level_box, text=level, variable=var,
                             checkbox_width=18, checkbox_height=18).grid(
-                row=0, column=col, padx=6, sticky="w")
+                row=0, column=col, padx=(2, 6), sticky="w")
             col += 1
-            if level == "FATAL":
-                # 修复缺陷R10：FATAL 复选框旁 ⓘ 悬停说明
-                fatal_help = ctk.CTkLabel(
-                    level_box, text="ⓘ", text_color="#4dd0e1",
-                    font=ctk.CTkFont(size=13, weight="bold"),
-                    cursor="question_arrow")
-                fatal_help.grid(row=0, column=col, padx=(0, 2), sticky="w")
-                col += 1
-        if fatal_help is not None:
-            self._fatal_help_tooltip = Tooltip(
-                fatal_help, lambda: _FATAL_LEVEL_HELP)
+            self._level_tooltips[level] = Tooltip(
+                info, lambda lv=level: _LEVEL_HELP[lv])
 
         self._include_entry = ctk.CTkEntry(panel, width=200,
                                            placeholder_text="包含关键字（逗号分隔）")
