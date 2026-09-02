@@ -233,8 +233,8 @@ class Tooltip:
     Leave / 按下时立即销毁。
     """
 
-    # 优化：字号 15（原 12，用户反馈看不清）；宽度 420（不截断自动换行）
-    _FONT = ("Microsoft YaHei UI", 15)
+    # 优化：字号 18（12→15 用户仍反馈小）；宽度 420（不截断自动换行）
+    _FONT = ("Microsoft YaHei UI", 18)
     _WRAP = 420
     _BG = "#ffffff"          # 浅色背景
     _FG = "#1f2937"          # 深色文字
@@ -308,6 +308,7 @@ class Tooltip:
         try:
             wx = self._widget.winfo_rootx()
             wy = self._widget.winfo_rooty()
+            ww = self._widget.winfo_width()
             wh = self._widget.winfo_height()
         except tk.TclError:
             return  # 控件已销毁
@@ -356,18 +357,20 @@ class Tooltip:
                 outline=self._BORDER)
             canvas.tag_lower(card)
         canvas.configure(width=W, height=H)
-        # 3) 修复缺陷R3：智能定位（近右边缘向左弹 / 近下边缘向上弹）
-        sw = tw.winfo_screenwidth()
-        sh = tw.winfo_screenheight()
-        x = wx + 12
-        y = wy + wh + 8
-        if x + W > sw - 10:            # 靠近屏幕右边缘
-            x = wx - W - 10            # 向左弹出
-        if y + H > sh - 10:            # 靠近屏幕下边缘
-            y = wy - H - 10            # 向上弹出
-        # 最终钳制在屏幕内（任意方向都不溢出）
-        x = max(8, min(int(x), int(sw - W - 8)))
-        y = max(8, min(int(y), int(sh - H - 8)))
+        # 3) 优化：默认显示在控件正上方（水平居中）—— 级别 ⓘ 基准。
+        # 此前默认右下方弹出，行内靠右的 ⓘ 触发右缘换向/钳位后
+        # tooltip 相对图标位置各异（用户视觉"扭曲"）。统一为：
+        # 水平中心对齐控件中心，底边距控件顶边 8px；水平溢出仅
+        # 左右平移（不改变"正上方"关系）；贴近屏幕上缘放不下时
+        # 才回退到控件下方；最终钳制在物理屏幕内（任意方向不溢出）。
+        vx, vy, vw, vh = self._screen_bounds(tw)
+        x = wx + ww // 2 - W // 2      # 与控件水平居中
+        y = wy - H - 8                 # 控件正上方（8px 间隙）
+        if y < vy + 8:                 # 上方空间不足 → 下方
+            y = wy + wh + 8
+        # 最终钳制在屏幕内（水平钳制只平移，垂直关系保持）
+        x = max(vx + 8, min(int(x), int(vx + vw - W - 8)))
+        y = max(vy + 8, min(int(y), int(vy + vh - H - 8)))
         tw.wm_geometry(f"+{x}+{y}")
         tw.deiconify()
 
@@ -379,6 +382,31 @@ class Tooltip:
             return True
         except tk.TclError:
             return False
+
+    @staticmethod
+    def _screen_bounds(tw: tk.Toplevel):
+        """物理像素的屏幕边界（多显示器取虚拟屏），用于钳位。
+
+        优化（定位修正）：winfo_screenwidth() 在高 DPI 下返回
+        逻辑像素（200% 时为物理值的一半），而 tooltip 几何
+        （wm_geometry / rootx / 控件宽）是物理像素 —— 两者混用
+        时右侧控件的 tooltip 被钳制到「逻辑屏宽」内（实际只占
+        物理屏左半），远离图标数百像素（视觉"扭曲"）。Windows
+        下经 ctypes 取虚拟屏物理边界（DPI 感知进程返回物理值），
+        其他平台回退 winfo（无 DPI 缩放时两者一致）。
+        """
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            vx = u.GetSystemMetrics(76)      # 虚拟屏左上 x
+            vy = u.GetSystemMetrics(77)      # 虚拟屏左上 y
+            vw = u.GetSystemMetrics(78)      # 虚拟屏宽
+            vh = u.GetSystemMetrics(79)      # 虚拟屏高
+            if vw > 0 and vh > 0:
+                return vx, vy, vw, vh
+        except Exception:
+            pass
+        return 0, 0, tw.winfo_screenwidth(), tw.winfo_screenheight()
 
     def _hide(self, _event=None) -> None:
         """移出：200ms 延迟消失（原立即销毁；快速划过时更连贯）。"""
