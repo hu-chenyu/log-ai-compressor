@@ -174,11 +174,6 @@ _SPLITTER_WIDTH = 6            # 分隔条宽度（像素）
 _SPLITTER_MIN_LIST = 420       # 左列兜底（实测标题栏 ~412 + 余量）
 _SPLITTER_MIN_DETAIL = 360     # 右列兜底（实测标题栏 ~325 + padx + 余量）
 _SPLITTER_DEFAULT_RATIO = 0.4  # 默认左右宽度比（列表:详情 = 2:3）
-# 修复缺陷R17：拖动布局合帧间隔（ms）—— 鼠标 motion 事件 60~125Hz，
-# 每事件同步重排整棵列子树（列表行重填 + 详情全文重排）远超事件
-# 间隔，事件排队 + 各子窗口分区异步重绘 → 拖动撕裂/卡顿。
-# 16ms 内多次 motion 合并为一次布局（≤60fps，应用最新位置）。
-_SPLITTER_DRAG_FRAME_MS = 16
 
 # 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7/R5）
 # 修复缺陷R5：业务栈帧提亮加粗更明显；系统库折叠提示独立配色更清晰
@@ -1150,8 +1145,10 @@ class LogCompressorApp(_make_app_base()):
         """构建分隔条（宽 6px 圆角条 + 三个握点 + ↔ 光标）。"""
         p = self._palette()
         self._splitter_dragging = False
-        # 修复缺陷R17：拖动布局合帧定时器（None=无挂起帧）
-        self._splitter_layout_job = None
+        # 修复缺陷R18：拖动指示线（ghost，None=未创建）与按下时
+        # 缓存的拖动几何（motion 内零 winfo 查询，纯算术 + place）
+        self._splitter_ghost = None
+        self._splitter_drag_ctx = None
         self._splitter = ctk.CTkFrame(
             panel, width=_SPLITTER_WIDTH, corner_radius=3,
             fg_color=p["splitter"], cursor="sb_h_double_arrow")
@@ -1256,87 +1253,107 @@ class LogCompressorApp(_make_app_base()):
                                relheight=1)
 
     def _on_splitter_press(self, event) -> None:
+        """按下：缓存拖动几何并创建指示线（不动任何布局）。
+
+        修复缺陷R18（拖动撕裂/卡顿根治）：此前拖动中持续重排左右
+        列子树（列表行重填 + 详情全文重排），大字体/多内容下重绘
+        跟不上鼠标。改为指示线方案 —— 按下时一次性缓存面板宽/
+        rootx/最小宽（motion 内零 winfo 查询），拖动中只移动指示
+        线（单控件 place，<1ms），松开后一次性应用最终布局。
+        最小宽度钳制与锁定语义不变（窗口太窄不创建指示线）。
+        """
         self._splitter_dragging = True
         self._splitter_hover(True)
+        panel = self._result_panel
+        sp_w = _SPLITTER_WIDTH * max(1.0, getattr(self, "_font_scale", 1.0))
+        left_min, right_min = self._splitter_min_widths()
+        try:
+            pw = max(1, panel.winfo_width())
+            rootx = panel.winfo_rootx()
+        except (tk.TclError, AttributeError):
+            return
+        lo, hi = left_min, pw - right_min - sp_w
+        self._splitter_drag_ctx = {"pw": pw, "rootx": rootx,
+                                    "sp_w": sp_w, "lo": lo, "hi": hi}
+        if hi >= lo:                     # 窗口太窄时锁定（不建指示线）
+            self._create_splitter_ghost()
+
+    def _create_splitter_ghost(self) -> None:
+        """创建拖动指示线（主题强调色竖线，覆盖在列内容上方）。
+
+        CTkFrame 无真 alpha 通道，以主题 accent 纯色实现高亮线
+        （四态主题下天然协调）；位置/宽度与真分隔条完全同规则：
+        place(relx=r) 比例定位（高 DPI 下 CTk 不缩放 relx，与
+        _layout_splitter 同一套坐标系），宽度由构造 width=6（逻辑
+        px，CTk 随 DPI 换算）承担。创建于 panel 末尾 + lift()，
+        z-order 在左右列与分隔条之上。
+        """
+        panel = self._result_panel
+        p = self._palette()
+        self._splitter_ghost = ctk.CTkFrame(
+            panel, width=_SPLITTER_WIDTH, corner_radius=3,
+            fg_color=p["accent"])
+        self._splitter_ghost.place(relx=self._splitter_ratio, rely=0,
+                                   relheight=1)
+        self._splitter_ghost.lift()
+
+    def _destroy_splitter_ghost(self) -> None:
+        """销毁拖动指示线（松开/双击/关闭时清理）。"""
+        ghost = getattr(self, "_splitter_ghost", None)
+        if ghost is not None:
+            try:
+                ghost.destroy()
+            except (tk.TclError, ValueError):
+                pass
+            self._splitter_ghost = None
 
     def _on_splitter_drag(self, event) -> None:
-        """拖动实时调整左右宽度（event.x_root 即指针屏幕绝对坐标）。
+        """拖动：只移动指示线（零布局、零内容重绘）。
 
         修复缺陷R12（拖动错位/拖不回）：事件接收窗口各异（分隔条
-        内部 canvas / 仅 2px 宽的握点），event.x 相对的窗口不确定，
-        用「分隔条 rootx + event.x」反推指针会随接收窗口漂移。x_root
-        是事件自带的屏幕绝对坐标，与接收窗口无关，直接换算相对面板
-        位置。最小宽度以标题栏实测动态值钳制（防极限遮挡）；窗口
-        放不下两列最小宽时禁止拖动（分隔条锁定，不挤压任何一边）。
+        内部 canvas / 仅 2px 宽的握点），event.x 相对的窗口不确定；
+        x_root 是事件自带的屏幕绝对坐标，与接收窗口无关。
+        修复缺陷R18：motion 内零 winfo 查询（几何已在按下时缓存），
+        仅做钳制算术 + 指示线 place_configure —— 不改左右列宽、
+        不触发任何内容重绘（VS Code / DevTools 分隔条的标准实现）。
         """
         if not self._splitter_dragging:
             return
-        panel = self._result_panel
-        pw = max(1, panel.winfo_width())
-        sp_w = _SPLITTER_WIDTH * max(1.0, getattr(self, "_font_scale", 1.0))
-        left_min, right_min = self._splitter_min_widths()
-        lo = left_min
-        hi = pw - right_min - sp_w
-        if hi < lo:      # 窗口太窄：锁定分隔条，不允许拖动
+        ghost = getattr(self, "_splitter_ghost", None)
+        ctx = getattr(self, "_splitter_drag_ctx", None)
+        if ghost is None or ctx is None:
+            return                         # 窗口太窄锁定 / 几何缺失
+        if ctx["hi"] < ctx["lo"]:          # 窗口太窄：锁定分隔条
             return
         try:
-            x = event.x_root - panel.winfo_rootx() - sp_w // 2
+            x = event.x_root - ctx["rootx"] - ctx["sp_w"] // 2
         except AttributeError:
             return
-        left = min(max(x, lo), hi)
-        self._splitter_ratio = left / pw
-        # 修复缺陷R17：不再每事件同步重排（撕裂/卡顿根因）——
-        # 只记录最新比例，交由 _schedule_splitter_layout 合帧应用
-        self._schedule_splitter_layout()
-
-    def _schedule_splitter_layout(self) -> None:
-        """修复缺陷R17：拖动布局合帧 —— 16ms 窗口内多次 motion 只布局一次。
-
-        每事件同步 place() 会级联重排左右列整棵子树（列表行重填 +
-        详情全文重排），耗时超过 motion 事件间隔（60~125Hz）导致
-        事件排队与子窗口分区异步重绘（画面撕裂、拖动跟手感差）。
-        定时器窗口内新到的 motion 只更新比例（最新位置总是被应用），
-        布局频率上限 60fps；单帧布局慢时事件循环仍能持续取走输入
-        事件，指针不跟手的现象随之消失。
-        """
-        if self._splitter_layout_job is not None:
-            return                  # 已有挂起帧：复用，只等最新比例
-        def _apply() -> None:
-            self._splitter_layout_job = None
-            self._layout_splitter()
-        self._splitter_layout_job = self.after(
-            _SPLITTER_DRAG_FRAME_MS, _apply)
-
-    def _flush_splitter_layout(self) -> None:
-        """修复缺陷R17：冲刷挂起的合帧布局（拖动结束/双击复位时）。
-
-        取消挂起定时器（其回调携带的是冲刷前的旧几何，放行会造成
-        双重布局）—— 由调用方随即同步应用最终布局。
-        """
-        job = getattr(self, "_splitter_layout_job", None)
-        if job is not None:
-            try:
-                self.after_cancel(job)
-            except (tk.TclError, ValueError):
-                pass
-            self._splitter_layout_job = None
+        left = min(max(x, ctx["lo"]), ctx["hi"])
+        self._splitter_ratio = left / ctx["pw"]
+        ghost.place_configure(relx=self._splitter_ratio)
 
     def _on_splitter_release(self, event) -> None:
-        """松开鼠标：结束拖动并保存位置到配置。"""
+        """松开：销毁指示线，一次性应用最终布局并持久化。
+
+        修复缺陷R18：拖动全程未动过布局，此处 _layout_splitter()
+        是本次拖动唯一一次列重排（松开后内容静止到新宽度，过渡
+        一次性完成）；比例已是 motion 维护的最新值。
+        """
         if not self._splitter_dragging:
             return
         self._splitter_dragging = False
         self._splitter_hover(False)
-        # 修复缺陷R17：冲刷挂起帧并同步应用最终布局（落点精确）
-        self._flush_splitter_layout()
+        self._splitter_drag_ctx = None
+        self._destroy_splitter_ghost()
         self._layout_splitter()
         self._save_config()
 
     def _on_splitter_dblclick(self, event) -> None:
-        """双击恢复默认比例（2:3）并闪烁反馈。"""
+        """双击恢复默认比例（2:3）并闪烁反馈（无需指示线）。"""
         self._splitter_dragging = False
-        # 修复缺陷R17：冲刷挂起帧（其回调会以旧比例双重布局）
-        self._flush_splitter_layout()
+        self._splitter_drag_ctx = None
+        self._destroy_splitter_ghost()
         self._splitter_ratio = _SPLITTER_DEFAULT_RATIO
         self._layout_splitter()
         self._flash_splitter()
@@ -3238,8 +3255,8 @@ class LogCompressorApp(_make_app_base()):
 
     def _on_close(self) -> None:
         self._save_config()
-        # 修复缺陷R17：取消挂起的拖动合帧定时器（销毁后触发 bgerror）
-        self._flush_splitter_layout()
+        # 修复缺陷R18：销毁遗留的拖动指示线（若拖动中直接关闭）
+        self._destroy_splitter_ghost()
         # 修复缺陷R6：清理虚拟列表与全屏缓存窗口（释放控件/句柄）
         self._fs_list_refresh = None
         for win in (self._fs_list_win, self._fs_detail_win,
