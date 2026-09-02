@@ -1409,7 +1409,7 @@ class TestTooltipR3:
     """悬停说明的可读性与定位（典型样例说明 / 解析规则说明共用）。"""
 
     def test_tooltip_font_size_enlarged(self, app):
-        """优化：tooltip 字体放大到 14~16 号（原 12 号用户反馈看不清）。"""
+        """优化：tooltip 字体放大到 17~19 号（15 号用户仍反馈小）。"""
         tip = app._sample_help_tooltip
         tip._show()
         app.update()
@@ -1419,13 +1419,13 @@ class TestTooltipR3:
             font = str(canvas.itemcget(item, "font"))
             sizes = [int(t) for t in
                      __import__("re").findall(r"-?\d+", font)]
-            assert any(14 <= s <= 16 for s in sizes), \
-                f"字体应为 14~16 号，实际 {font}"
+            assert any(17 <= s <= 19 for s in sizes), \
+                f"字体应为 17~19 号，实际 {font}"
         finally:
             tip._hide_now()
 
     def test_level_tooltip_font_size_enlarged(self, app):
-        """优化：级别 ⓘ 悬停说明的字体同样放大到 14~16 号。"""
+        """优化：级别 ⓘ 悬停说明的字体同样放大到 17~19 号。"""
         tip = app._level_tooltips["FATAL"]
         tip._show()
         app.update()
@@ -1435,10 +1435,42 @@ class TestTooltipR3:
             font = str(canvas.itemcget(item, "font"))
             sizes = [int(t) for t in
                      __import__("re").findall(r"-?\d+", font)]
-            assert any(14 <= s <= 16 for s in sizes), \
-                f"级别说明字体应为 14~16 号，实际 {font}"
+            assert any(17 <= s <= 19 for s in sizes), \
+                f"级别说明字体应为 17~19 号，实际 {font}"
         finally:
             tip._hide_now()
+
+    def test_level_tooltip_centered_above_icon(self, app):
+        """优化：级别 ⓘ 的 tooltip 停在图标正上方（水平居中）。
+
+        此前默认右下方弹出，行内靠右的 ⓘ 触发右缘换向/钳位后
+        tooltip 相对图标位置各异（视觉"扭曲"）。以第一个 ⓘ 为
+        基准统一：tooltip 水平中心 == 图标水平中心，tooltip 底边
+        在图标顶边上方（8px 间隙，允许钳位引起的水平平移）。
+        """
+        app.update()
+        for level in ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
+            icon = app._level_tooltips[level]._widget
+            tip = app._level_tooltips[level]
+            tip._show()
+            app.update()
+            try:
+                tw = tip._tip
+                ic_cx = icon.winfo_rootx() + icon.winfo_width() / 2
+                tp_cx = tw.winfo_x() + tw.winfo_width() / 2
+                # 水平居中（屏幕钳位平移时容差 40px）
+                assert abs(tp_cx - ic_cx) <= 40, (
+                    f"{level} 的 tooltip 水平中心 {tp_cx:.0f} 应与图标"
+                    f"中心 {ic_cx:.0f} 对齐")
+                # 底边在图标顶边上方（正上方关系）
+                assert tw.winfo_y() + tw.winfo_height() \
+                    <= icon.winfo_rooty() + 2, (
+                        f"{level} 的 tooltip 应在图标正上方"
+                        f"（底边 {tw.winfo_y() + tw.winfo_height()}"
+                        f" vs 图标顶 {icon.winfo_rooty()}）")
+            finally:
+                tip._hide_now()
+                app.update()
 
     def test_tooltip_wrap_width_in_range(self, app):
         """修复R3：tooltip 宽度限制在 400~500px（长文本自动换行）。"""
@@ -1477,19 +1509,26 @@ class TestTooltipR3:
             tip._hide_now()
 
     def test_tooltip_within_screen_bounds(self, app):
-        """修复R3：tooltip 完整可见（不溢出屏幕右/下边缘）。"""
+        """修复R3：tooltip 完整可见（不溢出物理屏幕边界）。
+
+        优化（定位修正）：校验用物理像素边界（_screen_bounds）——
+        winfo_screenwidth 高 DPI 下是逻辑值，与物理几何混用会误报。
+        """
+        from log_ai_compressor.gui.app import Tooltip
         tip = app._sample_help_tooltip
         tip._show()
         app.update()
         try:
             tw = tip._tip
-            sw, sh = tw.winfo_screenwidth(), tw.winfo_screenheight()
+            vx, vy, vw, vh = Tooltip._screen_bounds(tw)
             x, y = tw.winfo_x(), tw.winfo_y()
             w, h = tw.winfo_width(), tw.winfo_height()
-            assert x >= 0, "左边缘溢出"
-            assert y >= 0, "上边缘溢出"
-            assert x + w <= sw + 2, f"右边缘溢出（{x + w} > {sw}）"
-            assert y + h <= sh + 2, f"下边缘溢出（{y + h} > {sh}）"
+            assert x >= vx - 2, "左边缘溢出"
+            assert y >= vy - 2, "上边缘溢出"
+            assert x + w <= vx + vw + 2, \
+                f"右边缘溢出（{x + w} > {vx + vw}）"
+            assert y + h <= vy + vh + 2, \
+                f"下边缘溢出（{y + h} > {vy + vh}）"
         finally:
             tip._hide_now()
 
@@ -1506,22 +1545,22 @@ class TestTooltipR3:
         return host, lbl
 
     def test_tooltip_flips_left_near_right_edge(self, app):
-        """修复R3：宿主控件贴近屏幕右边缘时 tooltip 向左弹出。"""
+        """优化：宿主控件贴近物理屏幕右边缘时 tooltip 保持在屏内（居中被平移）。"""
         from log_ai_compressor.gui.app import Tooltip
-        sw = app.winfo_screenwidth()
+        vx, vy, vw, vh = Tooltip._screen_bounds(app)
         host, lbl = self._tooltip_on_edge_widget(
-            app, f"+{sw - 40}+240")
+            app, f"+{vx + vw - 40}+{vy + 240}")
         try:
-            assert lbl.winfo_rootx() > sw - 120, "测试前置：宿主应贴近右边缘"
+            assert lbl.winfo_rootx() > vx + vw - 120, \
+                "测试前置：宿主应贴近右边缘"
             tip = Tooltip(lbl, "较长的悬停说明文本 " * 10)
             tip._show()
             app.update()
             try:
                 tw = tip._tip
-                # 完整可见且在宿主左侧（向左弹出）
-                assert tw.winfo_x() + tw.winfo_width() <= sw + 2
-                assert tw.winfo_x() < lbl.winfo_rootx(), \
-                    "右边缘情形应在控件左侧弹出"
+                # 完整可见（物理屏内）
+                assert tw.winfo_x() + tw.winfo_width() <= vx + vw + 2
+                assert tw.winfo_x() >= vx - 2
             finally:
                 tip._hide_now()
         finally:
@@ -1529,19 +1568,20 @@ class TestTooltipR3:
             app.update()
 
     def test_tooltip_flips_up_near_bottom_edge(self, app):
-        """修复R3：宿主控件贴近屏幕下边缘时 tooltip 向上弹出。"""
+        """优化：宿主控件贴近物理屏幕下边缘时 tooltip 保持在屏内上方。"""
         from log_ai_compressor.gui.app import Tooltip
-        sh = app.winfo_screenheight()
+        vx, vy, vw, vh = Tooltip._screen_bounds(app)
         host, lbl = self._tooltip_on_edge_widget(
-            app, f"+240+{sh - 50}")
+            app, f"+{vx + 240}+{vy + vh - 50}")
         try:
-            assert lbl.winfo_rooty() > sh - 150, "测试前置：宿主应贴近下边缘"
+            assert lbl.winfo_rooty() > vy + vh - 150, \
+                "测试前置：宿主应贴近下边缘"
             tip = Tooltip(lbl, "多行悬停说明\n" * 8)
             tip._show()
             app.update()
             try:
                 tw = tip._tip
-                assert tw.winfo_y() + tw.winfo_height() <= sh + 2
+                assert tw.winfo_y() + tw.winfo_height() <= vy + vh + 2
                 assert tw.winfo_y() < lbl.winfo_rooty(), \
                     "下边缘情形应在控件上方弹出"
             finally:
