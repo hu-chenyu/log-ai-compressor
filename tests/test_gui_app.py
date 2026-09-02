@@ -780,6 +780,57 @@ class TestSplitter:
         assert abs((left1 + detail1 + _SPLITTER_WIDTH * scale) - pw) <= 6, \
             "左右列 + 分隔条应占满面板宽"
 
+    def test_drag_layout_coalesced_and_flushed(self, app):
+        """修复R17：拖动布局合帧（多次 motion 合并一次布局）+ 释放冲刷。
+
+        旧实现每 motion 事件同步 _layout_splitter()：整棵列子树重排
+        耗时超过事件间隔（60~125Hz）→ 事件排队、子窗口分区异步重绘
+        （拖动撕裂/卡顿）。修复后拖动中只记录最新比例、16ms 合帧
+        应用；释放立即冲刷挂起帧并同步应用最终布局。
+        """
+        app.update()
+        sp = app._splitter
+        calls = []
+        orig = app._layout_splitter
+        app._layout_splitter = lambda: (calls.append(1), orig())[-1]
+        try:
+            sp.event_generate("<ButtonPress-1>", x=3, y=40)
+            app.update()
+            # 同一合帧窗口内连续 4 次 motion（间隔远小于 16ms）
+            for dx in (60, 120, 180, 240):
+                sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
+            app.update()
+            assert app._splitter_layout_job is not None, \
+                "拖动中应挂起合帧布局定时器"
+            assert len(calls) == 0, "合帧窗口内不应发生同步布局"
+            # 等待合帧定时器到期：4 次 motion 只应用 1 次最新布局
+            deadline = time.time() + 1.0
+            while app._splitter_layout_job is not None \
+                    and time.time() < deadline:
+                app.update()
+                time.sleep(0.01)
+            assert app._splitter_layout_job is None, "合帧定时器应已到期"
+            assert len(calls) == 1, \
+                f"4 次 motion 应合并为 1 次布局（实际 {len(calls)} 次）"
+            pw = self._pw(app)
+            assert abs(app._splitter_ratio * pw
+                       - app._list_col.winfo_width()) <= 8, \
+                "合帧应应用最新位置"
+            # 释放冲刷：motion 后立即释放 —— 挂起帧取消、最终布局同步生效
+            calls.clear()
+            sp.event_generate("<B1-Motion>", x=3 + 60, y=40)
+            app.update()
+            assert app._splitter_layout_job is not None
+            sp.event_generate("<ButtonRelease-1>", x=3 + 60, y=40)
+            app.update()
+            assert app._splitter_layout_job is None, "释放应冲刷挂起帧"
+            assert len(calls) >= 1, "释放应立即应用最终布局"
+            assert abs(app._splitter_ratio * pw
+                       - app._list_col.winfo_width()) <= 8, \
+                "释放后布局应与最终比例一致"
+        finally:
+            app._layout_splitter = orig
+
     def test_drag_min_width_limits(self, app):
         """修复R12：拖到最左/最右受最小宽度限制（动态实测标题栏宽）。"""
         app.update()
