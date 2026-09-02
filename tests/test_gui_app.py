@@ -1401,6 +1401,49 @@ class TestSampleHelpTooltip:
         tip._hide_now()   # 二次销毁应幂等
         assert tip._tip is None
 
+    def test_tooltip_enter_cancels_pending_hide(self, app):
+        """修复闪烁：Enter 取消挂起的延迟销毁（已显示则保持）。
+
+        旧链路：Leave 调度 200ms 销毁，Enter 只重置显示调度不取消
+        销毁 —— 已显示的 tooltip 被销毁又在 300ms 后重建（闪烁
+        一下；指针在 ⓘ 内微动跨 CTk 子窗口边界会反复触发）。
+        """
+        tip = app._sample_help_tooltip
+        tip._show()
+        app.update()
+        assert tip._tip is not None
+        tip._hide()                       # Leave（指针在外）
+        assert tip._hide_after_id is not None
+        tip._schedule()                   # 立刻 Enter（抖回）
+        assert tip._hide_after_id is None, "Enter 应取消挂起的销毁"
+        # 超过原销毁延迟（200ms）后 tooltip 仍显示，不销毁不重建
+        deadline = time.time() + 0.6
+        while time.time() < deadline:
+            app.update()
+            time.sleep(0.02)
+        assert tip._tip is not None, "Enter 后 tooltip 应保持显示（无闪烁）"
+        tip._hide_now()
+
+    def test_tooltip_leave_ignored_when_pointer_inside(self, app):
+        """修复闪烁：指针仍在控件内时 Leave 被忽略（子窗口抖动）。
+
+        CTkLabel 是复合控件（canvas + 内部 label），指针跨子窗口
+        边界会发 detail=NotifyInferior 的 Leave —— 指针并未真正
+        离开控件，此时不应调度销毁。
+        """
+        tip = app._sample_help_tooltip
+        tip._show()
+        app.update()
+        assert tip._tip is not None
+        # 模拟指针仍在控件内（真实鼠标位置测试中不可控）
+        tip._pointer_inside = lambda: True
+        tip._hide()                       # NotifyInferior 类 Leave
+        assert tip._hide_after_id is None, \
+            "指针在控件内时 Leave 不应调度销毁"
+        app.update()
+        assert tip._tip is not None, "tooltip 不应被销毁（无闪烁）"
+        tip._hide_now()
+
 
 # ---------------------------------------------------------------------------
 # 修复R3：Tooltip 字体放大 + 自动换行 + 智能定位（不溢出屏幕）

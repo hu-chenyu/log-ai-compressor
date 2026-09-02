@@ -277,7 +277,20 @@ class Tooltip:
         return self._text or ""
 
     def _schedule(self, _event=None) -> None:
+        """Enter：调度显示（已显示则保持，绝不触发销毁/重建）。
+
+        修复闪烁：CTkLabel 是复合控件（canvas + 内部 label），bind
+        双注册到两层 —— 指针在图标内微动跨子窗口边界时会成对触发
+        Leave/Enter（X 的 NotifyInferior 语义）。旧链路 Leave 先
+        调度 200ms 延迟销毁、Enter 只重置显示调度不取消销毁 ——
+        已显示的 tooltip 被销毁又在 300ms 后重建，往返一次即一次
+        视觉闪烁。现在 Enter 时取消挂起的销毁；tooltip 已显示时
+        直接保持（零销毁零重建）。
+        """
         self._cancel()
+        self._cancel_hide()
+        if self._tip is not None:
+            return          # 已显示：保持显示，无需重建
         self._after_id = self._widget.after(self._delay, self._show)
 
     def _cancel(self) -> None:
@@ -409,12 +422,33 @@ class Tooltip:
         return 0, 0, tw.winfo_screenwidth(), tw.winfo_screenheight()
 
     def _hide(self, _event=None) -> None:
-        """移出：200ms 延迟消失（原立即销毁；快速划过时更连贯）。"""
+        """Leave：200ms 延迟消失；指针仍在控件内时忽略（防闪烁）。
+
+        修复闪烁（第二道防线）：指针在控件内部子窗口（canvas/
+        label）间微移时 Tk 会发 detail=NotifyInferior 的 Leave ——
+        此时指针并未真正离开控件矩形，销毁再重建即视觉闪烁。
+        Leave 到达时实测指针热点位置，仍在控件矩形内则直接忽略。
+        """
         self._cancel()
+        if self._pointer_inside():
+            return          # 子窗口边界抖动：指针未真正离开控件
         if self._hide_after_id is not None:
             return
         self._hide_after_id = self._widget.after(
             self._DELAY_HIDE, self._destroy_tip)
+
+    def _pointer_inside(self) -> bool:
+        """指针热点是否仍在控件矩形内（屏幕物理坐标比较）。"""
+        try:
+            px = self._widget.winfo_pointerx()
+            py = self._widget.winfo_pointery()
+            x = self._widget.winfo_rootx()
+            y = self._widget.winfo_rooty()
+            w = self._widget.winfo_width()
+            h = self._widget.winfo_height()
+            return x <= px < x + w and y <= py < y + h
+        except tk.TclError:
+            return False    # 控件已销毁
 
     def _hide_now(self, _event=None) -> None:
         """按下：立即销毁（不遮挡点击）。"""
