@@ -780,56 +780,76 @@ class TestSplitter:
         assert abs((left1 + detail1 + _SPLITTER_WIDTH * scale) - pw) <= 6, \
             "左右列 + 分隔条应占满面板宽"
 
-    def test_drag_layout_coalesced_and_flushed(self, app):
-        """修复R17：拖动布局合帧（多次 motion 合并一次布局）+ 释放冲刷。
+    def test_drag_ghost_line_defers_layout(self, app):
+        """修复R18：拖动只移动指示线，松开后才一次性应用布局。
 
-        旧实现每 motion 事件同步 _layout_splitter()：整棵列子树重排
-        耗时超过事件间隔（60~125Hz）→ 事件排队、子窗口分区异步重绘
-        （拖动撕裂/卡顿）。修复后拖动中只记录最新比例、16ms 合帧
-        应用；释放立即冲刷挂起帧并同步应用最终布局。
+        旧实现（实时布局/合帧布局）拖动中仍持续重排左右列子树
+        （列表行重填 + 详情全文重排），大字体/多内容下重绘跟不上
+        鼠标（撕裂/卡顿）。指示线方案：motion 只 place 指示线
+        （<1ms），列宽全程静止；release 销毁指示线并恰好布局一次。
         """
         app.update()
         sp = app._splitter
+        panel = app._result_panel
+        pw = self._pw(app)
         calls = []
         orig = app._layout_splitter
         app._layout_splitter = lambda: (calls.append(1), orig())[-1]
         try:
+            left0 = app._list_col.winfo_width()
             sp.event_generate("<ButtonPress-1>", x=3, y=40)
             app.update()
-            # 同一合帧窗口内连续 4 次 motion（间隔远小于 16ms）
+            assert app._splitter_ghost is not None, "按下应创建指示线"
+            # 连续 motion：指示线跟随移动，列宽/布局全程静止
             for dx in (60, 120, 180, 240):
                 sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
-            app.update()
-            assert app._splitter_layout_job is not None, \
-                "拖动中应挂起合帧布局定时器"
-            assert len(calls) == 0, "合帧窗口内不应发生同步布局"
-            # 等待合帧定时器到期：4 次 motion 只应用 1 次最新布局
-            deadline = time.time() + 1.0
-            while app._splitter_layout_job is not None \
-                    and time.time() < deadline:
                 app.update()
-                time.sleep(0.01)
-            assert app._splitter_layout_job is None, "合帧定时器应已到期"
+                assert calls == [], "拖动过程中不应触发任何布局"
+                assert app._list_col.winfo_width() == left0, \
+                    "拖动过程中左右列宽应保持静止（不重绘）"
+            # 指示线位置 = 最新比例（跟手）
+            assert app._splitter_ghost.winfo_exists()
+            gr = app._splitter_ghost.winfo_rootx() - panel.winfo_rootx()
+            assert abs(gr / pw - app._splitter_ratio) <= 0.02, \
+                "指示线应位于最新比例处"
+            # 释放：销毁指示线 + 恰好一次布局 + 列宽到位
+            sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
+            app.update()
+            assert app._splitter_ghost is None, "释放应销毁指示线"
             assert len(calls) == 1, \
-                f"4 次 motion 应合并为 1 次布局（实际 {len(calls)} 次）"
-            pw = self._pw(app)
+                f"释放应恰好一次布局（实际 {len(calls)} 次）"
             assert abs(app._splitter_ratio * pw
                        - app._list_col.winfo_width()) <= 8, \
-                "合帧应应用最新位置"
-            # 释放冲刷：motion 后立即释放 —— 挂起帧取消、最终布局同步生效
-            calls.clear()
-            sp.event_generate("<B1-Motion>", x=3 + 60, y=40)
-            app.update()
-            assert app._splitter_layout_job is not None
-            sp.event_generate("<ButtonRelease-1>", x=3 + 60, y=40)
-            app.update()
-            assert app._splitter_layout_job is None, "释放应冲刷挂起帧"
-            assert len(calls) >= 1, "释放应立即应用最终布局"
-            assert abs(app._splitter_ratio * pw
-                       - app._list_col.winfo_width()) <= 8, \
-                "释放后布局应与最终比例一致"
+                "释放后列宽应与最终比例一致"
         finally:
             app._layout_splitter = orig
+
+    def test_drag_ghost_uses_theme_accent(self, app):
+        """修复R18：指示线用当前主题强调色（四态协调）。
+
+        直接创建/销毁指示线验证颜色（不经完整拖放 —— event_generate
+        连续两轮 press 会被 Tk 合成为 <Double-Button-1> 走双击路径）。
+        """
+        from log_ai_compressor.gui.app import THEMES
+        app.update()
+        try:
+            for theme in ("dark", "light", "blue", "green"):
+                app._theme = theme
+                app._apply_palette()
+                app.update()
+                app._create_splitter_ghost()
+                assert app._splitter_ghost is not None
+                color = app._splitter_ghost.cget("fg_color")
+                if isinstance(color, (tuple, list)):
+                    idx = 1 if theme == "dark" else 0
+                    color = color[idx]
+                assert str(color).lower() == THEMES[theme]["accent"].lower(),\
+                    f"{theme} 主题指示线应用强调色 {THEMES[theme]['accent']}"
+                app._destroy_splitter_ghost()
+                assert app._splitter_ghost is None
+        finally:
+            app._on_splitter_dblclick(None)
+            app.update()
 
     def test_drag_min_width_limits(self, app):
         """修复R12：拖到最左/最右受最小宽度限制（动态实测标题栏宽）。"""
