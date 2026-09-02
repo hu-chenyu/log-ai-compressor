@@ -174,6 +174,9 @@ _SPLITTER_WIDTH = 6            # 分隔条宽度（像素）
 _SPLITTER_MIN_LIST = 420       # 左列兜底（实测标题栏 ~412 + 余量）
 _SPLITTER_MIN_DETAIL = 360     # 右列兜底（实测标题栏 ~325 + padx + 余量）
 _SPLITTER_DEFAULT_RATIO = 0.4  # 默认左右宽度比（列表:详情 = 2:3）
+# 修复缺陷R19：拖动指示线覆盖层的透明色键 —— 经 -transparentcolor
+# 置为全透明且鼠标穿透（色键与四主题强调色及全部调色板色均不同）
+_SPLITTER_GHOST_KEY = "#ff00fe"
 
 # 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7/R5）
 # 修复缺陷R5：业务栈帧提亮加粗更明显；系统库折叠提示独立配色更清晰
@@ -1145,9 +1148,12 @@ class LogCompressorApp(_make_app_base()):
         """构建分隔条（宽 6px 圆角条 + 三个握点 + ↔ 光标）。"""
         p = self._palette()
         self._splitter_dragging = False
-        # 修复缺陷R18：拖动指示线（ghost，None=未创建）与按下时
-        # 缓存的拖动几何（motion 内零 winfo 查询，纯算术 + place）
+        # 修复缺陷R19：拖动指示线（透明覆盖层 + Canvas 图元，
+        # None=未创建）与按下时缓存的拖动几何（motion 内零 winfo
+        # 查询，纯算术 + canvas.coords 图元移动）
         self._splitter_ghost = None
+        self._splitter_ghost_cv = None
+        self._splitter_ghost_item = None
         self._splitter_drag_ctx = None
         self._splitter = ctk.CTkFrame(
             panel, width=_SPLITTER_WIDTH, corner_radius=3,
@@ -1255,12 +1261,10 @@ class LogCompressorApp(_make_app_base()):
     def _on_splitter_press(self, event) -> None:
         """按下：缓存拖动几何并创建指示线（不动任何布局）。
 
-        修复缺陷R18（拖动撕裂/卡顿根治）：此前拖动中持续重排左右
-        列子树（列表行重填 + 详情全文重排），大字体/多内容下重绘
-        跟不上鼠标。改为指示线方案 —— 按下时一次性缓存面板宽/
-        rootx/最小宽（motion 内零 winfo 查询），拖动中只移动指示
-        线（单控件 place，<1ms），松开后一次性应用最终布局。
-        最小宽度钳制与锁定语义不变（窗口太窄不创建指示线）。
+        修复缺陷R18（拖动撕裂/卡顿根治）：拖动中不重排列子树，
+        松开后一次性应用最终布局。面板宽/高/rootx/最小宽在此一次
+        缓存（motion 内零 winfo 查询），最小宽度钳制与窄窗锁定
+        语义不变（窗口太窄不创建指示线）。
         """
         self._splitter_dragging = True
         self._splitter_hover(True)
@@ -1269,60 +1273,98 @@ class LogCompressorApp(_make_app_base()):
         left_min, right_min = self._splitter_min_widths()
         try:
             pw = max(1, panel.winfo_width())
+            ph = max(1, panel.winfo_height())
             rootx = panel.winfo_rootx()
         except (tk.TclError, AttributeError):
             return
         lo, hi = left_min, pw - right_min - sp_w
-        self._splitter_drag_ctx = {"pw": pw, "rootx": rootx,
+        self._splitter_drag_ctx = {"pw": pw, "ph": ph, "rootx": rootx,
                                     "sp_w": sp_w, "lo": lo, "hi": hi}
         if hi >= lo:                     # 窗口太窄时锁定（不建指示线）
             self._create_splitter_ghost()
 
     def _create_splitter_ghost(self) -> None:
-        """创建拖动指示线（主题强调色竖线，覆盖在列内容上方）。
+        """创建拖动指示线（透明覆盖层 + Canvas 矩形图元）。
 
-        CTkFrame 无真 alpha 通道，以主题 accent 纯色实现高亮线
-        （四态主题下天然协调）；位置/宽度与真分隔条完全同规则：
-        place(relx=r) 比例定位（高 DPI 下 CTk 不缩放 relx，与
-        _layout_splitter 同一套坐标系），宽度由构造 width=6（逻辑
-        px，CTk 随 DPI 换算）承担。创建于 panel 末尾 + lift()，
-        z-order 在左右列与分隔条之上。
+        修复缺陷R19（快速拖动残影）：旧实现 CTkFrame+place 是控件级
+        窗口移动 —— 快速拖动时旧位置暴露区域的重绘（列表行/详情
+        文本）跟不上鼠标，旧位置的指示线未被擦除，蓝调主题下出现
+        多条白色竖线（残影/撕裂，见 splitter_tear.png）。改用 Canvas
+        图元方案（专业分隔条指示线的标准实现）：
+        - 覆盖层为 override-redirect 的 Toplevel（不抢焦点），
+          -transparentcolor 色键全窗透明且鼠标穿透，几何与结果区
+          物理像素严格对齐（高 DPI 无换算误差）；
+        - 指示线是覆盖层 Canvas 上唯一一个 create_rectangle 图元，
+          拖动中只改图元坐标（coords，O(1)）—— 不移动任何窗口、
+          不触发布局/内容重绘，由窗口合成器叠加显示，物理上不可
+          能产生残影；
+        - 主题强调色填充（四态协调），宽度与真分隔条一致；仅拖动
+          期间存在，松开即销毁（无常驻遮挡、不影响正常交互）。
+        色键透明不可用（非 Windows）时不显示指示线，拖动功能不受
+        影响（比例更新与指示线显示已解耦）。
         """
         panel = self._result_panel
         p = self._palette()
-        self._splitter_ghost = ctk.CTkFrame(
-            panel, width=_SPLITTER_WIDTH, corner_radius=3,
-            fg_color=p["accent"])
-        self._splitter_ghost.place(relx=self._splitter_ratio, rely=0,
-                                   relheight=1)
-        self._splitter_ghost.lift()
+        try:
+            x, y = panel.winfo_rootx(), panel.winfo_rooty()
+            w = max(1, panel.winfo_width())
+            h = max(1, panel.winfo_height())
+        except (tk.TclError, AttributeError):
+            return
+        sp_w = _SPLITTER_WIDTH * max(1.0, getattr(self, "_font_scale", 1.0))
+        try:
+            win = tk.Toplevel(self)
+        except tk.TclError:
+            return
+        try:
+            win.overrideredirect(True)          # 无边框，不抢焦点
+            win.attributes("-topmost", True)   # 位于主窗口之上
+            win.configure(bg=_SPLITTER_GHOST_KEY)
+            # 色键透明：整窗除指示线图元外全部透明且鼠标穿透
+            win.attributes("-transparentcolor", _SPLITTER_GHOST_KEY)
+        except tk.TclError:
+            try:
+                win.destroy()
+            except (tk.TclError, ValueError):
+                pass
+            return
+        cv = tk.Canvas(win, bg=_SPLITTER_GHOST_KEY,
+                       highlightthickness=0, bd=0)
+        cv.pack(fill="both", expand=True)
+        x0 = self._splitter_ratio * w
+        self._splitter_ghost = win
+        self._splitter_ghost_cv = cv
+        self._splitter_ghost_item = cv.create_rectangle(
+            x0, 0, x0 + sp_w, h, fill=p["accent"], width=0)
+        win.wm_geometry(f"{w}x{h}+{x}+{y}")
 
     def _destroy_splitter_ghost(self) -> None:
-        """销毁拖动指示线（松开/双击/关闭时清理）。"""
+        """销毁拖动指示线（松开/双击/关闭时清理覆盖层）。"""
         ghost = getattr(self, "_splitter_ghost", None)
         if ghost is not None:
             try:
                 ghost.destroy()
             except (tk.TclError, ValueError):
                 pass
-            self._splitter_ghost = None
+        self._splitter_ghost = None
+        self._splitter_ghost_cv = None
+        self._splitter_ghost_item = None
 
     def _on_splitter_drag(self, event) -> None:
-        """拖动：只移动指示线（零布局、零内容重绘）。
+        """拖动：只移动 Canvas 上的指示线图元（零窗口移动/零重绘）。
 
         修复缺陷R12（拖动错位/拖不回）：事件接收窗口各异（分隔条
         内部 canvas / 仅 2px 宽的握点），event.x 相对的窗口不确定；
         x_root 是事件自带的屏幕绝对坐标，与接收窗口无关。
-        修复缺陷R18：motion 内零 winfo 查询（几何已在按下时缓存），
-        仅做钳制算术 + 指示线 place_configure —— 不改左右列宽、
-        不触发任何内容重绘（VS Code / DevTools 分隔条的标准实现）。
+        修复缺陷R19：指示线移动用 canvas.coords() 改图元坐标
+        （O(1)）—— 与左右列内容完全解耦，快速拖动无残影；比例
+        更新与指示线显示解耦（覆盖层不可用时拖动仍正常）。
         """
         if not self._splitter_dragging:
             return
-        ghost = getattr(self, "_splitter_ghost", None)
         ctx = getattr(self, "_splitter_drag_ctx", None)
-        if ghost is None or ctx is None:
-            return                         # 窗口太窄锁定 / 几何缺失
+        if ctx is None:
+            return
         if ctx["hi"] < ctx["lo"]:          # 窗口太窄：锁定分隔条
             return
         try:
@@ -1331,7 +1373,13 @@ class LogCompressorApp(_make_app_base()):
             return
         left = min(max(x, ctx["lo"]), ctx["hi"])
         self._splitter_ratio = left / ctx["pw"]
-        ghost.place_configure(relx=self._splitter_ratio)
+        cv = getattr(self, "_splitter_ghost_cv", None)
+        item = getattr(self, "_splitter_ghost_item", None)
+        if cv is not None and item is not None:
+            try:
+                cv.coords(item, left, 0, left + ctx["sp_w"], ctx["ph"])
+            except tk.TclError:
+                pass
 
     def _on_splitter_release(self, event) -> None:
         """松开：销毁指示线，一次性应用最终布局并持久化。

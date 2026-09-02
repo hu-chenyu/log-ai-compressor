@@ -807,10 +807,10 @@ class TestSplitter:
                 assert calls == [], "拖动过程中不应触发任何布局"
                 assert app._list_col.winfo_width() == left0, \
                     "拖动过程中左右列宽应保持静止（不重绘）"
-            # 指示线位置 = 最新比例（跟手）
+            # 指示线位置 = 最新比例（跟手）：Canvas 图元坐标
             assert app._splitter_ghost.winfo_exists()
-            gr = app._splitter_ghost.winfo_rootx() - panel.winfo_rootx()
-            assert abs(gr / pw - app._splitter_ratio) <= 0.02, \
+            gc = app._splitter_ghost_cv.coords(app._splitter_ghost_item)
+            assert abs(gc[0] / pw - app._splitter_ratio) <= 0.02, \
                 "指示线应位于最新比例处"
             # 释放：销毁指示线 + 恰好一次布局 + 列宽到位
             sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
@@ -825,7 +825,7 @@ class TestSplitter:
             app._layout_splitter = orig
 
     def test_drag_ghost_uses_theme_accent(self, app):
-        """修复R18：指示线用当前主题强调色（四态协调）。
+        """修复R18/R19：指示线（Canvas 图元填充）用当前主题强调色。
 
         直接创建/销毁指示线验证颜色（不经完整拖放 —— event_generate
         连续两轮 press 会被 Tk 合成为 <Double-Button-1> 走双击路径）。
@@ -839,17 +839,45 @@ class TestSplitter:
                 app.update()
                 app._create_splitter_ghost()
                 assert app._splitter_ghost is not None
-                color = app._splitter_ghost.cget("fg_color")
-                if isinstance(color, (tuple, list)):
-                    idx = 1 if theme == "dark" else 0
-                    color = color[idx]
-                assert str(color).lower() == THEMES[theme]["accent"].lower(),\
+                fill = app._splitter_ghost_cv.itemcget(
+                    app._splitter_ghost_item, "fill")
+                assert str(fill).lower() == THEMES[theme]["accent"].lower(),\
                     f"{theme} 主题指示线应用强调色 {THEMES[theme]['accent']}"
                 app._destroy_splitter_ghost()
                 assert app._splitter_ghost is None
         finally:
             app._on_splitter_dblclick(None)
             app.update()
+
+    def test_drag_ghost_fast_single_item_no_trail(self, app):
+        """修复R19：快速往返拖动时指示线只有一个图元、无残影。
+
+        旧 CTkFrame+place 指示线是控件级窗口移动，快速拖动时旧位置
+        暴露区重绘跟不上 → 多条竖线残影。Canvas 图元方案中覆盖层
+        上始终只有一个 rectangle 图元，coords() 只改坐标 —— 无论
+        拖多快都不会出现第二条指示线。
+        """
+        app.update()
+        sp = app._splitter
+        pw = self._pw(app)
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        assert app._splitter_ghost_cv is not None
+        # 快速往返 30 次 motion（模拟每秒多次来回的快速拖动）
+        for i in range(30):
+            frac = 0.15 if i % 2 == 0 else 0.65
+            sp.event_generate("<B1-Motion>", x=3 + int(pw * frac), y=40)
+            app.update()
+            items = app._splitter_ghost_cv.find_all()
+            assert items == (app._splitter_ghost_item,), \
+                f"指示线图元应始终只有一个（实际 {len(items)} 个）"
+        # 位置跟随最新 motion（0.65 一侧）
+        gc = app._splitter_ghost_cv.coords(app._splitter_ghost_item)
+        assert abs(gc[0] / pw - app._splitter_ratio) <= 0.02, \
+            "指示线应位于最新比例处"
+        sp.event_generate("<ButtonRelease-1>", x=3 + int(pw * 0.65), y=40)
+        app.update()
+        assert app._splitter_ghost is None, "释放应销毁指示线覆盖层"
 
     def test_drag_min_width_limits(self, app):
         """修复R12：拖到最左/最右受最小宽度限制（动态实测标题栏宽）。"""
