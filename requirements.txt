@@ -4,5 +4,3 @@ matplotlib>=3.5.0
 PyYAML>=6.0
 # GUI 文件拖拽导入支持（缺失时自动退化为点击选择）
 tkinterdnd2>=0.4.2
-# 分隔条拖动位图快照代理（缺失时自动退化为实时 place 布局）
-Pillow>=9.0
