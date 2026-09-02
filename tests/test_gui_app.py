@@ -830,50 +830,45 @@ class TestSplitter:
             "左右列 + 分隔条应占满面板宽"
 
     def test_drag_realtime_updates_columns_per_motion(self, app):
-        """优化：实时拖动 —— 覆盖层图像逐 motion 跟随，松开一次重排。
+        """优化：实时拖动 —— 每个 motion 后真实列宽立即跟随（无指示线/覆盖层/节流）。
 
-        撕裂根源是多子窗口异步独立重绘；WS_EX_COMPOSITED 与 Tk 死锁
-        不可用（实验验证）。现拖动中左右列宽以截图图像在同一画布上
-        实时跟随（单表面原子绘制，物理上不可能撕裂），真实布局在
-        松开时一次应用（拖动中纯几何裁剪语义）。
+        拖动中每个 <B1-Motion> 直接 place 更新左右列真实宽度 +
+        update_idletasks 立即刷新：鼠标每移动 1px 布局跟着变 1px，
+        松开时无任何跳变（布局早已实时到位）。
         """
         app.update()
         sp = app._splitter
+        panel = app._result_panel
         pw = self._pw(app)
         assert not hasattr(app, "_splitter_ghost"), "指示线方案应已移除"
+        assert getattr(app, "_splitter_overlay", None) is None, \
+            "覆盖层方案应已移除（拖动中不允许任何中间视觉元素）"
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
-        ov = getattr(app, "_splitter_overlay", None)
-        assert ov is not None, \
-            "按下后应创建截图合成覆盖层（桌面会话可用 PIL 截图）"
-        c = ov["canvas"]
-        sp_w = ov["sp_w"]
-        left0 = app._list_col.winfo_width()
         for dx in (80, 160, 240):
             sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
-            app.update()
-            # 覆盖层右列图像实时跟随（每 motion 立即变化）
-            expect = app._splitter_ratio * pw + sp_w
-            assert abs(c.coords(ov["img_r"])[0] - expect) <= 2, \
-                "motion 后覆盖层右列图像应实时跟随鼠标"
-            # 假分隔条矩形贴合左列右缘
-            assert abs(c.coords(ov["sp_rect"])[0]
-                       - app._splitter_ratio * pw) <= 2
-        # 拖动中真实列不重排（纯几何裁剪，重排延迟到松开）
-        assert app._list_col.winfo_width() == left0, \
-            "拖动中真实列宽应保持（重排在松开时一次应用）"
+            app.update()      # 处理 idle 几何（place 的实际生效点）
+            expect = app._splitter_ratio * pw
+            assert abs(app._list_col.winfo_width() - expect) <= 8, \
+                "motion 后真实列宽应立即跟随（无需等松开）"
+            sx = sp.winfo_rootx() - panel.winfo_rootx()
+            assert abs(sx - app._list_col.winfo_width()) <= 2, \
+                "分隔条应实时贴住左列右缘"
+        left_before_release = app._list_col.winfo_width()
         sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
         app.update()
-        assert app._splitter_overlay is None, "释放后覆盖层应销毁"
+        assert app._list_col.winfo_width() == left_before_release, \
+            "松开后布局不应再跳变（拖动中已实时到位）"
         assert abs(app._splitter_ratio * pw
                    - app._list_col.winfo_width()) <= 8, \
-            "释放后列宽应与最终比例一致"
+            "最终列宽应与比例一致"
 
     def test_drag_realtime_fast_perf(self, app):
         """优化：实时拖动性能 —— 单帧（motion+idle 级联）<16ms（60fps）。
 
-        虚拟列表 + 快速往返拖动：覆盖层路径每帧仅 5 次 O(1) 图元
-        coords 更新 + 单画布重绘，单帧成本应远低于 16ms。
+        虚拟列表 + 快速往返拖动：每 motion 后 update() 处理 place
+        几何与空闲帧级联（虚拟列表快速路径只改行宽），单帧成本
+        应远低于 16ms。
         """
         _run_many_clusters(app)
         app.update()
@@ -881,8 +876,13 @@ class TestSplitter:
         sp = app._splitter
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
-        times = []
         pw = self._pw(app)
+        # 预热：首个大幅 motion 触发详情 Text/字体度量等一次性
+        # 冷启动重排（缓存后不再发生），不计入稳态帧耗时
+        for frac in (0.25, 0.6, 0.25):
+            sp.event_generate("<B1-Motion>", x=3 + int(pw * frac), y=40)
+            app.update()
+        times = []
         try:
             for i in range(40):
                 frac = 0.25 if i % 2 == 0 else 0.6
@@ -2151,6 +2151,10 @@ class TestVirtualList:
         vl = _force_hscroll_range(app)
         vl._on_hbar_press(None)
         assert vl._xsnap is not None
+        # 预热：首个大幅滚动触发画布首次全量重绘等一次性成本
+        for frac in (0.5, 0.05, 0.9):
+            vl._canvas.xview_moveto(frac)
+            app.update()
         times = []
         try:
             for i in range(40):
