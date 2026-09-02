@@ -184,9 +184,6 @@ _SPLITTER_WIDTH = 6            # 分隔条宽度（像素）
 _SPLITTER_MIN_LIST = 420       # 左列兜底（实测标题栏 ~412 + 余量）
 _SPLITTER_MIN_DETAIL = 360     # 右列兜底（实测标题栏 ~325 + padx + 余量）
 _SPLITTER_DEFAULT_RATIO = 0.4  # 默认左右宽度比（列表:详情 = 2:3）
-# 修复缺陷R19：拖动指示线覆盖层的透明色键 —— 经 -transparentcolor
-# 置为全透明且鼠标穿透（色键与四主题强调色及全部调色板色均不同）
-_SPLITTER_GHOST_KEY = "#ff00fe"
 
 # 详情文本高亮标签配色（主面板与全屏窗口共用，修复缺陷#7/R5）
 # 修复缺陷R5：业务栈帧提亮加粗更明显；系统库折叠提示独立配色更清晰
@@ -528,6 +525,16 @@ class VirtualClusterList:
                                       height=14, command=self._canvas.xview)
         self._canvas.configure(yscrollcommand=self._on_yscroll,
                                xscrollcommand=self._on_xscroll)
+        # 优化（实时滚动防撕裂）：水平滚动条按下/释放 -> 快照滚动
+        # 模式（可见行转画布图元，见 _on_hbar_press）
+        self._xsnap = None
+        try:
+            self._hbar._canvas.bind("<ButtonPress-1>",
+                                    self._on_hbar_press, add="+")
+            self._hbar._canvas.bind("<ButtonRelease-1>",
+                                    self._on_hbar_release, add="+")
+        except (AttributeError, tk.TclError):
+            pass
         host.grid_columnconfigure(0, weight=1)
         host.grid_rowconfigure(0, weight=1)
         self._canvas.grid(row=0, column=0, sticky="nsew")
@@ -537,6 +544,9 @@ class VirtualClusterList:
         # （scrollregion 变更会经 yscrollcommand 回流 _on_yscroll ->
         # _sync，_sync 内不再改 scrollregion 且带重入护栏，防事件循环）
         self._in_sync = False
+        # 优化（实时拖动快速路径）：分隔条拖动期间 _sync 只改行宽
+        # （数据/滚动位置未变，跳过文本重填与事件重绑）
+        self._dragging_splitter = False
         self._canvas.bind("<Configure>", self._on_canvas_resize)
         # 修复缺陷R9（顺带修复既有缺陷）：滚轮绑定挂在画布与池内行控件
         # 自身而非 bind_all —— bind_all 会覆盖 CTkScrollableFrame 的全局
@@ -552,6 +562,9 @@ class VirtualClusterList:
         """设置列表数据并回到顶部（含水平内容宽测量）。"""
         self._data = data
         self._hovered = -1
+        # 数据更换时残留的快照图元一并清理（正常时序不会发生）
+        if self._xsnap is not None:
+            self._on_hbar_release(None)
         # 修复缺陷R9：内容自然宽（摘要单行不换行后的完整像素宽）
         self._content_w = self._measure_width(data)
         self._update_region()
@@ -585,6 +598,7 @@ class VirtualClusterList:
 
     def destroy(self) -> None:
         """销毁虚拟列表（切回经典模式 / 重新分析时）。"""
+        self._xsnap = None
         for slot in self._slots:
             try:
                 slot["frame"].destroy()
@@ -635,6 +649,98 @@ class VirtualClusterList:
         # 修复缺陷R9：Shift+滚轮横向滚动（单行长摘要左右查看）
         self._canvas.xview_scroll(-int(event.delta / 120) * 3, "units")
 
+    # ------------------------------------------------------------------
+    # 水平滚动快照模式（实时滚动防撕裂）
+    # ------------------------------------------------------------------
+    def _on_hbar_press(self, _event) -> None:
+        """水平滚动条按下：可见行转画布图元（单表面原子滚动）。
+
+        优化（实时滚动防撕裂）：拖动水平滚动条时若照常滚动画布，
+        每个行窗口（原生子窗口）逐个平移 + 画布底色回填异步交错
+        上屏，快速拖动出现文字重影/重叠。按下时把当前可见行转画
+        为同一画布上的矩形/文本图元并隐藏行窗口 —— 拖动中滚动只
+        重绘单一画布（Tk 内部双缓冲整帧原子上屏），物理上不可能
+        撕裂；且水平滚动中可见行集合不变（仅整体 X 平移），图元
+        渲染内容与真实行完全一致。释放时删除图元恢复行窗口
+        （行窗口坐标在隐藏期间已随画布同步平移，无需重排）。
+        """
+        if self._xsnap is not None or not self._data:
+            return
+        try:
+            if self._canvas.winfo_width() >= self._region_w():
+                return          # 无水平滚动范围
+        except tk.TclError:
+            return
+        app = self._app
+        p = app._palette()
+        states = app._row_states()
+        width = self._region_w()
+        # 只绘制视口相交行（水平滚动不改变纵向可见集合；池内
+        # 含上下缓冲行，全部绘制会成倍增加每帧重绘图元数）
+        try:
+            top = self._canvas.canvasy(0)
+            vh = self._canvas.winfo_height()
+        except tk.TclError:
+            return
+        items = []
+        try:
+            for slot in self._slots:
+                idx = slot.get("idx", -1)
+                if idx < 0 or idx >= len(self._data):
+                    continue
+                y = idx * self.ROW_HEIGHT
+                if y + self.ROW_HEIGHT <= top or y >= top + vh:
+                    continue
+                cluster = self._data[idx]
+                if idx == app._selected_row:
+                    bg = states["selected"]
+                elif idx == self._hovered:
+                    bg = states["hover"]
+                else:
+                    bg = states["bg"]
+                items.append(self._canvas.create_rectangle(
+                    0, y, width, y + self.ROW_HEIGHT, fill=bg, width=0))
+                head_color = app._row_color(cluster) or p["row_text"]
+                items.append(self._canvas.create_text(
+                    10, y + 7, anchor="nw", font=self._m_head,
+                    fill=head_color, text=app._row_text(cluster)))
+                # 摘要 y = 头部行距 + 头部上边距 7 + 间隙 2（与
+                # _make_slot 的 pack pady 一致）
+                sum_y = y + 7 + self._m_head.metrics("linespace") + 2
+                items.append(self._canvas.create_text(
+                    10, sum_y, anchor="nw", font=self._m_sum,
+                    fill=p["row_text"],
+                    text=app._clip(cluster.summary, self.SUMMARY_CLIP)))
+            for slot in self._slots:
+                try:
+                    self._canvas.itemconfigure(slot["win"], state="hidden")
+                except tk.TclError:
+                    pass
+        except (tk.TclError, ValueError):
+            for it in items:
+                try:
+                    self._canvas.delete(it)
+                except tk.TclError:
+                    pass
+            return
+        self._xsnap = items
+
+    def _on_hbar_release(self, _event) -> None:
+        """水平滚动条释放：删除快照图元，恢复真实行窗口。"""
+        items, self._xsnap = self._xsnap, None
+        if items is None:
+            return
+        for it in items:
+            try:
+                self._canvas.delete(it)
+            except tk.TclError:
+                pass
+        for slot in self._slots:
+            try:
+                self._canvas.itemconfigure(slot["win"], state="normal")
+            except tk.TclError:
+                pass
+
     def _bind_row_wheel(self, *widgets) -> None:
         """池内行控件挂滚轮绑定（Tk 事件不冒泡）。"""
         for w in widgets:
@@ -652,6 +758,8 @@ class VirtualClusterList:
         """
         if self._in_sync or not self._data:
             return
+        if self._xsnap is not None:
+            return          # 快照滚动中：行窗口已隐藏，拖动结束后恢复
         height = self._canvas.winfo_height()
         if height < 10:                       # 布局未完成
             return
@@ -660,6 +768,19 @@ class VirtualClusterList:
             # 修复缺陷R9：行宽 = 水平滚动区域宽（内容超宽时行随之加宽，
             # 整行高亮与点击区域覆盖全部内容）
             width = self._region_w()
+            if self._dragging_splitter:
+                # 优化（实时拖动快速路径）：拖动中数据/滚动位置不变、
+                # 仅列宽变化 —— 只把池行窗口宽度对齐新列宽（整行高亮
+                # 实时跟随），跳过文本重填/事件重绑（每帧仅 ~15 次
+                # itemconfigure，<1ms）；松开时 set_splitter_drag(False)
+                # 触发一次全量 _sync 补齐。行文本/颜色本就正确（数据
+                # 没变），无视觉差异。
+                for slot in self._slots:
+                    try:
+                        self._canvas.itemconfigure(slot["win"], width=width)
+                    except tk.TclError:
+                        pass
+                return
             top = self._canvas.canvasy(0)
             first = max(0, int(top // self.ROW_HEIGHT) - self.BUFFER)
             need = int(height // self.ROW_HEIGHT) + 2 * self.BUFFER + 1
@@ -678,6 +799,17 @@ class VirtualClusterList:
                         pass
         finally:
             self._in_sync = False
+
+    def set_splitter_drag(self, active: bool) -> None:
+        """分隔条拖动模式开关：拖动中 _sync 走快速路径（只改行宽）。
+
+        优化（实时拖动）：active=False 时执行一次全量 _sync ——
+        把拖动期间快速路径跳过的文本填充/事件重绑补齐（行宽已在
+        拖动中实时更新，全量同步确保行内容与数据完全一致）。
+        """
+        self._dragging_splitter = active
+        if not active and self._data:
+            self._sync()
 
     def _make_slot(self, width: int) -> dict:
         """创建一个池化行（原生 tk 控件，创建后长期复用）。"""
@@ -1256,13 +1388,12 @@ class LogCompressorApp(_make_app_base()):
         """构建分隔条（宽 6px 圆角条 + 三个握点 + ↔ 光标）。"""
         p = self._palette()
         self._splitter_dragging = False
-        # 修复缺陷R19：拖动指示线（透明覆盖层 + Canvas 图元，
-        # None=未创建）与按下时缓存的拖动几何（motion 内零 winfo
-        # 查询，纯算术 + canvas.coords 图元移动）
-        self._splitter_ghost = None
-        self._splitter_ghost_cv = None
-        self._splitter_ghost_item = None
+        # 优化（实时拖动）：按下时缓存的拖动几何（motion 内零
+        # winfo 查询，纯算术 + place 比例参数直接几何更新）
         self._splitter_drag_ctx = None
+        # 优化（实时拖动防撕裂）：拖动期截图合成覆盖层（见
+        # _splitter_overlay_begin；None = 未激活/截图失败回退直拖）
+        self._splitter_overlay = None
         self._splitter = ctk.CTkFrame(
             panel, width=_SPLITTER_WIDTH, corner_radius=3,
             fg_color=p["splitter"], cursor="sb_h_double_arrow")
@@ -1367,12 +1498,19 @@ class LogCompressorApp(_make_app_base()):
                                relheight=1)
 
     def _on_splitter_press(self, event) -> None:
-        """按下：缓存拖动几何并创建指示线（不动任何布局）。
+        """按下：缓存拖动几何 + 构建截图合成覆盖层（motion 内零 winfo 查询）。
 
-        修复缺陷R18（拖动撕裂/卡顿根治）：拖动中不重排列子树，
-        松开后一次性应用最终布局。面板宽/高/rootx/最小宽在此一次
-        缓存（motion 内零 winfo 查询），最小宽度钳制与窄窗锁定
-        语义不变（窗口太窄不创建指示线）。
+        优化（实时拖动防撕裂）：撕裂根源是多个原生子窗口（左右列/
+        行/文本）在快速几何变化时异步独立重绘 —— 同一帧内新旧内容
+        混合上屏。已验证 WS_EX_COMPOSITED 双缓冲合成与 Tk 事件循环
+        死锁不可用；16ms 合帧（R17）与指示线（R18/R19）又分别只是
+        降频与「冻结布局」。现按住分隔条时对结果区整幅截图裁出左右
+        两列图像，铺在覆盖 panel 的原生 Canvas 上：拖动中每帧仅
+        itemconfigure 图像/矩形图元坐标（O(1)，同一画布单表面重绘，
+        Tk 内部双缓冲整帧原子上屏），左右列宽视觉上实时跟随鼠标且
+        物理上不可能撕裂 —— 即「拖动中纯几何裁剪、松开后一次完整
+        重排」。截图失败（无头/远程会话）返回 False，拖动回退为
+        直接 place 实时布局（仍实时，大内容下可能有轻微撕裂）。
         """
         self._splitter_dragging = True
         self._splitter_hover(True)
@@ -1381,92 +1519,90 @@ class LogCompressorApp(_make_app_base()):
         left_min, right_min = self._splitter_min_widths()
         try:
             pw = max(1, panel.winfo_width())
-            ph = max(1, panel.winfo_height())
             rootx = panel.winfo_rootx()
         except (tk.TclError, AttributeError):
             return
         lo, hi = left_min, pw - right_min - sp_w
-        self._splitter_drag_ctx = {"pw": pw, "ph": ph, "rootx": rootx,
-                                    "sp_w": sp_w, "lo": lo, "hi": hi}
-        if hi >= lo:                     # 窗口太窄时锁定（不建指示线）
-            self._create_splitter_ghost()
+        self._splitter_drag_ctx = {"pw": pw, "rootx": rootx,
+                                   "sp_w": sp_w, "lo": lo, "hi": hi}
+        self._splitter_overlay_begin()
+        if self._virtual_list is not None:
+            self._virtual_list.set_splitter_drag(True)
 
-    def _create_splitter_ghost(self) -> None:
-        """创建拖动指示线（透明覆盖层 + Canvas 矩形图元）。
-
-        修复缺陷R19（快速拖动残影）：旧实现 CTkFrame+place 是控件级
-        窗口移动 —— 快速拖动时旧位置暴露区域的重绘（列表行/详情
-        文本）跟不上鼠标，旧位置的指示线未被擦除，蓝调主题下出现
-        多条白色竖线（残影/撕裂，见 splitter_tear.png）。改用 Canvas
-        图元方案（专业分隔条指示线的标准实现）：
-        - 覆盖层为 override-redirect 的 Toplevel（不抢焦点），
-          -transparentcolor 色键全窗透明且鼠标穿透，几何与结果区
-          物理像素严格对齐（高 DPI 无换算误差）；
-        - 指示线是覆盖层 Canvas 上唯一一个 create_rectangle 图元，
-          拖动中只改图元坐标（coords，O(1)）—— 不移动任何窗口、
-          不触发布局/内容重绘，由窗口合成器叠加显示，物理上不可
-          能产生残影；
-        - 主题强调色填充（四态协调），宽度与真分隔条一致；仅拖动
-          期间存在，松开即销毁（无常驻遮挡、不影响正常交互）。
-        色键透明不可用（非 Windows）时不显示指示线，拖动功能不受
-        影响（比例更新与指示线显示已解耦）。
-        """
+    def _splitter_overlay_begin(self) -> bool:
+        """构建拖动期截图合成覆盖层（详见 _on_splitter_press 说明）。"""
+        try:
+            from PIL import Image, ImageGrab, ImageTk
+        except Exception:
+            return False
         panel = self._result_panel
+        try:
+            panel.update_idletasks()
+            px, py = panel.winfo_rootx(), panel.winfo_rooty()
+            pw, ph = panel.winfo_width(), panel.winfo_height()
+            lx = self._list_col.winfo_x()
+            lw = self._list_col.winfo_width()
+            dx = self._detail_col.winfo_x()
+            dw = self._detail_col.winfo_width()
+            # 守卫：尺寸有效且右列完整落在面板内（布局尚未完成时跳过）
+            if (min(pw, ph, lw, dw) <= 2 or lx < 0 or dx <= lx
+                    or dx + dw > pw + 2):
+                return False
+            shot = ImageGrab.grab(bbox=(px, py, px + pw, py + ph))
+            # 进程 DPI 感知下 Tk 坐标即物理像素，截图 1:1；异常缩放
+            # 环境（远程会话等）兜底重采样到精确面板尺寸
+            if shot.size != (pw, ph):
+                shot = shot.resize((pw, ph), Image.BILINEAR)
+            photo_l = ImageTk.PhotoImage(shot.crop((lx, 0, lx + lw, ph)))
+            photo_r = ImageTk.PhotoImage(shot.crop((dx, 0, dx + dw, ph)))
+        except Exception as e:
+            self._splitter_overlay_err = repr(e)
+            return False
         p = self._palette()
-        try:
-            x, y = panel.winfo_rootx(), panel.winfo_rooty()
-            w = max(1, panel.winfo_width())
-            h = max(1, panel.winfo_height())
-        except (tk.TclError, AttributeError):
-            return
         sp_w = _SPLITTER_WIDTH * max(1.0, getattr(self, "_font_scale", 1.0))
-        try:
-            win = tk.Toplevel(self)
-        except tk.TclError:
-            return
-        try:
-            win.overrideredirect(True)          # 无边框，不抢焦点
-            win.attributes("-topmost", True)   # 位于主窗口之上
-            win.configure(bg=_SPLITTER_GHOST_KEY)
-            # 色键透明：整窗除指示线图元外全部透明且鼠标穿透
-            win.attributes("-transparentcolor", _SPLITTER_GHOST_KEY)
-        except tk.TclError:
-            try:
-                win.destroy()
-            except (tk.TclError, ValueError):
-                pass
-            return
-        cv = tk.Canvas(win, bg=_SPLITTER_GHOST_KEY,
-                       highlightthickness=0, bd=0)
-        cv.pack(fill="both", expand=True)
-        x0 = self._splitter_ratio * w
-        self._splitter_ghost = win
-        self._splitter_ghost_cv = cv
-        self._splitter_ghost_item = cv.create_rectangle(
-            x0, 0, x0 + sp_w, h, fill=p["accent"], width=0)
-        win.wm_geometry(f"{w}x{h}+{x}+{y}")
+        c = tk.Canvas(panel, bd=0, highlightthickness=0,
+                      bg=p["card"], cursor="sb_h_double_arrow")
+        # 拖动时才创建的画布天然位于兄弟栈顶（覆盖左右列与分隔条）；
+        # 注意不能用 lift()：Canvas 的 raise 子命令是图元操作
+        c.place(x=0, y=0, relwidth=1, relheight=1)
+        img_l = c.create_image(lx, 0, anchor="nw", image=photo_l)
+        img_r = c.create_image(dx, 0, anchor="nw", image=photo_r)
+        # 假分隔条（拖动高亮色）+ 三个握点：真实分隔条在覆盖层之下
+        # 保持原位不可见，全部视觉元素由同一画布原子绘制
+        sp_rect = c.create_rectangle(
+            lw, 0, lw + sp_w, ph, fill=p["row_selected"], width=0)
+        grips = []
+        cx, cy = lw + sp_w / 2, ph / 2
+        for dy in (-8, 0, 8):
+            grips.append(c.create_rectangle(
+                cx - 1, cy + dy - 1, cx + 1, cy + dy + 1,
+                fill=p["splitter_grip"], width=0))
+        self._splitter_overlay = {
+            "canvas": c, "img_l": img_l, "img_r": img_r,
+            "sp_rect": sp_rect, "grips": grips, "sp_w": sp_w, "ph": ph,
+            "photo_l": photo_l, "photo_r": photo_r}
+        return True
 
-    def _destroy_splitter_ghost(self) -> None:
-        """销毁拖动指示线（松开/双击/关闭时清理覆盖层）。"""
-        ghost = getattr(self, "_splitter_ghost", None)
-        if ghost is not None:
-            try:
-                ghost.destroy()
-            except (tk.TclError, ValueError):
-                pass
-        self._splitter_ghost = None
-        self._splitter_ghost_cv = None
-        self._splitter_ghost_item = None
+    def _splitter_overlay_end(self) -> None:
+        """销毁拖动覆盖层（幂等；截图失败回退时为空操作）。"""
+        ov, self._splitter_overlay = self._splitter_overlay, None
+        if ov is None:
+            return
+        try:
+            ov["canvas"].destroy()
+        except (tk.TclError, KeyError):
+            pass
 
     def _on_splitter_drag(self, event) -> None:
-        """拖动：只移动 Canvas 上的指示线图元（零窗口移动/零重绘）。
+        """拖动：每帧更新覆盖层图元坐标（原子实时跟随鼠标）。
 
-        修复缺陷R12（拖动错位/拖不回）：事件接收窗口各异（分隔条
-        内部 canvas / 仅 2px 宽的握点），event.x 相对的窗口不确定；
-        x_root 是事件自带的屏幕绝对坐标，与接收窗口无关。
-        修复缺陷R19：指示线移动用 canvas.coords() 改图元坐标
-        （O(1)）—— 与左右列内容完全解耦，快速拖动无残影；比例
-        更新与指示线显示解耦（覆盖层不可用时拖动仍正常）。
+        修复缺陷R12（拖动错位/拖不回）：x_root 是事件自带的屏幕
+        绝对坐标，与事件接收窗口（分隔条内部 canvas / 2px 握点）
+        无关。
+        优化（实时拖动）：motion 内零 winfo 查询（几何已在按下时
+        缓存），钳制算术后只 itemconfigure 覆盖层 5 个图元坐标
+        （O(1) 不触发布局计算）；比例同步更新供松开时一次应用。
+        截图失败回退路径：直接 _layout_splitter() 实时布局。
         """
         if not self._splitter_dragging:
             return
@@ -1481,35 +1617,52 @@ class LogCompressorApp(_make_app_base()):
             return
         left = min(max(x, ctx["lo"]), ctx["hi"])
         self._splitter_ratio = left / ctx["pw"]
-        cv = getattr(self, "_splitter_ghost_cv", None)
-        item = getattr(self, "_splitter_ghost_item", None)
-        if cv is not None and item is not None:
+        ov = self._splitter_overlay
+        if ov is not None:
+            c = ov["canvas"]
+            sp_w, ph = ov["sp_w"], ov["ph"]
             try:
-                cv.coords(item, left, 0, left + ctx["sp_w"], ctx["ph"])
-            except tk.TclError:
+                c.coords(ov["img_r"], left + sp_w, 0)
+                c.coords(ov["sp_rect"], left, 0, left + sp_w, ph)
+                cx, cy = left + sp_w / 2, ph / 2
+                for g, dy in zip(ov["grips"], (-8, 0, 8)):
+                    c.coords(g, cx - 1, cy + dy - 1, cx + 1, cy + dy + 1)
+            except (tk.TclError, KeyError):
                 pass
+            return
+        self._layout_splitter()      # 截图失败回退：直接实时布局
 
     def _on_splitter_release(self, event) -> None:
-        """松开：销毁指示线，一次性应用最终布局并持久化。
+        """松开：一次完整重排到最终比例并销毁覆盖层。
 
-        修复缺陷R18：拖动全程未动过布局，此处 _layout_splitter()
-        是本次拖动唯一一次列重排（松开后内容静止到新宽度，过渡
-        一次性完成）；比例已是 motion 维护的最新值。
+        优化（实时拖动）：place 几何经 idle 延迟生效 —— 先
+        _layout_splitter() + update_idletasks() 把真实列几何
+        应用到位（覆盖层之下完成），再销毁覆盖层；否则销毁后到
+        几何生效前会闪现一帧拖动前的旧布局。虚拟列表补一次全量
+        _sync 并持久化比例。
         """
         if not self._splitter_dragging:
             return
         self._splitter_dragging = False
         self._splitter_hover(False)
         self._splitter_drag_ctx = None
-        self._destroy_splitter_ghost()
         self._layout_splitter()
+        try:
+            self._result_panel.update_idletasks()
+        except (tk.TclError, AttributeError):
+            pass
+        self._splitter_overlay_end()
+        if self._virtual_list is not None:
+            self._virtual_list.set_splitter_drag(False)
         self._save_config()
 
     def _on_splitter_dblclick(self, event) -> None:
-        """双击恢复默认比例（2:3）并闪烁反馈（无需指示线）。"""
+        """双击恢复默认比例（2:3）并闪烁反馈。"""
         self._splitter_dragging = False
         self._splitter_drag_ctx = None
-        self._destroy_splitter_ghost()
+        self._splitter_overlay_end()
+        if self._virtual_list is not None:
+            self._virtual_list.set_splitter_drag(False)
         self._splitter_ratio = _SPLITTER_DEFAULT_RATIO
         self._layout_splitter()
         self._flash_splitter()
@@ -3411,8 +3564,6 @@ class LogCompressorApp(_make_app_base()):
 
     def _on_close(self) -> None:
         self._save_config()
-        # 修复缺陷R18：销毁遗留的拖动指示线（若拖动中直接关闭）
-        self._destroy_splitter_ghost()
         # 修复缺陷R6：清理虚拟列表与全屏缓存窗口（释放控件/句柄）
         self._fs_list_refresh = None
         for win in (self._fs_list_win, self._fs_detail_win,

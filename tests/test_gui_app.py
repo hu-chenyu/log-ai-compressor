@@ -829,104 +829,107 @@ class TestSplitter:
         assert abs((left1 + detail1 + _SPLITTER_WIDTH * scale) - pw) <= 6, \
             "左右列 + 分隔条应占满面板宽"
 
-    def test_drag_ghost_line_defers_layout(self, app):
-        """修复R18：拖动只移动指示线，松开后才一次性应用布局。
+    def test_drag_realtime_updates_columns_per_motion(self, app):
+        """优化：实时拖动 —— 覆盖层图像逐 motion 跟随，松开一次重排。
 
-        旧实现（实时布局/合帧布局）拖动中仍持续重排左右列子树
-        （列表行重填 + 详情全文重排），大字体/多内容下重绘跟不上
-        鼠标（撕裂/卡顿）。指示线方案：motion 只 place 指示线
-        （<1ms），列宽全程静止；release 销毁指示线并恰好布局一次。
-        """
-        app.update()
-        sp = app._splitter
-        panel = app._result_panel
-        pw = self._pw(app)
-        calls = []
-        orig = app._layout_splitter
-        app._layout_splitter = lambda: (calls.append(1), orig())[-1]
-        try:
-            left0 = app._list_col.winfo_width()
-            sp.event_generate("<ButtonPress-1>", x=3, y=40)
-            app.update()
-            assert app._splitter_ghost is not None, "按下应创建指示线"
-            # 连续 motion：指示线跟随移动，列宽/布局全程静止
-            for dx in (60, 120, 180, 240):
-                sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
-                app.update()
-                assert calls == [], "拖动过程中不应触发任何布局"
-                assert app._list_col.winfo_width() == left0, \
-                    "拖动过程中左右列宽应保持静止（不重绘）"
-            # 指示线位置 = 最新比例（跟手）：Canvas 图元坐标
-            assert app._splitter_ghost.winfo_exists()
-            gc = app._splitter_ghost_cv.coords(app._splitter_ghost_item)
-            assert abs(gc[0] / pw - app._splitter_ratio) <= 0.02, \
-                "指示线应位于最新比例处"
-            # 释放：销毁指示线 + 恰好一次布局 + 列宽到位
-            sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
-            app.update()
-            assert app._splitter_ghost is None, "释放应销毁指示线"
-            assert len(calls) == 1, \
-                f"释放应恰好一次布局（实际 {len(calls)} 次）"
-            assert abs(app._splitter_ratio * pw
-                       - app._list_col.winfo_width()) <= 8, \
-                "释放后列宽应与最终比例一致"
-        finally:
-            app._layout_splitter = orig
-
-    def test_drag_ghost_uses_theme_accent(self, app):
-        """修复R18/R19：指示线（Canvas 图元填充）用当前主题强调色。
-
-        直接创建/销毁指示线验证颜色（不经完整拖放 —— event_generate
-        连续两轮 press 会被 Tk 合成为 <Double-Button-1> 走双击路径）。
-        """
-        from log_ai_compressor.gui.app import THEMES
-        app.update()
-        try:
-            for theme in ("dark", "light", "blue", "green"):
-                app._theme = theme
-                app._apply_palette()
-                app.update()
-                app._create_splitter_ghost()
-                assert app._splitter_ghost is not None
-                fill = app._splitter_ghost_cv.itemcget(
-                    app._splitter_ghost_item, "fill")
-                assert str(fill).lower() == THEMES[theme]["accent"].lower(),\
-                    f"{theme} 主题指示线应用强调色 {THEMES[theme]['accent']}"
-                app._destroy_splitter_ghost()
-                assert app._splitter_ghost is None
-        finally:
-            app._on_splitter_dblclick(None)
-            app.update()
-
-    def test_drag_ghost_fast_single_item_no_trail(self, app):
-        """修复R19：快速往返拖动时指示线只有一个图元、无残影。
-
-        旧 CTkFrame+place 指示线是控件级窗口移动，快速拖动时旧位置
-        暴露区重绘跟不上 → 多条竖线残影。Canvas 图元方案中覆盖层
-        上始终只有一个 rectangle 图元，coords() 只改坐标 —— 无论
-        拖多快都不会出现第二条指示线。
+        撕裂根源是多子窗口异步独立重绘；WS_EX_COMPOSITED 与 Tk 死锁
+        不可用（实验验证）。现拖动中左右列宽以截图图像在同一画布上
+        实时跟随（单表面原子绘制，物理上不可能撕裂），真实布局在
+        松开时一次应用（拖动中纯几何裁剪语义）。
         """
         app.update()
         sp = app._splitter
         pw = self._pw(app)
+        assert not hasattr(app, "_splitter_ghost"), "指示线方案应已移除"
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
-        assert app._splitter_ghost_cv is not None
-        # 快速往返 30 次 motion（模拟每秒多次来回的快速拖动）
-        for i in range(30):
-            frac = 0.15 if i % 2 == 0 else 0.65
-            sp.event_generate("<B1-Motion>", x=3 + int(pw * frac), y=40)
+        ov = getattr(app, "_splitter_overlay", None)
+        assert ov is not None, \
+            "按下后应创建截图合成覆盖层（桌面会话可用 PIL 截图）"
+        c = ov["canvas"]
+        sp_w = ov["sp_w"]
+        left0 = app._list_col.winfo_width()
+        for dx in (80, 160, 240):
+            sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
             app.update()
-            items = app._splitter_ghost_cv.find_all()
-            assert items == (app._splitter_ghost_item,), \
-                f"指示线图元应始终只有一个（实际 {len(items)} 个）"
-        # 位置跟随最新 motion（0.65 一侧）
-        gc = app._splitter_ghost_cv.coords(app._splitter_ghost_item)
-        assert abs(gc[0] / pw - app._splitter_ratio) <= 0.02, \
-            "指示线应位于最新比例处"
-        sp.event_generate("<ButtonRelease-1>", x=3 + int(pw * 0.65), y=40)
+            # 覆盖层右列图像实时跟随（每 motion 立即变化）
+            expect = app._splitter_ratio * pw + sp_w
+            assert abs(c.coords(ov["img_r"])[0] - expect) <= 2, \
+                "motion 后覆盖层右列图像应实时跟随鼠标"
+            # 假分隔条矩形贴合左列右缘
+            assert abs(c.coords(ov["sp_rect"])[0]
+                       - app._splitter_ratio * pw) <= 2
+        # 拖动中真实列不重排（纯几何裁剪，重排延迟到松开）
+        assert app._list_col.winfo_width() == left0, \
+            "拖动中真实列宽应保持（重排在松开时一次应用）"
+        sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
         app.update()
-        assert app._splitter_ghost is None, "释放应销毁指示线覆盖层"
+        assert app._splitter_overlay is None, "释放后覆盖层应销毁"
+        assert abs(app._splitter_ratio * pw
+                   - app._list_col.winfo_width()) <= 8, \
+            "释放后列宽应与最终比例一致"
+
+    def test_drag_realtime_fast_perf(self, app):
+        """优化：实时拖动性能 —— 单帧（motion+idle 级联）<16ms（60fps）。
+
+        虚拟列表 + 快速往返拖动：覆盖层路径每帧仅 5 次 O(1) 图元
+        coords 更新 + 单画布重绘，单帧成本应远低于 16ms。
+        """
+        _run_many_clusters(app)
+        app.update()
+        assert app._virtual_list is not None
+        sp = app._splitter
+        sp.event_generate("<ButtonPress-1>", x=3, y=40)
+        app.update()
+        times = []
+        pw = self._pw(app)
+        try:
+            for i in range(40):
+                frac = 0.25 if i % 2 == 0 else 0.6
+                sp.event_generate("<B1-Motion>",
+                                   x=3 + int(pw * frac), y=40)
+                t0 = time.perf_counter()
+                app.update()      # 一帧全成本：事件处理 + idle 几何级联
+                times.append((time.perf_counter() - t0) * 1000)
+        finally:
+            sp.event_generate("<ButtonRelease-1>", x=3, y=40)
+            app.update()
+        assert sum(times) / len(times) < 16.0, \
+            f"平均单帧应 <16ms（实际均值 {sum(times) / len(times):.1f}ms）"
+        assert max(times) < 40.0, \
+            f"单帧峰值应 <40ms（实际 {max(times):.1f}ms，沙箱满载抖动裕量）"
+
+    def test_virtual_fast_path_during_drag(self, app):
+        """优化：虚拟列表拖动期走快速路径（不重填文本），松开全量同步。
+
+        拖动中数据/滚动位置不变，_sync 只 itemconfigure 行宽（<1ms），
+        跳过文本重填/事件重绑；松开时补一次全量 _sync。
+        """
+        _run_many_clusters(app)
+        app.update()
+        assert app._virtual_list is not None
+        sp = app._splitter
+        calls = []
+        orig = app._virtual_list._fill_slot
+
+        def counting(*a, **k):
+            calls.append(1)
+            return orig(*a, **k)
+
+        app._virtual_list._fill_slot = counting
+        try:
+            sp.event_generate("<ButtonPress-1>", x=3, y=40)
+            app.update()
+            calls.clear()
+            for dx in (80, 160, 240):
+                sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
+                app.update()
+            assert calls == [], "拖动中不应重填行文本（快速路径）"
+            sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
+            app.update()
+            assert calls, "松开后应执行一次全量同步"
+        finally:
+            app._virtual_list._fill_slot = orig
 
     def test_drag_min_width_limits(self, app):
         """修复R12：拖到最左/最右受最小宽度限制（动态实测标题栏宽）。"""
@@ -2026,6 +2029,17 @@ def _run_many_clusters(app, n=60):
     _run_paste_analysis(app, _make_virtual_log(n))
 
 
+def _force_hscroll_range(app, extra=1200):
+    """虚拟列表强制超宽内容（单测聚焦滚动机制，不依赖聚类行为）。"""
+    vl = app._virtual_list
+    assert vl is not None
+    vl._content_w = max(vl._region_w() + extra, 1200 + extra)
+    vl._update_region()
+    vl._sync()
+    app.update()
+    return vl
+
+
 class TestVirtualList:
     def test_virtual_list_activates_above_threshold(self, app):
         """修复R6：列表超过阈值（40）切换虚拟滚动渲染。"""
@@ -2099,6 +2113,70 @@ class TestVirtualList:
         app._apply_theme_switch("dark")
         app.update()
         assert app._virtual_list is not None
+
+    def test_hscroll_snapshot_atomic_scrolling(self, app):
+        """优化：水平滚动快照模式 —— 按下转图元、滚动原子、释放恢复。
+
+        拖动水平滚动条时行窗口（原生子窗口）逐个平移 + 画布回填
+        异步交错是撕裂根源；快照模式把可见行转为同一画布的矩形/
+        文本图元（单表面整帧上屏），行窗口隐藏；释放后恢复。
+        """
+        _run_many_clusters(app)
+        app.update()
+        vl = _force_hscroll_range(app)
+        assert vl._region_w() > vl._canvas.winfo_width()
+        vl._on_hbar_press(None)
+        assert vl._xsnap is not None, "按下后应进入快照滚动模式"
+        # 行窗口隐藏（拖动中零子窗口平移）
+        for slot in vl.slots:
+            assert str(vl._canvas.itemcget(slot["win"], "state")) \
+                == "hidden"
+        # 快照图元随画布原点平移（视口内呈现整体左移）
+        vx0 = vl._canvas.canvasx(0)
+        vl._canvas.xview_moveto(0.5)
+        app.update()
+        vx1 = vl._canvas.canvasx(0)
+        assert vx1 > vx0, "滚动后画布原点应右移"
+        # 释放恢复：图元删除、行窗口可见
+        vl._on_hbar_release(None)
+        assert vl._xsnap is None
+        for slot in vl.slots:
+            assert str(vl._canvas.itemcget(slot["win"], "state")) \
+                == "normal"
+
+    def test_hscroll_snapshot_fast_perf(self, app):
+        """优化：水平滚动快照性能 —— 单帧 <16ms（60fps）。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = _force_hscroll_range(app)
+        vl._on_hbar_press(None)
+        assert vl._xsnap is not None
+        times = []
+        try:
+            for i in range(40):
+                frac = 0.05 if i % 2 == 0 else 0.9
+                vl._canvas.xview_moveto(frac)
+                t0 = time.perf_counter()
+                app.update()
+                times.append((time.perf_counter() - t0) * 1000)
+        finally:
+            vl._on_hbar_release(None)
+            app.update()
+        assert sum(times) / len(times) < 16.0, \
+            f"平均单帧应 <16ms（实际均值 {sum(times) / len(times):.1f}ms）"
+
+    def test_hbar_press_release_binding_wired(self, app):
+        """优化：水平滚动条内部画布已挂按下/释放绑定（触发快照模式）。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = _force_hscroll_range(app)
+        bar_canvas = vl._hbar._canvas
+        bar_canvas.event_generate("<ButtonPress-1>", x=6, y=4)
+        app.update()
+        assert vl._xsnap is not None, "滚动条按下应触发快照模式"
+        bar_canvas.event_generate("<ButtonRelease-1>", x=6, y=4)
+        app.update()
+        assert vl._xsnap is None, "滚动条释放应退出快照模式"
 
 
 class TestFullscreenReuse:
