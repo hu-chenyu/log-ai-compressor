@@ -881,6 +881,17 @@ class TestSplitter:
             tbar_x = live["tbar"].winfo_rootx() - panel.winfo_rootx()
             assert abs(tbar_x - expect) <= 2, \
                 "右标题条应跟随分隔条（左缘含分隔条区）"
+            # 修复缺陷R14：tbar 右缘让开右「⛶ 全屏」按钮实测宽
+            # （原固定 100px 高 DPI 下吃掉按钮左半）
+            tbar_r = tbar_x + live["tbar"].winfo_width()
+            assert abs(tbar_r - (pw - live["fs_w"])) <= 2, \
+                "覆盖条右缘应让开右全屏按钮（实测宽余量）"
+            # 修复缺陷R14：左列标题栏控件组（字体大小+全屏）实时
+            # 跟随左列右缘（真实容器纯移动，非代理近似）
+            ctrl_x = (app._list_ctrl_box.winfo_rootx()
+                      - panel.winfo_rootx())
+            assert abs(ctrl_x - max(0, expect - live["ctrl_dx"])) <= 2, \
+                "标题栏控件组应实时跟随左列右缘"
             assert app._list_col.winfo_width() == frozen, \
                 "拖动中真实列冻结（代理之下，松开一次应用）"
         sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
@@ -1074,6 +1085,19 @@ class TestSplitter:
                 assert cl >= col_l - 2, f"{tag}: 子控件左缘越界"
                 assert cr <= col_r + 2, f"{tag}: 子控件右缘越界（被裁剪）"
 
+        # 修复缺陷R14：标题栏控件组（常驻 panel 的字体大小+全屏）
+        # 极限位置完整落在左列内、贴右缘
+        def check_ctrl(tag):
+            app.update_idletasks(); app.update()
+            col_l = app._list_col.winfo_rootx()
+            col_r = col_l + app._list_col.winfo_width()
+            cl = app._list_ctrl_box.winfo_rootx()
+            cr = cl + app._list_ctrl_box.winfo_width()
+            assert cl >= col_l - 2, f"{tag}: 控件组左缘越界"
+            assert cr <= col_r + 2, f"{tag}: 控件组右缘越界（被裁剪）"
+            assert abs(cr - (col_r - 10 * scale)) <= 4, \
+                f"{tag}: 控件组应贴左列右缘（右边距 10）"
+
         # 拖到最左：左列表标题完整可见
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
@@ -1083,6 +1107,7 @@ class TestSplitter:
         app.update()
         check_visible(app._list_col, app._list_head, "最左极限")
         check_visible(app._detail_col, app._detail_head, "最左极限右列")
+        check_ctrl("最左极限")
 
         # 拖到最右：右详情标题完整可见
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
@@ -1093,6 +1118,7 @@ class TestSplitter:
         app.update()
         check_visible(app._detail_col, app._detail_head, "最右极限")
         check_visible(app._list_col, app._list_head, "最右极限左列")
+        check_ctrl("最右极限左列")
 
         # 极限后仍能拖回（不锁死）
         pw = max(1, app._result_panel.winfo_width())
