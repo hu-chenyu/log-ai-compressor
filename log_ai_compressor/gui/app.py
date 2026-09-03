@@ -1674,7 +1674,8 @@ class LogCompressorApp(_make_app_base()):
         self._live_draw_rows(left_c, pw, p)
         self._splitter_live = {
             "clip": left_clip, "left": left_c, "right": right_c,
-            "lw": lw, "sp_w": sp_w, "ph": ph}
+            "lw": lw, "sp_w": sp_w, "ph": ph,
+            "pending": lw, "t0": 0.0, "after_id": None}
         return True
 
     def _splitter_live_end(self) -> None:
@@ -1683,6 +1684,12 @@ class LogCompressorApp(_make_app_base()):
         self._splitter_live = None
         if live is None:
             return
+        after_id = live.get("after_id")
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)   # 取消挂起的节流帧
+            except tk.TclError:
+                pass
         for key in ("right", "clip"):
             try:
                 live[key].destroy()     # 左画布随裁剪框一并销毁
@@ -1857,18 +1864,20 @@ class LogCompressorApp(_make_app_base()):
             self._on_splitter_release(None)
 
     def _on_splitter_drag(self, event) -> None:
-        """拖动：矢量代理只动裁剪框+视口（内容实时延展、零重排）。
+        """拖动：矢量代理 rAF 节流应用（跟手不积压、同帧合成防撕裂）。
 
         修复缺陷R12（拖动错位/拖不回）：x_root 是事件自带的屏幕
         绝对坐标，与事件接收窗口（分隔条内部 canvas / 2px 握点）
         无关。
-        优化（矢量文本代理）：motion 内钳制算术后只做两步——
-        左裁剪框 place_configure(width)（内部固定画布不缩放，文本
-        items 边界自然露出更多 → 内容真延展）+ 右画布 xview_scroll
-        到 lw−left（视口平移使详情文本/竖线整体精确贴住分隔条）。
-        均为 GDI 级原语（实测 ~8ms/帧），不触碰任何真实控件、不
-        触发 CTk/Text 重排，也不调用 update()/update_idletasks()。
-        无代理（经典小列表）时回退真实布局逐 motion（CTk 已冻结）。
+        优化（矢量文本代理 + 节流）：撕裂/卡的根因是 motion 事件
+        ~120Hz 涌入而每帧两窗口（裁剪框 resize + 画布视口滚动）
+        更新被 CPU 抢占拆到不同 VSync 周期（跨帧=撕裂）且事件
+        积压（越拖越卡）。现 motion 只做钳制算术并记录最新位置，
+        按 ≤83fps 节拍统一应用（_live_flush）——两窗口更新集中在
+        同一应用帧发出，DWM 同帧合成一致画面；负载再高也只丢
+        中间帧、永不错乱积压，松开/停止后最后一次 flush 必应用
+        到最终位置（无残差）。无代理（经典小列表）时回退真实
+        布局逐 motion（CTk 已冻结）。
         """
         if not self._splitter_dragging:
             return
@@ -1885,20 +1894,48 @@ class LogCompressorApp(_make_app_base()):
         self._splitter_ratio = left / ctx["pw"]
         live = getattr(self, "_splitter_live", None)
         if live is not None:
-            try:
-                live["clip"].place_configure(width=left)
-                target = live["lw"] - left
-                cur = live["right"].canvasx(0)
-                delta = int(round(target - cur))
-                if delta:
-                    live["right"].xview_scroll(delta, "units")
-            except (tk.TclError, KeyError):
-                pass
+            import time as _time
+            live["pending"] = left
+            now = _time.monotonic()
+            if now - live["t0"] >= 0.012:      # 节流：≤83fps 直接应用
+                live["t0"] = now
+                self._live_flush()
+            elif live["after_id"] is None:     # 兜底帧：应用最新位置
+                try:
+                    live["after_id"] = self.after(12, self._live_flush)
+                except tk.TclError:
+                    pass
             return
         try:
             self._layout_splitter()      # 回退：真实布局逐 motion
         except tk.TclError:
             self._set_ctk_drag_freeze(False)
+
+    def _live_flush(self) -> None:
+        """应用节流的最新拖动位置（裁剪框宽 + 右画布视口滚动）。
+
+        每应用帧仅两个 GDI 级原语（实测合计 ~8ms）：左裁剪框
+        place_configure(width)（内部固定画布不缩放，文本 items
+        边界自然露出更多 → 内容延展）+ 右画布 xview_scroll 到
+        lw−left（视口平移使详情文本/竖线精确贴住分隔条）。不触碰
+        真实控件、不调用 update()/update_idletasks()。
+        """
+        live = getattr(self, "_splitter_live", None)
+        if live is None:
+            return
+        live["after_id"] = None
+        left = live.get("pending")
+        if left is None:
+            return
+        try:
+            live["clip"].place_configure(width=left)
+            target = live["lw"] - left
+            cur = live["right"].canvasx(0)
+            delta = int(round(target - cur))
+            if delta:
+                live["right"].xview_scroll(delta, "units")
+        except (tk.TclError, KeyError):
+            pass
 
     def _on_splitter_release(self, event) -> None:
         """松开：真实布局一次到位 + 销毁代理 + 解除 CTk 冻结。

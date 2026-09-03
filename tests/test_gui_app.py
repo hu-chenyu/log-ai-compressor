@@ -858,6 +858,10 @@ class TestSplitter:
         frozen = app._list_col.winfo_width()
         for dx in (80, 160, 240):
             sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
+            # 拖动为 rAF 节流（≤83fps 节拍应用最新位置）：测试中
+            # motion 间隔远小于节流窗口，手动 flush 应用待应用帧
+            # （真实拖动由节拍器/兜底 after 帧触发，逻辑一致）
+            app._live_flush()
             app.update()
             expect = app._splitter_ratio * pw
             assert abs(live["clip"].winfo_width() - expect) <= 2, \
