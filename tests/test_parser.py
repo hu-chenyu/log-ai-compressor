@@ -233,7 +233,34 @@ class TestInference:
         assert e.message == "login failed"
 
     def test_unstructured_line_level_hint(self, parser):
+        # 修复缺陷R18：FATAL 关键词提示已删除（\bFATAL\b 忽略大小写
+        # 误中 gcc 选项 -Wfatal-errors）—— "terminate called" 不再
+        # 推断为 FATAL（关键词推断最高 ERROR），回退 INFO
         parser.feed("terminate called after throwing an instance", 1)
+        e = parser.flush()
+        assert e.level == "INFO"
+
+    def test_wfatal_errors_flag_not_fatal(self, parser):
+        """修复缺陷R18：gcc 选项 -Wfatal-errors 不判 FATAL（误报根因）。"""
+        parser.feed("[2026-08-30T08:27:07.551Z] /bin/bash ../libtool "
+                    "--tag=CC --mode=compile aarch64-none-linux-gnu-gcc "
+                    "-O2 -Wextra -Wimport -Wfatal-errors -Wformat=2 "
+                    "-c -o libcompat.lo /home/jenkins/x/lib/libcompat.c", 1)
+        e = parser.flush()
+        assert e.level == "INFO", \
+            "编译选项 -Wfatal-errors 不应被误判为致命错误"
+
+    def test_gcc_fatal_error_still_fatal(self, parser):
+        """修复缺陷R18：真实 gcc fatal error 仍判 FATAL（显式级别组）。"""
+        parser.feed("src/main.c:42: fatal error: foo.h: "
+                    "No such file or directory", 1)
+        e = parser.flush()
+        assert e.level == "FATAL", \
+            "gcc 风格 fatal error（显式级别字段）应保留 FATAL 识别"
+
+    def test_explicit_fatal_field_still_fatal(self, parser):
+        """修复缺陷R18：显式级别字段 [FATAL] 仍判 FATAL（不经关键词推断）。"""
+        parser.feed("2024-01-01 10:00:00 FATAL kernel panic - not syncing", 1)
         e = parser.flush()
         assert e.level == "FATAL"
 
