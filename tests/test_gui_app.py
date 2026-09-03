@@ -836,98 +836,98 @@ class TestSplitter:
             "左右列 + 分隔条应占满面板宽"
 
     def test_drag_columns_follow_per_motion(self, app):
-        """优化：真实布局逐 motion 拖动 —— 左右列内容视口实时跟随。
+        """优化：矢量文本代理 —— 内容随容器实时延展（文字露出更多）。
 
-        用户验收核心：拖动中内容随容器实时变化（左列摘要文字随列
-        宽实时延展、右列详情随宽实时换行），不是松开才变。断言左
-        右列真实宽度逐 motion 跟随，且详情框宽度变化量与左列变化
-        量镜像一致（同一几何级联，右列内容视口实时跟随）。
+        用户验收核心：拖动中内容随容器实时变化（摘要文字随列宽
+        露出更多），不是松开才变。矢量代理把可见行绘制为完整文本
+        items，裁剪框变宽时 canvas 边界自然露出更多文字（真延展，
+        非静态截图）。断言：左裁剪框宽逐 motion 实时跟随（= 左列
+        内容视口）、右画布视口实时滚动（详情文本贴住分隔条）、
+        真实列拖动中冻结（松开一次到位）。
         """
+        _run_many_clusters(app)
         app.update()
         sp = app._splitter
         pw = self._pw(app)
-        assert not hasattr(app, "_splitter_ghost"), "指示线方案应已移除"
         assert not hasattr(app, "_splitter_proxy"), "位图代理应已移除"
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
-        prev_l = prev_d = None
+        live = app._splitter_live
+        assert live is not None, "虚拟列表模式应构建矢量文本代理"
+        lw0 = live["lw"]
+        frozen = app._list_col.winfo_width()
         for dx in (80, 160, 240):
             sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
             app.update()
-            left = app._list_col.winfo_width()
-            detail = app._detail_box.winfo_width()
             expect = app._splitter_ratio * pw
-            assert abs(left - expect) <= 8, \
-                "左列宽应逐 motion 实时跟随鼠标"
-            if prev_l is not None:
-                assert abs((left - prev_l) + (detail - prev_d)) <= 4, \
-                    "详情框宽变化量应与左列变化量镜像一致"
-            prev_l, prev_d = left, detail
+            assert abs(live["clip"].winfo_width() - expect) <= 2, \
+                "左裁剪框宽应逐 motion 实时跟随（内容视口延展）"
+            assert abs(live["right"].canvasx(0) - (lw0 - expect)) <= 2, \
+                "右画布视口应实时滚动（详情文本贴住分隔条）"
+            assert app._list_col.winfo_width() == frozen, \
+                "拖动中真实列冻结（代理之下，松开一次应用）"
         sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
         app.update()
+        assert app._splitter_live is None, "释放后代理应销毁"
         assert abs(app._splitter_ratio * pw
                    - app._list_col.winfo_width()) <= 8, \
-            "释放后列宽与最终比例一致"
+            "释放后真实列一次性到最终位置"
 
     def test_drag_freezes_ctk_redraw_cascade(self, app):
-        """优化：拖动期冻结 CTk 重绘级联，松开解除并还原。
+        """优化：回退路径（经典小列表无代理）——按下冻结 CTk 重绘级联。
 
-        实测逐 motion 真实重排单帧 261-315ms（特大字体+200%DPI+57
-        簇）全部来自 CTk 外壳：逐控件 resize 全量 _draw +
-        CTkScrollbar._draw 末尾强制嵌套 update_idletasks 重入级联。
-        按下逐类冻结 _draw（构造期 bind 持有原方法引用，类补丁对
-        _update_dimensions_event 无效，但 _draw 经实例→类查找对存量
-        控件立即生效；内容原生控件不受影响），松开还原为原始方法。
+        虚拟列表模式走矢量代理（真实控件不动，无需冻结）；经典
+        小列表代理不可用，回退真实布局逐 motion，此时按下冻结
+        15 个 CTk 类的 _draw（掐断嵌套 update_idletasks 重入级联），
+        松开还原。
         """
         import customtkinter as _ctk
         app.update()
         sp = app._splitter
         orig_draw = _ctk.CTkBaseClass._draw
         orig_sb_draw = _ctk.CTkScrollbar._draw
+        # 经典模式（无虚拟列表）：代理不可用 → 回退路径
+        assert app._virtual_list is None
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
-        assert app._ctk_freeze_orig is not None, "按下应冻结 CTk 重绘"
-        assert _ctk.CTkBaseClass._draw is not orig_draw, \
-            "CTkBaseClass._draw 应已替换为冻结版"
-        assert _ctk.CTkScrollbar._draw is not orig_sb_draw, \
-            "CTkScrollbar._draw 应已替换为冻结版"
+        assert app._splitter_live is None, "经典模式不应建代理"
+        assert app._ctk_freeze_orig is not None, "回退路径按下应冻结"
+        assert _ctk.CTkBaseClass._draw is not orig_draw
+        assert _ctk.CTkScrollbar._draw is not orig_sb_draw
         sp.event_generate("<B1-Motion>", x=3 + 120, y=40)
         app.update()
         sp.event_generate("<ButtonRelease-1>", x=3 + 120, y=40)
         app.update()
         assert app._ctk_freeze_orig is None, "松开应解除冻结"
-        assert _ctk.CTkBaseClass._draw is orig_draw, \
-            "松开后 CTkBaseClass._draw 应还原"
-        assert _ctk.CTkScrollbar._draw is orig_sb_draw, \
-            "松开后 CTkScrollbar._draw 应还原"
+        assert _ctk.CTkBaseClass._draw is orig_draw
+        assert _ctk.CTkScrollbar._draw is orig_sb_draw
 
     def test_drag_focusout_ends_drag(self, app):
         """兼容性：拖动中窗口失焦 → 结束拖动并应用当前位置。"""
+        _run_many_clusters(app)
         app.update()
         sp = app._splitter
         pw = self._pw(app)
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
+        assert app._splitter_live is not None
         sp.event_generate("<B1-Motion>", x=3 + 160, y=40)
         app.update()
         app.event_generate("<FocusOut>")
         app.update()
         assert not app._splitter_dragging, "失焦应结束拖动"
-        assert app._ctk_freeze_orig is None, "失焦应解除 CTk 冻结"
+        assert app._splitter_live is None, "失焦应销毁代理"
         assert abs(app._splitter_ratio * pw
                    - app._list_col.winfo_width()) <= 8, \
             "失焦应应用当前位置"
 
     def test_drag_realtime_fast_perf(self, app):
-        """优化：拖动同步段性能 —— motion 处理+布局应用 <16ms。
+        """优化：矢量代理拖动性能 —— 单帧（motion+重绘）<24ms（>40fps）。
 
-        真实布局逐 motion：每帧同步段只做钳制算术 + 3 个 place 几
-        何更新（实测 ~0.2ms），内容渲染由 Tk 主循环空闲帧异步合并
-        完成（在 motion 内强制 update 排空会阻塞事件流 → 撕裂，
-        见既有教训）。断言同步段均耗/峰值 <16ms/40ms（事件流永
-        不阻塞）；CTk 重绘冻结由 test_drag_freezes_ctk_redraw_cascade
-        单独守护。渲染全成本随机器负载波动（极端字体+200%DPI+57
-        簇实测 ~140ms），不做墙钟断言。
+        矢量文本代理：每帧仅左裁剪框 place + 右画布视口滚动
+        （GDI 级原语，实测空闲环境 ~8ms/帧），单画布原子渲染无
+        撕裂。测试跳变拖动（0.25↔0.6 大 delta）+ 负载抖动裕量，
+        阈值取 24ms/64ms（仍比真实重排方案 ~140ms 快 6 倍以上）。
         """
         _run_many_clusters(app)
         app.update()
@@ -935,8 +935,9 @@ class TestSplitter:
         sp = app._splitter
         sp.event_generate("<ButtonPress-1>", x=3, y=40)
         app.update()
+        assert app._splitter_live is not None
         pw = self._pw(app)
-        # 预热：首帧冷启动（字体度量缓存 / 首次几何级联）
+        # 预热：首帧冷启动（代理建层 / 首次几何级联）
         for frac in (0.25, 0.6, 0.25):
             sp.event_generate("<B1-Motion>", x=3 + int(pw * frac), y=40)
             app.update()
@@ -944,17 +945,18 @@ class TestSplitter:
         try:
             for i in range(40):
                 frac = 0.25 if i % 2 == 0 else 0.6
-                t0 = time.perf_counter()
                 sp.event_generate("<B1-Motion>",
                                    x=3 + int(pw * frac), y=40)
+                t0 = time.perf_counter()
+                app.update()
                 times.append((time.perf_counter() - t0) * 1000)
         finally:
             sp.event_generate("<ButtonRelease-1>", x=3, y=40)
             app.update()
-        assert sum(times) / len(times) < 16.0, \
-            f"motion 同步段应 <16ms（实际均值 {sum(times) / len(times):.1f}ms）"
-        assert max(times) < 40.0, \
-            f"motion 同步段峰值应 <40ms（实际 {max(times):.1f}ms）"
+        assert sum(times) / len(times) < 24.0, \
+            f"平均单帧应 <24ms（实际均值 {sum(times) / len(times):.1f}ms）"
+        assert max(times) < 64.0, \
+            f"单帧峰值应 <64ms（实际 {max(times):.1f}ms）"
 
     def test_virtual_fast_path_during_drag(self, app):
         """优化：虚拟列表拖动期走快速路径（不重填文本），松开全量同步。
