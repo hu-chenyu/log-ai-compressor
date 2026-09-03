@@ -233,9 +233,8 @@ class TestClusterListWrap:
         first_summary = str(app._cluster_rows[1]["summary"].cget("text"))
         assert "TAIL" in first_summary
         assert len(first_summary) > 100
-        # 行首元信息不包含摘要
-        head_text = str(app._cluster_rows[1]["frame"]
-                        .winfo_children()[0].cget("text"))
+        # 行首元信息不包含摘要（R16 起用行内 head 引用）
+        head_text = str(app._cluster_rows[1]["head"].cget("text"))
         assert "TAIL" not in head_text
 
     def test_summary_single_line_no_wrap(self, app):
@@ -298,13 +297,13 @@ class TestClusterListWrap:
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         app._select_cluster(0)
         app.update()
-        head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        head = app._cluster_rows[0]["head"]
         assert isinstance(head, ctk.CTkLabel)
         # 取 CTkLabel 内部的真实子控件（Canvas / tk.Label）
         internals = head.winfo_children()
         assert internals, "CTkLabel 应有内部子控件"
         # 改点行 1 的头部内部子控件验证选中切换
-        head1 = app._cluster_rows[1]["frame"].winfo_children()[0]
+        head1 = app._cluster_rows[1]["head"]
         for child in head1.winfo_children():
             child.event_generate("<Button-1>")
         app.update()
@@ -396,7 +395,7 @@ class TestClusterListFontAndWidth:
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
         row = app._cluster_rows[0]
-        head = row["frame"].winfo_children()[0]
+        head = row["head"]          # R16 起行内存 head 引用（结构无关）
         inner = [c for c in head.winfo_children()
                  if c.winfo_class() == "Label"][0]
         head_size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
@@ -409,7 +408,7 @@ class TestClusterListFontAndWidth:
     def test_classic_row_uses_enlarged_fonts(self, app):
         """修复R9：经典模式头部使用共享字体对象，摘要渲染字号匹配。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
-        head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        head = app._cluster_rows[0]["head"]
         assert isinstance(head, ctk.CTkLabel)
         assert head.cget("font") is app._font_row_head
         inner = [c for c in head.winfo_children()
@@ -421,10 +420,10 @@ class TestClusterListFontAndWidth:
 
     def test_virtual_row_fonts_match_classic(self, app):
         """修复R9：虚拟模式与经典模式渲染字号完全一致（含 DPI 缩放）。"""
-        # 经典模式先取样
+        # 经典模式先取样（R16 起行内存 head 引用，结构无关取样）
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
-        classic_head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        classic_head = app._cluster_rows[0]["head"]
         inner = [c for c in classic_head.winfo_children()
                  if c.winfo_class() == "Label"][0]
         classic_head_size = tkfont.Font(
@@ -459,8 +458,8 @@ class TestClusterListFontAndWidth:
     def test_fullscreen_rows_use_fs_fonts(self, app):
         """修复R9：全屏列表行实际使用全屏字体（头部 24 / 摘要 20，含缩放）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
-        # 经典头部渲染字号取样（作为 22 号基准）
-        classic_head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        # 经典头部渲染字号取样（作为 22 号基准；R16 起用 head 引用）
+        classic_head = app._cluster_rows[0]["head"]
         c_inner = [c for c in classic_head.winfo_children()
                    if c.winfo_class() == "Label"][0]
         classic_size = int(
@@ -517,7 +516,7 @@ class TestClusterListFontAndWidth:
         assert int(lbl.cget("wraplength")) == 0, "实例行应单行不换行"
         size = int(tkfont.Font(font=lbl.cget("font")).cget("size"))
         # 实例行渲染字号 ≈ 20 号（相对经典 22 号基准同缩放系数）
-        classic = app._cluster_rows[0]["frame"].winfo_children()[0]
+        classic = app._cluster_rows[0]["head"]
         inner = [c for c in classic.winfo_children()
                  if c.winfo_class() == "Label"][0]
         base = int(tkfont.Font(font=inner.cget("font")).cget("size"))
@@ -757,10 +756,10 @@ class TestFontSizeSelector:
             "特大档全屏头部应 round(28×1.3)=36"
         assert app._font_size == "特大"
         assert app._config.get("font_size") == "特大", "档位应已持久化"
-        # 档位切换后行级原生标签重渲染（字号随档位）
+        # 档位切换后行级原生标签重渲染（字号随档位；R16 起用 head 引用）
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
-        head = app._cluster_rows[0]["frame"].winfo_children()[0]
+        head = app._cluster_rows[0]["head"]
         inner = [c for c in head.winfo_children()
                  if c.winfo_class() == "Label"][0]
         size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
@@ -2303,6 +2302,126 @@ class TestVirtualList:
         bar_canvas.event_generate("<ButtonRelease-1>", x=6, y=4)
         app.update()
         assert vl._xsnap is None, "滚动条释放应退出快照模式"
+
+
+class TestClusterExpandMain:
+    """修复缺陷R16：主列表「▶ ×N」就地展开（展示全部 N 个错误位置）。"""
+
+    @staticmethod
+    def _repeat_log(n=8):
+        """同一错误重复 n 次（1 簇 ×N 实例，经典模式小数据）。"""
+        return "".join(
+            f"2024-01-01 09:00:{i:02d} ERROR [db] same failure here\n"
+            for i in range(n))
+
+    def test_expand_virtual_injects_instance_rows(self, app):
+        """虚拟模式：展开后实例作为视图行注入（时间戳+行号+摘要），再点收起。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = app._virtual_list
+        assert vl is not None
+        n0 = len(vl._data)
+        assert all(r[0] == "c" for r in vl._data), "初始应全为簇行"
+        insts = app._displayed[0].instances
+        assert insts, "测试数据应有实例记录"
+        app._toggle_cluster_expand(0)
+        app.update()
+        assert 0 in app._expanded_clusters
+        assert len(vl._data) == n0 + len(insts), "展开后实例行注入视图"
+        # 实例行紧跟所属簇之后，类型/索引正确
+        assert vl._data[0] == ("c", 0)
+        assert all(r == ("i", 0, j)
+                   for j, r in enumerate(vl._data[1:1 + len(insts)]))
+        app._toggle_cluster_expand(0)
+        app.update()
+        assert 0 not in app._expanded_clusters
+        assert len(vl._data) == n0
+        assert all(r[0] == "c" for r in vl._data), "收起后恢复纯簇行"
+
+    def test_expand_virtual_keeps_scroll(self, app):
+        """展开/收起保持滚动位置（不跳回顶部）。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = app._virtual_list
+        vl._canvas.yview_moveto(0.3)
+        app.update()
+        y0 = vl._canvas.canvasy(0)
+        assert y0 > 0
+        app._toggle_cluster_expand(1)
+        app.update()
+        assert abs(vl._canvas.canvasy(0) - y0) <= vl.ROW_HEIGHT, \
+            "展开应保持滚动位置（内容偏移不变）"
+        app._toggle_cluster_expand(1)
+        app.update()
+
+    def test_virtual_instance_row_click_shows_detail(self, app):
+        """虚拟模式：点击实例行 → 右侧详情显示该实例自身（非典型样例）。"""
+        _run_many_clusters(app)
+        app.update()
+        app._toggle_cluster_expand(0)
+        app.update()
+        vl = app._virtual_list
+        target = None
+        for s in vl.slots:
+            idx = s.get("idx", -1)
+            if 0 <= idx < len(vl._data) and vl._data[idx][0] == "i":
+                target = s
+                break
+        assert target is not None, "视口内应渲染出实例行"
+        row = vl._data[target["idx"]]
+        target["summary"].event_generate("<Button-1>", x=3, y=2)
+        app.update()
+        assert app._selected_inst == (row[1], row[2])
+        detail = app._detail_box.get("1.0", "end")
+        assert "【实例详情】" in detail
+        inst = app._displayed[row[1]].instances[row[2]]
+        assert f"行 {inst.line_no}~" in detail
+
+    def test_expand_classic_shows_instances(self, app):
+        """经典模式：行内就地展开全部实例，点击看实例详情，收起销毁。"""
+        _run_paste_analysis(app, self._repeat_log(8))
+        app.update()
+        assert app._virtual_list is None, "小数据应走经典列表"
+        row = next(r for r in app._cluster_rows if r.get("idx") == 0)
+        assert "toggle" in row, "经典行应有「▶ ×N」展开按钮"
+        insts = app._displayed[0].instances
+        app._toggle_cluster_expand(0)
+        app.update()
+        assert 0 in app._classic_expanded
+        state = app._classic_expanded[0]
+        assert len(state["labels"]) >= len(insts), "实例行应全量创建"
+        assert row["toggle"].cget("text").startswith("\u25bc"), \
+            "展开后按钮应为 ▼"
+        # 实例行文本含时间戳与行号
+        first = state["labels"][0]
+        assert "L" in first.cget("text") and insts[0].summary[:8] \
+            in first.cget("text")
+        # 点击首个实例 → 右侧实例详情
+        first.event_generate("<Button-1>", x=3, y=2)
+        app.update()
+        assert app._classic_inst_sel is first
+        detail = app._detail_box.get("1.0", "end")
+        assert "【实例详情】" in detail
+        assert f"行 {insts[0].line_no}~" in detail
+        # 收起
+        app._toggle_cluster_expand(0)
+        app.update()
+        assert 0 not in app._classic_expanded
+        assert not state["area"].winfo_exists(), "收起后实例区应销毁"
+        assert row["toggle"].cget("text").startswith("\u25b6")
+
+    def test_rerender_clears_expand_state(self, app):
+        """重新渲染（过滤/TopN/再分析）后展开与实例选中状态清空。"""
+        _run_many_clusters(app)
+        app.update()
+        app._toggle_cluster_expand(0)
+        app._select_instance(0, 0)
+        app.update()
+        assert app._expanded_clusters and app._selected_inst is not None
+        app._render_cluster_list()
+        app.update()
+        assert not app._expanded_clusters
+        assert app._selected_inst is None
 
 
 class TestFullscreenReuse:
