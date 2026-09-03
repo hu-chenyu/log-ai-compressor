@@ -82,10 +82,12 @@ class EntryFilter:
     def match(self, entry: LogEntry) -> bool:
         """判断条目是否通过过滤。
 
-        修复缺陷R10：取消 FATAL「始终放行」—— FATAL 与 ERROR/FAIL
-        等级别一样受级别勾选控制（勾选才显示，取消即过滤）。
+        修复缺陷R19：FATAL【始终放行】—— UI 复选框已删除（R18 起
+        关键词推断不再产生 FATAL，误判源消除）；真实致命错误（显式
+        [FATAL]/CRITICAL/gcc fatal error/嵌入式 hardfault）无开关、
+        永远显示不被隐藏（回归 R10 之前的安全语义）。
         """
-        if entry.level not in self._levels:
+        if entry.level != "FATAL" and entry.level not in self._levels:
             return False
         text = self._search_text(entry)
         if self._exclude and any(k in text for k in self._exclude):

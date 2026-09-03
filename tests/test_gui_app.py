@@ -616,55 +616,43 @@ class TestClusterListFontAndWidth:
 
 
 # ---------------------------------------------------------------------------
-# 修复R10：FATAL 级别筛选 + 字体大小档位
+# 修复缺陷R19：FATAL 复选框删除（始终放行显示）+ 五级别前移
 # ---------------------------------------------------------------------------
 class TestFatalLevelFilter:
-    def test_fatal_checkbox_first_and_default_checked(self, app):
-        """修复R10：FATAL 复选框存在、位于 ERROR 左侧且默认勾选。"""
+    def test_fatal_checkbox_removed_five_remain(self, app):
+        """修复R19：FATAL 复选框删除，ERROR 居首共五个复选框。"""
         from log_ai_compressor.gui.app import LEVEL_CHECKS
-        assert LEVEL_CHECKS[0] == "FATAL"
-        assert LEVEL_CHECKS[1] == "ERROR"
-        assert "FATAL" in app._level_vars
-        assert app._level_vars["FATAL"].get() is True, "FATAL 应默认勾选"
+        assert LEVEL_CHECKS == ("ERROR", "FAIL", "WARN", "INFO", "DEBUG")
+        assert "FATAL" not in LEVEL_CHECKS
+        assert "FATAL" not in app._level_vars, "FATAL 复选框应已删除"
+        assert len(app._level_vars) == 5, "应只剩五个级别复选框"
         assert app._level_vars["ERROR"].get() is True
+        assert app._level_vars["FAIL"].get() is True
+        assert app._level_vars["WARN"].get() is False
 
-    def test_fatal_unchecked_filters_fatal_errors(self, app):
-        """修复R10：取消 FATAL 勾选后 FATAL 错误被过滤。"""
+    def test_fatal_always_displayed_without_checkbox(self, app):
+        """修复R19：真实 FATAL（显式级别字段）无开关、始终放行显示。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
         levels = [c.level for c in app._displayed]
-        assert "FATAL" in levels, "默认勾选 FATAL 应显示致命错误"
-        # 取消 FATAL 勾选重新分析：FATAL 不再出现
-        app._level_vars["FATAL"].set(False)
-        app._tabview.set("文本粘贴")
-        app._paste_box.delete("1.0", "end")
-        app._paste_box.insert("1.0", SAMPLE_PASTE)
-        app._on_start()
-        deadline = time.time() + 60
-        while time.time() < deadline:
-            app.update()
-            if app._result is not None:
-                break
-            time.sleep(0.02)
-        levels = [c.level for c in app._displayed]
-        assert "FATAL" not in levels, "取消勾选后 FATAL 应被过滤"
-        assert "ERROR" in levels, "ERROR 勾选不受影响"
+        assert "FATAL" in levels, \
+            "显式 [FATAL] 日志应始终显示（无复选框可隐藏致命错误）"
+        assert "ERROR" in levels
 
     def test_fatal_help_tooltip_registered(self, app):
-        """优化：六个级别复选框左侧都有 ⓘ 且悬停说明已登记。"""
+        """优化：五个级别复选框左侧都有 ⓘ 且悬停说明已登记。"""
         tooltips = getattr(app, "_level_tooltips", {})
-        assert len(tooltips) == 6, \
-            f"六个级别都应有 ⓘ 悬停说明（实际 {len(tooltips)} 个）"
-        for level in ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
+        assert len(tooltips) == 5, \
+            f"五个级别都应有 ⓘ 悬停说明（实际 {len(tooltips)} 个）"
+        for level in ("ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
             assert level in tooltips, f"{level} 缺少 ⓘ 悬停说明"
             assert tooltips[level] is not None
+        assert "FATAL" not in tooltips
 
     def test_level_help_texts_match(self, app):
         """优化：每个 ⓘ 的悬停解释文字与其级别精确对应。"""
         from log_ai_compressor.gui.app import _LEVEL_HELP
         expected = {
-            "FATAL": "FATAL：致命错误，程序无法继续运行的严重故障，"
-                     "严重程度高于ERROR",
             "ERROR": "ERROR：错误，程序运行中出现的异常，"
                      "可能导致功能异常但程序仍可继续运行",
             "FAIL": "FAIL：失败，操作或测试未成功完成的结果",
@@ -674,25 +662,28 @@ class TestFatalLevelFilter:
             "DEBUG": "DEBUG：调试，开发调试用的详细信息，"
                      "通常生产环境不显示",
         }
+        assert "FATAL" not in _LEVEL_HELP, "FATAL 说明应随复选框删除"
         for level, text in expected.items():
             tip = app._level_tooltips[level]
             assert tip._current_text() == text, \
                 f"{level} 的解释文字不匹配（实际 {tip._current_text()!r}）"
 
     def test_level_info_icons_left_of_checkboxes(self, app):
-        """优化：六个 ⓘ 位于对应复选框左侧且样式统一（蓝/手型光标）。"""
+        """优化：五个 ⓘ 位于对应复选框左侧且样式统一（蓝/手型光标）。"""
         app.update()
-        level_box = app._level_tooltips["FATAL"]._widget.master
+        level_box = app._level_tooltips["ERROR"]._widget.master
         boxes = {}
         infos = {}
         for child in level_box.winfo_children():
             txt = str(child.cget("text"))
             if txt == "ⓘ":
                 infos[child] = child.winfo_x()
-            elif txt in ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
+            elif txt in ("ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
                 boxes[txt] = child.winfo_x()
-        assert len(infos) == 6, f"应有六个 ⓘ 图标（实际 {len(infos)}）"
-        assert len(boxes) == 6, f"应有六个复选框（实际 {len(boxes)}）"
+            else:
+                assert txt != "FATAL", "FATAL 复选框不应存在"
+        assert len(infos) == 5, f"应有五个 ⓘ 图标（实际 {len(infos)}）"
+        assert len(boxes) == 5, f"应有五个复选框（实际 {len(boxes)}）"
         for icon, ix in infos.items():
             # 每个 ⓘ 紧邻其右侧最近的复选框（同一级别组）
             right = min(bx for bx in boxes.values() if bx > ix - 5)
@@ -704,7 +695,7 @@ class TestFatalLevelFilter:
                 f"ⓘ 颜色应统一为 #3B82F6（实际 {color}）"
 
     def test_fatal_row_color_is_red(self, app):
-        """修复R10：FATAL 错误行文字为红色（比 ERROR 醒目）。"""
+        """修复R19：FATAL 行红色保留（真实致命日志仍醒目区分）。"""
         from log_ai_compressor.gui.app import LogCompressorApp
         from log_ai_compressor.core.models import ErrorCluster
         fatal = ErrorCluster(cluster_id="f", template="t", summary="boom",
@@ -716,10 +707,12 @@ class TestFatalLevelFilter:
             f"FATAL 应用红色（实际 {red}）"
         assert LogCompressorApp._row_color(err) is None
 
-    def test_old_config_upgrades_fatal_checked(self, app):
-        """修复R10：旧配置（无 FATAL）一次性升级默认勾选。"""
-        assert app._config.get("fatal_level_upgraded") is True
-        assert app._level_vars["FATAL"].get() is True
+    def test_old_config_with_fatal_loads_safely(self, app):
+        """修复R19：旧配置（levels 含 FATAL）静默兼容不崩溃。"""
+        # app fixture 的配置由 _restore_config 处理：旧 levels 含
+        # FATAL 时 _level_vars（无 FATAL 键）正常恢复、不 KeyError
+        assert "FATAL" not in app._level_vars
+        assert app._level_vars["ERROR"].get() is True
 
 
 class TestFontSizeSelector:
@@ -1593,7 +1586,7 @@ class TestTooltipR3:
 
     def test_level_tooltip_font_size_enlarged(self, app):
         """优化：级别 ⓘ 悬停说明的字体同样放大到 17~19 号。"""
-        tip = app._level_tooltips["FATAL"]
+        tip = app._level_tooltips["ERROR"]
         tip._show()
         app.update()
         try:
@@ -1616,7 +1609,7 @@ class TestTooltipR3:
         在图标顶边上方（8px 间隙，允许钳位引起的水平平移）。
         """
         app.update()
-        for level in ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
+        for level in ("ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
             icon = app._level_tooltips[level]._widget
             tip = app._level_tooltips[level]
             tip._show()
