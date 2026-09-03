@@ -1041,6 +1041,14 @@ class VirtualClusterList:
         self._sync()
 
 
+# 修复缺陷R21：tab 容器高度跟随当前页（文件导入页只有一行输入
+# 框，原与文本粘贴页共享容器高度（粘贴框 height=100 撑大），大
+# 片空白浪费 —— 按页预设紧凑高度，切换时适配，空间让给结果区。
+# 高度值实测校准（逻辑 px，随 DPI 缩放）：页内容需求 + 按钮区
+# 开销 60 + 4 余量，保证各页内容无裁切（_r21_dbg.py 实测）
+_TAB_PAGE_HEIGHTS = {"文件导入": 126, "文本粘贴": 198, "多文件对比": 202}
+
+
 class LogCompressorApp(_make_app_base()):
     """日志AI压缩器主窗口。"""
 
@@ -1272,7 +1280,10 @@ class LogCompressorApp(_make_app_base()):
 
     # ------------------------------------------------------------------
     def _build_tabs(self) -> None:
-        self._tabview = ctk.CTkTabview(self)
+        # 修复缺陷R21：初始高度按当前页（文件导入），切换时适配
+        self._tabview = ctk.CTkTabview(
+            self, height=_TAB_PAGE_HEIGHTS["文件导入"],
+            command=self._fit_tab_height)
         # 修复缺陷R9：顶部区域压缩（结果区获得更大高度）
         self._tabview.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 2))
         for name in ("文件导入", "文本粘贴", "多文件对比"):
@@ -1280,6 +1291,23 @@ class LogCompressorApp(_make_app_base()):
         self._build_file_tab()
         self._build_text_tab()
         self._build_compare_tab()
+        # 修复缺陷R21（续）：CTkBaseClass 不关闭 grid 传播，容器请求
+        # 高度被最高页内容（文本粘贴框）撑大，显式 height 被忽略，
+        # 文件导入页仍留大片空白 —— 建完全部页后关闭传播，显式
+        # height 才生效（_set_dimensions 会同步 tk.Frame height 选项）
+        self._tabview.grid_propagate(False)
+
+    def _fit_tab_height(self) -> None:
+        """tab 切换：容器高度按当前页内容紧凑适配（修复缺陷R21）。
+
+        CTkTabview 容器高度 = 全部页请求最大值（文本粘贴框撑大），
+        文件导入页因此保留大片空白。切换时按页预设值显式设定
+        height（显式值覆盖内容请求），文件导入页只留一行输入框
+        高度，结果区随之上移显示更多内容。
+        """
+        h = _TAB_PAGE_HEIGHTS.get(self._tabview.get())
+        if h:
+            self._tabview.configure(height=h)
 
     def _build_file_tab(self) -> None:
         tab = self._tabview.tab("文件导入")
