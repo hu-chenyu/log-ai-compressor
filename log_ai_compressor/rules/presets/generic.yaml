@@ -43,13 +43,15 @@ stack_indicators:
   - '^[A-Za-z_][\w.$]*(?:Exception|Error|Fault|Interrupt)\s*[:({]'
 
 # 无级别字段行的关键词级别提示（大小写不敏感）
+# 修复缺陷R18：删除 FATAL 提示 —— \bFATAL\b 忽略大小写会误中 gcc
+# 选项 -Wfatal-errors（fatal 前后为连字符，\b 边界成立），构建日志
+# 的编译命令行被批量误判为致命错误（实测用户日志 84 处、43 个
+# FATAL 簇 100% 为误报，真实 fatal error 0 处）。真实致命错误不受影响：
+# - 显式级别字段（[FATAL]/CRITICAL/PANIC）经 normalize_level 仍 FATAL；
+# - gcc 风格 "foo.c:123: fatal error: ..." 经 gcc_style 的级别组
+#   （fatal error 别名 FATAL）仍 FATAL；
+# - 无结构行含 "fatal error" 凭 \berror\b 判 ERROR（推断最高 ERROR）。
 level_hints:
-  FATAL:
-    - '\bFATAL\b'
-    - '\bPANIC\b'
-    - '\bsegfault\b'
-    - '\bcore dumped\b'
-    - 'terminate called'
   ERROR:
     - '\bERROR\b'
     - '\bERR\b'

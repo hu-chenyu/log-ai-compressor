@@ -195,6 +195,9 @@ class TestCombinedRegexEquivalence:
 
     def test_hint_combined_built_for_generic(self):
         rs = load_ruleset("generic")
-        # 级别提示已按级别合并（FATAL/ERROR/FAIL/WARN 各一条）
-        for level in ("FATAL", "ERROR", "FAIL", "WARN"):
+        # 级别提示已按级别合并（修复缺陷R18：FATAL 提示已删除，
+        # ERROR/FAIL/WARN 各一条）
+        for level in ("ERROR", "FAIL", "WARN"):
             assert level in rs._hint_combined, f"{level} 提示未合并"
+        assert "FATAL" not in rs._hint_combined, \
+            "修复缺陷R18：FATAL 关键词提示应已删除（防 -Wfatal-errors 误判）"
