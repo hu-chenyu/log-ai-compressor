@@ -31,7 +31,6 @@ from log_ai_compressor.constants import (
     DEFAULT_SELECTED_LEVELS,
     DEFAULT_TOP_N,
     HUMAN_NAME,
-    MAX_CONTEXT_LINES,
     MIN_CONTEXT_LINES,
 )
 from log_ai_compressor.core.analysis import simplify_stack
@@ -1390,7 +1389,7 @@ class LogCompressorApp(_make_app_base()):
         self._topn_entry.grid(row=1, column=5, padx=(2, 12), pady=(4, 6),
                               sticky="w")
 
-        # 修复缺陷#5：上下文行数可调节输入框（5~200，默认 50）
+        # 修复缺陷#5：上下文行数可调节输入框（≥5 不限上限，默认 50）
         ctk.CTkLabel(panel, text="上下文行数").grid(
             row=2, column=0, padx=(12, 2), pady=(0, 6), sticky="e")
         self._ctx_entry = ctk.CTkEntry(panel, width=60)
@@ -1399,8 +1398,9 @@ class LogCompressorApp(_make_app_base()):
                              sticky="w")
         # 修复缺陷R11：字体大小选择器移至错误列表标题栏后，提示文字
         # 扩展跨列填充原空白（col 2~5，不留大块空隙）
+        # 修复缺陷R20：提示文案同步「不限上限」
         ctx_hint = ctk.CTkLabel(
-            panel, text="典型样例前后各保留的上下文行数（5~200）")
+            panel, text="典型样例前后各保留的上下文行数（≥5，不限上限）")
         ctx_hint.grid(row=2, column=2, columnspan=4, padx=(2, 12),
                       pady=(0, 6), sticky="w")
         self._muted_labels.append(ctx_hint)
@@ -2538,16 +2538,18 @@ class LogCompressorApp(_make_app_base()):
             return DEFAULT_TOP_N
 
     def _current_context_lines(self) -> int:
-        """读取上下文行数（非法/越界输入自动钳制到 5~200）。
+        """读取上下文行数（非法输入回退默认；下限 5，无上限）。
 
-        修复缺陷#5：原硬编码 5 行，现为 GUI 可调节项。
+        修复缺陷R20：放开 200 上限（用户决策：数字可填任意大）。
+        上限保留下限防 0/负值；过大值的内存代价随「上下文行数
+        ×簇数」线性增长，由用户按需控制。Top N 同理无上限
+        （_current_top_n 本就 max(1, ...)）。
         """
         try:
             value = int(self._ctx_entry.get() or DEFAULT_CONTEXT_LINES)
         except ValueError:
             return DEFAULT_CONTEXT_LINES
-        # 钳制到合法范围（上限防极端值拖慢流式解析）
-        return max(MIN_CONTEXT_LINES, min(MAX_CONTEXT_LINES, value))
+        return max(MIN_CONTEXT_LINES, value)
 
     def _on_rule_changed(self, choice: str) -> None:
         """解析规则切换：状态栏即时展示该规则的适用场景说明。

@@ -187,11 +187,12 @@ CASCADE_KEYWORDS = (
 # 默认参数
 # ---------------------------------------------------------------------------
 # 修复缺陷#5：典型样例前后上下文默认 5 行太少，调整为 50 行；
-# 上限 200（GUI 可调节范围 5~200，防止极端值拖慢流式解析）
+# 修复缺陷R20：放开 200 上限（用户决策：数字可填任意大；MAX_CONTEXT_LINES
+# 常量移除）——过大值的内存代价随「上下文行数×簇数」线性增长，由用户
+# 按需控制；下限保留（GUI 5 行 / 配置 0 行）
 DEFAULT_CONTEXT_LINES = 50     # 典型样例前后上下文行数
-MAX_CONTEXT_LINES = 200        # 上下文行数上限
-MIN_CONTEXT_LINES = 5          # 上下文行数下限
-DEFAULT_TOP_N = 20             # 默认展示 / 导出的 Top N 错误数
+MIN_CONTEXT_LINES = 5          # 上下文行数下限（GUI 输入钳制）
+DEFAULT_TOP_N = 20             # 默认展示 / 导出的 Top N 错误数（无上限）
 CLUSTER_SIMILARITY_THRESHOLD = 0.85   # 聚类编辑距离相似度阈值
 MAX_SIMILARITY_COMPARE = 256          # 相似度回退比较的最大模板数（性能保护）
 TIMESTAMP_CACHE_SIZE = 65536          # 时间戳解析缓存上限（防内存膨胀）

@@ -1406,13 +1406,14 @@ class TestContextLines:
         assert app._ctx_entry.get() == "50"
 
     def test_context_lines_clamped_to_range(self, app):
-        """非法/越界输入自动钳制到 5~200。"""
-        for raw, expected in [("1", 5), ("0", 5), ("-3", 5), ("999", 200),
-                              ("abc", 50), ("", 50), ("8", 8), ("120", 120)]:
+        """修复缺陷R20：下限钳制到 5，无上限（数字可填任意大）。"""
+        for raw, expected in [("1", 5), ("0", 5), ("-3", 5), ("999", 999),
+                              ("99999", 99999), ("abc", 50), ("", 50),
+                              ("8", 8), ("120", 120), ("200", 200)]:
             app._ctx_entry.delete(0, "end")
             app._ctx_entry.insert(0, raw)
             assert app._current_context_lines() == expected, \
-                f"输入 {raw!r} 应钳制为 {expected}"
+                f"输入 {raw!r} 应得 {expected}（下限 5、无上限）"
 
     def test_context_lines_passed_to_pipeline(self, app, monkeypatch):
         """GUI 配置的上下文行数必须传给分析管线。"""

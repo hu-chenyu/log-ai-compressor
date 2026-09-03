@@ -14,7 +14,6 @@ from log_ai_compressor.constants import (
     DEFAULT_CONTEXT_LINES,
     DEFAULT_SELECTED_LEVELS,
     DEFAULT_TOP_N,
-    MAX_CONTEXT_LINES,
 )
 from log_ai_compressor.core.models import LogEntry
 
@@ -61,11 +60,12 @@ class FilterConfig:
             if isinstance(data.get(key), (list, tuple)):
                 setattr(cfg, key, [str(x) for x in data[key]])
         if isinstance(data.get("top_n"), int):
+            # 修复缺陷R20：Top N 无上限（数字可填任意大，≥1）
             cfg.top_n = max(1, data["top_n"])
         if isinstance(data.get("context_lines"), int):
-            # 修复缺陷#5：上限从 50 放宽到 200（GUI 可调节范围 5~200）
-            cfg.context_lines = max(0, min(MAX_CONTEXT_LINES,
-                                           data["context_lines"]))
+            # 修复缺陷R20：上下文行数无上限（数字可填任意大，≥0）；
+            # 过大值内存代价随上下文×簇数线性增长，由用户按需控制
+            cfg.context_lines = max(0, data["context_lines"])
         return cfg
 
 

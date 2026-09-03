@@ -126,13 +126,17 @@ class TestAnalyzeText:
         assert sample.after[-1] == "INFO post-49"
 
     def test_context_lines_config_range_up_to_200(self):
-        """修复缺陷#5：FilterConfig 反序列化上限放宽到 200。"""
-        from log_ai_compressor.constants import MAX_CONTEXT_LINES
+        """修复缺陷R20：FilterConfig 反序列化无上限（数字任意大）。"""
         cfg = FilterConfig.from_dict({"context_lines": 200})
         assert cfg.context_lines == 200
-        # 超上限钳制
+        # 不再钳制上限（200 上限已放开）
         over = FilterConfig.from_dict({"context_lines": 500})
-        assert over.context_lines == MAX_CONTEXT_LINES
+        assert over.context_lines == 500
+        huge = FilterConfig.from_dict({"context_lines": 99999})
+        assert huge.context_lines == 99999
+        # 下限仍钳制到 0
+        neg = FilterConfig.from_dict({"context_lines": -5})
+        assert neg.context_lines == 0
 
     def test_analyze_disabled_keeps_fields_default(self):
         r = analyze_text(SAMPLE_LOG, analyze=False)
