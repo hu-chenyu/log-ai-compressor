@@ -63,11 +63,10 @@ class TestCliDefaults:
         assert args.context == 50
 
     def test_context_max_clamped_by_pipeline(self, tmp_path):
-        """超上限的 --context 经管线钳制到 200（不直接报错）。"""
+        """修复缺陷R20：--context 无上限（9999 原样保留，不再钳到 200）。"""
         from log_ai_compressor.core.filters import FilterConfig
-        from log_ai_compressor.constants import MAX_CONTEXT_LINES
         cfg = FilterConfig.from_dict({"context_lines": 9999})
-        assert cfg.context_lines == MAX_CONTEXT_LINES
+        assert cfg.context_lines == 9999
 
     def test_gui_and_cli_context_same_default(self):
         """GUI 与 CLI 的上下文默认值必须同源（DEFAULT_CONTEXT_LINES）。"""

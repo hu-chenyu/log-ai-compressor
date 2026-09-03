@@ -31,7 +31,6 @@ from log_ai_compressor.constants import (
     DEFAULT_CONTEXT_LINES,
     DEFAULT_TOP_N,
     LEVEL_ORDER,
-    MAX_CONTEXT_LINES,
 )
 from log_ai_compressor.core.comparator import compare_files
 from log_ai_compressor.core.pipeline import analyze_file
@@ -70,7 +69,7 @@ def _add_filter_options(p: argparse.ArgumentParser) -> None:
                    help=f"Top N 错误数（默认 {DEFAULT_TOP_N}）")
     p.add_argument("--context", type=int, default=DEFAULT_CONTEXT_LINES,
                    help=f"典型样例上下文行数（默认 {DEFAULT_CONTEXT_LINES}，"
-                        f"范围 0~{MAX_CONTEXT_LINES}）")
+                        "≥0 不限上限）")
     p.add_argument("--rule", "-r", default=None,
                    help="解析规则：模板名(generic/embedded/jenkins)或 YAML 路径")
 
