@@ -1654,9 +1654,15 @@ class LogCompressorApp(_make_app_base()):
         span = pw + m1 + m2
         right_c.configure(scrollregion=(-m2, 0, pw + m1, cvh),
                           xscrollincrement=1)
-        # 初始视口 0（left=lw 时映射正确）：canvasx(0)=0
-        if span > pw:
-            right_c.xview_moveto(m2 / (span - pw))
+        # 修复缺陷R13（初始视口错位双线）：xview_moveto 的分数语义依赖
+        # 画布当前实际宽度，place 尚未生效时计算结果错误（实测初始
+        # canvasx(0) 错位 573px —— 代理竖线与真实分隔条分离成双竖线
+        # 残影）。改为画布尺寸生效后按【实测视口】自校正归零：像素级
+        # xview_scroll（xscrollincrement=1）无论初始值如何都精确到 0。
+        right_c.update_idletasks()
+        cur0 = right_c.canvasx(0)
+        if cur0:
+            right_c.xview_scroll(int(round(-cur0)), "units")
         self._live_draw_detail(right_c, p, cvh)
         bars = self._live_draw_scrollbars(right_c, lw, sp_w, pw,
                                           cvh, host_h, p)
@@ -1674,41 +1680,77 @@ class LogCompressorApp(_make_app_base()):
                            bg=p["window"], width=hi)
         left_c.place(x=0, y=0, relheight=1)
         self._live_draw_rows(left_c, pw, p)
-        # --- 右标题条：「详情」标题+ⓘ 跟随分隔条 ---
-        # 真实标题栏冻结在原位，拖动后标题与右列内容错位；press 时
-        # 隐藏真实「详情」标题与 ⓘ（grid_remove，release 恢复），
-        # 覆盖条每帧 place(x=left+sp) 跟随（内部画布固定、标题文字
-        # 缩放字体与真实一致）。右端「⛶ 全屏」按钮真实控件保持露出
-        # （覆盖条右缘留 100px）。真实分隔条标题栏段与覆盖条相邻
-        # 不重叠 —— 自然衔接。
+        if not left_c.find_all():
+            # 修复缺陷R13：行池为空/绘制失败时不呈现空白代理（用户
+            # 所见「左列空白不跟随」），销毁已建覆盖层回退真实布局
+            try:
+                right_c.destroy()
+                left_clip.destroy()
+            except tk.TclError:
+                pass
+            return False
+        # --- 右标题条：分隔条标题栏段竖线 + 「详情」标题+ⓘ 跟随 ---
+        # 修复缺陷R13（双线/撕裂/字小/位置左上）：
+        # 1) 真实分隔条 press 时 place_forget 隐藏 —— 每帧窗口操作
+        #    4→3（少一次 SetWindowPos/stacking 变动，跨 VSync 拆分
+        #    概率下降），且竖线只有一个代理实体（内容区段在右画布、
+        #    标题栏段在本条 canvas [0, sp_w]，同色同宽首尾相接），
+        #    物理上根除双竖线残影；
+        # 2) 覆盖条左扩到 x=left（含分隔条区），每帧 move+resize —
+        #    Frame 边缘擦除 + 内部固定宽画布被裁剪，均不重绘；
+        # 3) 标题/ⓘ 字体【克隆真实 Label 实际渲染字体】
+        #    （_font.create_scaled_tuple(_get_widget_scaling())），
+        #    与真实标题逐像素一致 —— 原 _scaled_font(CTkFont(13))
+        #    依赖全局 _font_scale，用户机实测代理标题偏小；
+        # 4) 文字垂直居中（y=host_y/2, anchor="w"）—— 与真实标题
+        #    在标题栏内的纵向位置一致（原 y=4 贴顶偏左上）。
         hidden = []
         try:
-            for w in self._detail_head.winfo_children()[:2]:
+            head_w = self._detail_head.winfo_children()
+            for w in head_w[:2]:
                 w.grid_remove()          # 标题 Label + ⓘ Label
                 hidden.append(w)
         except (tk.TclError, AttributeError, IndexError):
+            head_w = ()
             hidden = []
+        try:
+            f_title = head_w[0]._font.create_scaled_tuple(
+                head_w[0]._get_widget_scaling())
+            f_info = head_w[1]._font.create_scaled_tuple(
+                head_w[1]._get_widget_scaling())
+        except (AttributeError, IndexError, ValueError, tk.TclError):
+            f_title = self._scaled_font(ctk.CTkFont(size=13, weight="bold"))
+            f_info = self._scaled_font(ctk.CTkFont(size=14, weight="bold"))
+        tbar_w = max(1, pw - lo - 100)   # 最宽值（拖左时右缘留 100px）
         tbar = tk.Frame(panel, bg=p["card"], bd=0, highlightthickness=0,
                         cursor="sb_h_double_arrow")
-        tbar.place(x=lw + sp_w, y=0,
-                   width=max(1, pw - lw - sp_w - 100), height=host_y)
+        tbar.place(x=lw, y=0, width=max(1, pw - lw - 100), height=host_y)
         tbar_c = tk.Canvas(tbar, bd=0, highlightthickness=0, bg=p["card"],
-                           width=max(1, pw - lo))
+                           width=tbar_w)
         tbar_c.place(x=0, y=0, relheight=1)
-        f_title = self._scaled_font(ctk.CTkFont(size=13, weight="bold"))
-        f_info = self._scaled_font(ctk.CTkFont(size=14, weight="bold"))
+        # 分隔条标题栏段竖线（与右画布内容区段同色同宽、y 向相接）
+        tbar_c.create_rectangle(0, 0, sp_w, host_y,
+                                fill=p["row_selected"], width=0)
         title = "详情（典型样例 · 上下文 · 降噪堆栈）"
-        tbar_c.create_text(10, 4, anchor="nw", font=f_title,
+        mid_y = host_y / 2
+        tbar_c.create_text(sp_w + 10, mid_y, anchor="w", font=f_title,
                            fill=p["row_text"], text=title)
         import tkinter.font as _tkfont
         tw = _tkfont.Font(font=f_title).measure(title)
-        tbar_c.create_text(10 + tw + 4, 4, anchor="nw", font=f_info,
-                           fill="#3B82F6", text="ⓘ")
+        tbar_c.create_text(sp_w + 10 + tw + 4, mid_y, anchor="w",
+                           font=f_info, fill="#3B82F6", text="ⓘ")
+        # 隐藏真实分隔条（代理竖线全权呈现；release/dblclick 经
+        # _layout_splitter 重新 place 恢复显示，位置一致无跳变）
+        try:
+            self._splitter.place_forget()
+        except tk.TclError:
+            pass
         self._splitter_live = {
             "clip": left_clip, "left": left_c, "right": right_c,
             "lw": lw, "sp_w": sp_w, "ph": ph, "pw": pw, "bars": bars,
             "lo": lo, "tbar": tbar, "tbar_c": tbar_c, "hidden": hidden,
             "pending": lw, "t0": 0.0, "after_id": None}
+        self._live_flush()     # 初始帧同步（消除 press 瞬间错位）
         return True
 
     def _splitter_live_end(self) -> None:
@@ -2020,15 +2062,16 @@ class LogCompressorApp(_make_app_base()):
             delta = int(round(shift - cur))
             if delta:
                 right_c.xview_scroll(delta, "units")
-            # 真实分隔条跟随（移动不重绘；标题栏段真实可见）
-            self._splitter.place(relx=left / pw, rely=0, relheight=1)
-            # 右标题条跟随：「详情」标题+ⓘ 贴住分隔条右缘（Frame
-            # move+resize，背景纯色与标题栏一致，内部画布固定）
+            # 修复缺陷R13：真实分隔条已 place_forget（press 时），
+            # 不再逐帧 place —— 每帧窗口操作 4→3，且根除与代理竖线
+            # 的双线残影；竖线由右画布（内容区段）+ tbar（标题栏
+            # 段）两个代理图元呈现。
+            # 右标题条跟随：左缘 x=left（含分隔条区，内部 canvas 在
+            # [0, sp_w] 画竖线），右缘留 100px 给真实「⛶ 全屏」按钮
             tbar = live.get("tbar")
             if tbar is not None:
                 tbar.place_configure(
-                    x=left + sp_w,
-                    width=max(1, pw - left - sp_w - 100))
+                    x=left, width=max(1, pw - left - 100))
             # 屏幕固定滚动条的反向补偿（内容坐标 = 屏幕 + shift）
             bars = live.get("bars") or {}
             B = bars.get("B", 12)
@@ -2090,12 +2133,15 @@ class LogCompressorApp(_make_app_base()):
         self._splitter_drag_ctx = None
         self._splitter_drag_mins = None
         self.unbind("<FocusOut>")
+        self._splitter_ratio = _SPLITTER_DEFAULT_RATIO
+        # 修复缺陷R13：先真实布局（_layout_splitter 重新 place 被
+        # place_forget 的真实分隔条，三列在代理之下一次到位），再
+        # 销毁代理 —— 与 release 顺序一致，恢复无跳变
+        self._layout_splitter()
         self._splitter_live_end()
         self._set_ctk_drag_freeze(False)
         if self._virtual_list is not None:
             self._virtual_list.set_splitter_drag(False)
-        self._splitter_ratio = _SPLITTER_DEFAULT_RATIO
-        self._layout_splitter()
         try:
             self._result_panel.update_idletasks()
         except (tk.TclError, AttributeError):
