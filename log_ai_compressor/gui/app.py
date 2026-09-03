@@ -1127,6 +1127,13 @@ class LogCompressorApp(_make_app_base()):
         except (TypeError, ValueError):
             r = _SPLITTER_DEFAULT_RATIO
         self._splitter_ratio = min(max(r, 0.05), 0.95)
+        # 修复缺陷R17：全屏列表窗口分隔条比例（独立于主界面持久化）
+        try:
+            r_fs = float(self._config.get("fs_splitter_ratio",
+                                          _SPLITTER_DEFAULT_RATIO))
+        except (TypeError, ValueError):
+            r_fs = _SPLITTER_DEFAULT_RATIO
+        self._fs_splitter_ratio = min(max(r_fs, 0.05), 0.95)
 
         self._build_ui()
         self._apply_palette()
@@ -2140,9 +2147,11 @@ class LogCompressorApp(_make_app_base()):
                 for cls in self._ctk_freeze_orig:
                     cls._draw = _ctk_draw_noop
                 # 尺寸快照：松开时只补绘拖动期尺寸变化的控件
+                # 修复缺陷R17：遍历根窗口（含全屏 Toplevel 子树 —
+                # 全屏分隔条回退路径冻结时其 CTk 控件也在冻结范围）
                 self._ctk_dims_snapshot = {
                     w: (w._current_width, w._current_height)
-                    for w in self._iter_ctk_widgets(self._result_panel)
+                    for w in self._iter_ctk_widgets(self)
                     if isinstance(w, ctk.CTkBaseClass)}
         else:
             saved = getattr(self, "_ctk_freeze_orig", None)
@@ -2160,7 +2169,8 @@ class LogCompressorApp(_make_app_base()):
         """
         snap = getattr(self, "_ctk_dims_snapshot", None) or {}
         try:
-            for w in self._iter_ctk_widgets(self._result_panel):
+            # 修复缺陷R17：遍历根窗口（含全屏 Toplevel 子树）
+            for w in self._iter_ctk_widgets(self):
                 if not isinstance(w, ctk.CTkBaseClass):
                     continue
                 old = snap.get(w)
@@ -2509,6 +2519,8 @@ class LogCompressorApp(_make_app_base()):
             "font_size": self._font_size,
             # 修复缺陷R12：分隔条位置持久化（左右宽度比例）
             "splitter_ratio": self._splitter_ratio,
+            # 修复缺陷R17：全屏列表窗口分隔条位置持久化
+            "fs_splitter_ratio": self._fs_splitter_ratio,
             "fatal_level_upgraded": self._config.get(
                 "fatal_level_upgraded", False),
             "window": {"width": self.winfo_width(),
@@ -4087,30 +4099,45 @@ class LogCompressorApp(_make_app_base()):
         # ---------------- 常规模式：左右分栏 ----------------
         body = ctk.CTkFrame(win, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-        body.grid_columnconfigure(0, weight=2)
-        body.grid_columnconfigure(1, weight=3)
-        body.grid_rowconfigure(0, weight=1)
+        # 修复缺陷R17：左右分栏改 place 比例布局 + 可拖分隔条（与主
+        # 界面同一套交互：实时矢量代理拖动/双击复位 2:3/位置持久化
+        # fs_splitter_ratio/最小宽度钳制/悬停高亮）
+        fs_list_col = ctk.CTkFrame(body, fg_color="transparent")
+        fs_detail_col = ctk.CTkFrame(body, fg_color="transparent")
+        for col in (fs_list_col, fs_detail_col):
+            col.grid_columnconfigure(0, weight=1)
+        fs_list_col.grid_rowconfigure(0, weight=1)
+        fs_detail_col.grid_rowconfigure(1, weight=1)
+        self._fs_body = body
+        self._fs_list_col = fs_list_col
+        self._fs_detail_col = fs_detail_col
 
-        list_area = ctk.CTkScrollableFrame(body, width=520)
-        # 修复缺陷R9：sticky 补 e —— 原缺失导致全屏左列仅 520px 固定宽
+        list_area = ctk.CTkScrollableFrame(fs_list_col, width=520)
         list_area.grid(row=0, column=0, sticky="nsew", padx=(6, 3))
+        self._fs_list_area = list_area
         # 修复缺陷R9：全屏列表水平滚动条（摘要单行完整显示）
         fs_hbar = self._make_hscroll(list_area)
         fs_hbar.grid(row=1, column=0, sticky="ew", padx=(6, 3))
+        self._fs_hbar = fs_hbar
 
         # 右侧详情面板（修复缺陷R4：点击簇/实例即时联动）
-        detail_head = ctk.CTkFrame(body, fg_color="transparent")
-        detail_head.grid(row=0, column=1, sticky="new", padx=(3, 6))
+        detail_head = ctk.CTkFrame(fs_detail_col, fg_color="transparent")
+        detail_head.grid(row=0, column=0, sticky="new", padx=(3, 6))
+        self._fs_detail_head = detail_head
         # 修复缺陷R10：全屏详情面板字体放大（正文 18，标题随行放大）
         ctk.CTkLabel(detail_head, text="详情（簇典型样例 / 实例原始日志）",
                      font=ctk.CTkFont(size=15, weight="bold")).pack(
             side="left", pady=(4, 2))
         fs_detail = ctk.CTkTextbox(
-            body, font=ctk.CTkFont(family="Consolas",
-                                   size=self._font_px(18)),
+            fs_detail_col, font=ctk.CTkFont(family="Consolas",
+                                            size=self._font_px(18)),
             wrap="none")
-        fs_detail.grid(row=0, column=1, sticky="nsew", padx=(3, 6),
-                       pady=(26, 0))
+        fs_detail.grid(row=1, column=0, sticky="nsew", padx=(3, 6))
+        self._fs_list_detail = fs_detail
+        # 分隔条与比例布局（构建即按持久化比例就位）
+        self._build_fs_splitter(body)
+        body.bind("<Configure>", lambda e: self._fs_layout_splitter())
+        self._fs_layout_splitter()
         # 详情高亮标签（与主面板同一套配色，修复缺陷R5）
         # 修复缺陷R10：全屏详情大字号标签（摘要 20 / 元信息 16 / 栈帧 18）
         self._apply_detail_tags(fs_detail, big=True)
@@ -4118,6 +4145,11 @@ class LogCompressorApp(_make_app_base()):
         fs_rows: List[dict] = []
         render_jobs: List[str] = []        # 分批渲染的挂起任务（重过滤时取消）
         expanded: Dict[int, dict] = {}     # idx -> 展开状态（实例标签等）
+        # 修复缺陷R17：行/展开状态实例化（分隔条拖动代理采集可见行
+        # 用；render/toggle_expand 原地 clear/update 同一对象，引用
+        # 天然同步）
+        self._fs_rows = fs_rows
+        self._fs_expanded = expanded
         p = self._palette()
         inst_bg = p["row_hover"]           # 实例行底色（与簇行区分）
         selected_inst: Dict[str, object] = {"label": None}
@@ -4336,6 +4368,570 @@ class LogCompressorApp(_make_app_base()):
                              self._current_top_n())
         render()
         return win
+
+    # ------------------------------------------------------------------
+    # 修复缺陷R17：全屏列表窗口 列表 | 详情 可拖动分隔条
+    # （与主界面同一套：place 比例布局 + 矢量文本代理实时拖动 +
+    # 双击复位 + 位置持久化 + 最小宽度钳制 + 悬停高亮）
+    # ------------------------------------------------------------------
+    def _build_fs_splitter(self, body) -> None:
+        """构建全屏分隔条（6px 圆角条 + 三握点 + ↔ 光标）。"""
+        p = self._palette()
+        self._fs_dragging = False
+        self._fs_drag_ctx = None
+        self._fs_live = None
+        sp = ctk.CTkFrame(body, width=_SPLITTER_WIDTH, corner_radius=3,
+                          fg_color=p["splitter"], cursor="sb_h_double_arrow")
+        self._fs_splitter = sp
+        dots = []
+        for dy in (-8, 0, 8):
+            dot = tk.Frame(sp, width=2, height=2, bd=0,
+                           highlightthickness=0, bg=p["splitter_grip"],
+                           cursor="sb_h_double_arrow")
+            dot.place(relx=0.5, rely=0.5, y=dy, anchor="center")
+            dots.append(dot)
+        self._fs_splitter_dots = dots
+        for target in [sp] + dots:
+            target.bind("<ButtonPress-1>", self._on_fs_press)
+            target.bind("<B1-Motion>", self._on_fs_drag)
+            target.bind("<ButtonRelease-1>", self._on_fs_release)
+            target.bind("<Double-Button-1>", self._on_fs_dblclick)
+            target.bind("<Enter>", lambda e: self._fs_hover(True))
+            target.bind("<Leave>", lambda e: self._fs_hover(False))
+        # CTkFrame.bind 实际注册在内部 canvas；外层 tk.Frame 再绑一份
+        # （event_generate 直发外层路径也能触发，同主界面）
+        for seq, handler in (
+                ("<ButtonPress-1>", self._on_fs_press),
+                ("<B1-Motion>", self._on_fs_drag),
+                ("<ButtonRelease-1>", self._on_fs_release),
+                ("<Double-Button-1>", self._on_fs_dblclick)):
+            tk.Frame.bind(sp, seq, handler)
+
+    def _fs_hover(self, hovered: bool) -> None:
+        """悬停/拖动高亮（选中蓝，提示可拖动）。"""
+        if self._fs_dragging and not hovered:
+            return
+        try:
+            p = self._palette()
+            self._fs_splitter.configure(
+                fg_color=p["row_selected"] if hovered else p["splitter"])
+        except (tk.TclError, ValueError, AttributeError):
+            pass
+
+    def _fs_min_widths(self):
+        """全屏左右列最小宽度（左列兜底 / 右列详情标题实测+余量）。"""
+        scale = max(1.0, getattr(self, "_font_scale", 1.0))
+        left_min = 300 * scale
+        try:
+            right_min = max(300 * scale,
+                            self._fs_detail_head.winfo_reqwidth()
+                            + 20 * scale)
+        except (tk.TclError, AttributeError):
+            right_min = 300 * scale
+        return left_min, right_min
+
+    def _fs_layout_splitter(self) -> None:
+        """全屏左右列与分隔条按比例 place 布局（全部 rel 参数）。
+
+        与主界面 _layout_splitter 同一模式：relx/relwidth 比例参数
+        天然免疫 CTk 像素缩放（高 DPI 不错位）；最小宽度钳制；面板
+        过窄时按比例铺满但不污染保存的比例。
+        """
+        body = getattr(self, "_fs_body", None)
+        sp = getattr(self, "_fs_splitter", None)
+        if body is None or sp is None:
+            return
+        try:
+            pw = body.winfo_width()
+        except tk.TclError:
+            return
+        if pw <= 2:
+            return
+        scale = max(1.0, getattr(self, "_font_scale", 1.0))
+        sp_w = _SPLITTER_WIDTH * scale
+        cached = getattr(self, "_fs_drag_mins", None)
+        if cached is not None:
+            left_min, right_min = cached
+        else:
+            left_min, right_min = self._fs_min_widths()
+        r = self._fs_splitter_ratio
+        if pw < left_min + right_min + sp_w:
+            sp_r = sp_w / max(1, pw)
+            self._fs_list_col.place(relx=0, rely=0, relwidth=r,
+                                    relheight=1)
+            sp.place(relx=r, rely=0, relheight=1)
+            self._fs_detail_col.place(relx=min(1.0, r + sp_r), rely=0,
+                                      relwidth=max(0.0, 1 - r - sp_r),
+                                      relheight=1)
+            return
+        lo_r = left_min / pw
+        hi_r = 1 - (right_min + sp_w) / pw
+        r = min(max(r, lo_r), hi_r)
+        self._fs_splitter_ratio = r
+        sp_r = sp_w / pw
+        self._fs_list_col.place(relx=0, rely=0, relwidth=r, relheight=1)
+        sp.place(relx=r, rely=0, relheight=1)
+        self._fs_detail_col.place(relx=r + sp_r, rely=0,
+                                  relwidth=max(0.0, 1 - r - sp_r),
+                                  relheight=1)
+
+    def _on_fs_press(self, _event) -> None:
+        """按下：缓存拖动几何 + 构建矢量文本代理（回退真实布局+冻结）。"""
+        self._fs_dragging = True
+        self._fs_hover(True)
+        body = self._fs_body
+        scale = max(1.0, getattr(self, "_font_scale", 1.0))
+        sp_w = _SPLITTER_WIDTH * scale
+        left_min, right_min = self._fs_min_widths()
+        try:
+            pw = max(1, body.winfo_width())
+            rootx = body.winfo_rootx()
+        except (tk.TclError, AttributeError):
+            return
+        lo, hi = left_min, pw - right_min - sp_w
+        self._fs_drag_ctx = {"pw": pw, "rootx": rootx,
+                             "sp_w": sp_w, "lo": lo, "hi": hi}
+        self._fs_drag_mins = (left_min, right_min)
+        if hi >= lo:
+            if not self._fs_live_begin():
+                # 回退：真实布局逐 motion（需冻结 CTk 重绘级联）
+                self._set_ctk_drag_freeze(True)
+        win = self._fs_list_win
+        if win is not None:
+            try:
+                win.bind("<FocusOut>", self._on_fs_focusout)
+            except tk.TclError:
+                pass
+
+    def _on_fs_focusout(self, _event) -> None:
+        """拖动中窗口失焦：结束拖动并应用当前位置。"""
+        if self._fs_dragging:
+            self._on_fs_release(None)
+
+    def _on_fs_drag(self, event) -> None:
+        """拖动：rAF 节流应用（motion 只记位置，节拍统一 flush）。"""
+        if not self._fs_dragging:
+            return
+        ctx = self._fs_drag_ctx
+        if ctx is None or ctx["hi"] < ctx["lo"]:
+            return
+        try:
+            x = event.x_root - ctx["rootx"] - ctx["sp_w"] // 2
+        except AttributeError:
+            return
+        left = min(max(x, ctx["lo"]), ctx["hi"])
+        self._fs_splitter_ratio = left / ctx["pw"]
+        live = self._fs_live
+        if live is not None:
+            import time as _time
+            live["pending"] = left
+            now = _time.monotonic()
+            if now - live["t0"] >= 0.012:      # 节流：≤83fps 直接应用
+                live["t0"] = now
+                self._fs_live_flush()
+            elif live["after_id"] is None:     # 兜底帧：应用最新位置
+                try:
+                    live["after_id"] = self.after(12, self._fs_live_flush)
+                except tk.TclError:
+                    pass
+            return
+        try:
+            self._fs_layout_splitter()      # 回退：真实布局逐 motion
+        except tk.TclError:
+            self._set_ctk_drag_freeze(False)
+
+    def _on_fs_release(self, _event) -> None:
+        """松开：真实布局一次到位 + 销毁代理 + 解除冻结 + 持久化。"""
+        if not self._fs_dragging:
+            return
+        self._fs_dragging = False
+        self._fs_hover(False)
+        self._fs_drag_ctx = None
+        self._fs_drag_mins = None
+        win = self._fs_list_win
+        if win is not None:
+            try:
+                win.unbind("<FocusOut>")
+            except tk.TclError:
+                pass
+        self._fs_layout_splitter()
+        try:
+            self._fs_body.update_idletasks()
+        except (tk.TclError, AttributeError):
+            pass
+        self._fs_live_end()
+        self._set_ctk_drag_freeze(False)
+        self._refresh_ctk_chrome()
+        self._save_config()
+
+    def _on_fs_dblclick(self, _event) -> None:
+        """双击恢复默认比例（2:3）。"""
+        self._fs_dragging = False
+        self._fs_drag_ctx = None
+        self._fs_drag_mins = None
+        win = self._fs_list_win
+        if win is not None:
+            try:
+                win.unbind("<FocusOut>")
+            except tk.TclError:
+                pass
+        self._fs_splitter_ratio = _SPLITTER_DEFAULT_RATIO
+        self._fs_layout_splitter()
+        self._fs_live_end()
+        self._set_ctk_drag_freeze(False)
+        try:
+            self._fs_body.update_idletasks()
+        except (tk.TclError, AttributeError):
+            pass
+        self._refresh_ctk_chrome()
+        self._save_config()
+
+    def _fs_live_begin(self) -> bool:
+        """全屏矢量文本代理（与主界面同一骨架，R17）。
+
+        - 右画布：固定全幅 + 视口滚动（详情文本/竖线/滚动条近似在
+          面板像素坐标系，随视口平移贴住分隔条）；
+        - 左裁剪框：可变宽 Frame + 固定宽左画布，可见列表内容按
+          【真实控件当前位置/字体/颜色/文本】采集绘制为文本 items
+          —— 行结构无关（簇行 toggle/标题/摘要/实例区/选中底色）
+          天然逐像素保真；裁剪框边界移动自然露出更多 = 内容真延展；
+        - 右标题条：「详情」标题跟随（真实标题 pack_forget，代理
+          近似；右端无按钮，覆盖到面板右缘）。
+        返回 False = 代理不可用（布局未完成/无内容）→ 回退真实布局。
+        """
+        body = self._fs_body
+        ctx = self._fs_drag_ctx or {}
+        pw = ctx.get("pw") or max(1, body.winfo_width())
+        sp_w = ctx.get("sp_w") or _SPLITTER_WIDTH
+        lo, hi = ctx.get("lo", 0), ctx.get("hi", pw)
+        try:
+            body.update_idletasks()
+            ph = body.winfo_height()
+            lw = self._fs_list_col.winfo_width()
+            if min(pw, ph, lw) <= 2 or pw - lw - sp_w <= 2:
+                return False
+        except tk.TclError:
+            return False
+        p = self._palette()
+        hi = max(hi, lw)
+        # 修复缺陷R17：代理底色取真实控件实际色（全屏窗口未登记调色
+        # 板角色，p["card"]/p["window"] 与 CTk 默认底色有色差 ——
+        # 拖动中整幅变色、松开跳回）；transparent 容器回退到窗口底色
+        def actual_bg(widget, fallback: str) -> str:
+            try:
+                c = widget.cget("fg_color")
+                if isinstance(c, str) and c == "transparent":
+                    raise ValueError
+                return self._resolve_row_color(c) or fallback
+            except (tk.TclError, ValueError, AttributeError):
+                try:
+                    c = self._fs_list_win.cget("fg_color")
+                    return self._resolve_row_color(c) or fallback
+                except (tk.TclError, ValueError, AttributeError):
+                    return fallback
+        right_bg = actual_bg(self._fs_list_detail, p["card"])
+        left_bg = actual_bg(self._fs_list_area, p["window"])
+        # --- 右画布：全幅 + 视口滚动 ---
+        right_c = tk.Canvas(body, bd=0, highlightthickness=0,
+                            bg=right_bg, cursor="sb_h_double_arrow")
+        right_c.place(x=0, y=0, relwidth=1, relheight=1)
+        m2 = max(0, hi - lw)
+        m1 = max(0, lw - lo)
+        right_c.configure(scrollregion=(-m2, 0, pw + m1, ph),
+                          xscrollincrement=1)
+        # 初始视口自校正精确归零（同主界面 R13 修复）
+        right_c.update_idletasks()
+        cur0 = right_c.canvasx(0)
+        if cur0:
+            right_c.xview_scroll(int(round(-cur0)), "units")
+        self._fs_live_draw_detail(right_c, p, ph)
+        bars = self._fs_live_draw_scrollbars(right_c, lw, pw, ph, p)
+        # 分隔条竖线：固定内容坐标 [lw, lw+sp]，随视口贴住分隔条
+        right_c.create_rectangle(lw, 0, lw + sp_w, ph,
+                                 fill=p["row_selected"], width=0)
+        # --- 左裁剪框 + 固定宽左画布（列表 Label 采集绘制） ---
+        left_clip = tk.Frame(body, bg=left_bg, bd=0,
+                             highlightthickness=0,
+                             cursor="sb_h_double_arrow")
+        left_clip.place(x=0, y=0, width=lw, relheight=1)
+        left_c = tk.Canvas(left_clip, bd=0, highlightthickness=0,
+                           bg=left_bg, width=hi)
+        left_c.place(x=0, y=0, relheight=1)
+        self._fs_live_draw_list(left_c, p)
+        if not left_c.find_all():
+            try:
+                right_c.destroy()
+                left_clip.destroy()
+            except tk.TclError:
+                pass
+            return False
+        # --- 右标题条：「详情」标题跟随 ---
+        hidden = []
+        try:
+            head_w = self._fs_detail_head.winfo_children()
+            if head_w:
+                head_w[0].pack_forget()      # 真实标题（pack 布局）
+                hidden.append(head_w[0])
+        except (tk.TclError, AttributeError, IndexError):
+            head_w = ()
+            hidden = []
+        try:
+            f_title = head_w[0]._font.create_scaled_tuple(
+                head_w[0]._get_widget_scaling())
+        except (AttributeError, IndexError, ValueError, tk.TclError):
+            f_title = self._scaled_font(
+                ctk.CTkFont(size=15, weight="bold"))
+        try:
+            head_h = max(1, self._fs_detail_head.winfo_height())
+        except tk.TclError:
+            head_h = 26
+        tbar = tk.Frame(body, bg=right_bg, bd=0, highlightthickness=0,
+                        cursor="sb_h_double_arrow")
+        tbar.place(x=lw, y=0, width=max(1, pw - lw), height=head_h)
+        tbar_c = tk.Canvas(tbar, bd=0, highlightthickness=0,
+                           bg=right_bg, width=max(1, pw - lo))
+        tbar_c.place(x=0, y=0, relheight=1)
+        tbar_c.create_rectangle(0, 0, sp_w, head_h,
+                                fill=p["row_selected"], width=0)
+        tbar_c.create_text(sp_w + 6, head_h / 2, anchor="w",
+                           font=f_title, fill=p["row_text"],
+                           text="详情（簇典型样例 / 实例原始日志）")
+        # 隐藏真实分隔条（代理竖线全权呈现；release 经布局恢复）
+        try:
+            self._fs_splitter.place_forget()
+        except tk.TclError:
+            pass
+        self._fs_live = {
+            "clip": left_clip, "left": left_c, "right": right_c,
+            "lw": lw, "sp_w": sp_w, "ph": ph, "pw": pw, "bars": bars,
+            "tbar": tbar, "hidden": hidden,
+            "pending": lw, "t0": 0.0, "after_id": None}
+        self._fs_live_flush()     # 初始帧同步
+        return True
+
+    def _fs_live_end(self) -> None:
+        """销毁全屏矢量文本代理（幂等）。"""
+        live = self._fs_live
+        self._fs_live = None
+        if live is None:
+            return
+        after_id = live.get("after_id")
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        for key in ("right", "clip", "tbar"):
+            try:
+                live[key].destroy()
+            except (tk.TclError, KeyError):
+                pass
+        for w in live.get("hidden", ()):      # 恢复真实「详情」标题
+            try:
+                w.pack(side="left", pady=(4, 2))
+            except tk.TclError:
+                pass
+
+    def _fs_live_flush(self) -> None:
+        """应用节流的最新拖动位置（裁剪框宽 + 视口滚动 + 标题条）。"""
+        live = self._fs_live
+        if live is None:
+            return
+        live["after_id"] = None
+        left = live.get("pending")
+        if left is None:
+            return
+        try:
+            lw, sp_w, pw = live["lw"], live["sp_w"], live["pw"]
+            live["clip"].place_configure(width=left)
+            shift = lw - left               # 视口平移量（内容=屏幕+shift）
+            right_c = live["right"]
+            cur = right_c.canvasx(0)
+            delta = int(round(shift - cur))
+            if delta:
+                right_c.xview_scroll(delta, "units")
+            # 右标题条跟随：左缘 x=left（含分隔条区），右缘到面板右缘
+            tbar = live.get("tbar")
+            if tbar is not None:
+                tbar.place_configure(x=left, width=max(1, pw - left))
+            # 屏幕固定滚动条的反向补偿（内容坐标 = 屏幕 + shift）
+            bars = live.get("bars") or {}
+            B = bars.get("B", 12)
+            if "hslot" in bars:
+                x0, x1 = 10 + shift, left - B + shift
+                coords = right_c.coords(bars["hslot"])
+                right_c.coords(bars["hslot"], x0, coords[1],
+                               x1, coords[3])
+                hx0, hx1 = bars.get("hfrac", (0.0, 1.0))
+                tw = max(16.0, (x1 - x0) * (hx1 - hx0))
+                coords = right_c.coords(bars["hthumb"])
+                right_c.coords(bars["hthumb"], x0 + (x1 - x0) * hx0,
+                               coords[1],
+                               x0 + (x1 - x0) * hx0 + tw, coords[3])
+            if "rslot" in bars:
+                rx0, rx1 = pw - B + shift, pw + shift
+                coords = right_c.coords(bars["rslot"])
+                right_c.coords(bars["rslot"], rx0, coords[1],
+                               rx1, coords[3])
+                ry0, ry1 = bars.get("rfrac", (0.0, 1.0))
+                y_top, y_bot = bars.get("ry", (0.0, 1.0))
+                th0 = y_top + (y_bot - y_top) * ry0
+                th1 = y_top + (y_bot - y_top) * max(ry1, ry0 + 0.08)
+                right_c.coords(bars["rthumb"], rx0 + 2, th0,
+                               rx1 - 2, th1)
+        except (tk.TclError, KeyError, AttributeError):
+            pass
+
+    def _fs_live_draw_list(self, canvas, p) -> None:
+        """左列列表内容：可见 Label/行背景采集绘制（行结构无关保真）。
+
+        遍历 list_area 子树：行 frame / 实例区 frame 画背景矩形；
+        可见 Label 按（面板相对坐标, font, fg, text）画文本 items ——
+        toggle 蓝色/级别红色/选中蓝底/实例缩进全部与真实渲染一致。
+        文本垂直位置按 Label 高与字体行距居中换算（anchor=nw 对齐
+        真实 anchor=w 的渲染位置）。
+        """
+        list_area = getattr(self, "_fs_list_area", None)
+        panel = self._fs_body
+        if list_area is None:
+            return
+        try:
+            px = panel.winfo_rootx()
+            py = panel.winfo_rooty()
+            vx0 = list_area.winfo_rootx()
+            vy0 = list_area.winfo_rooty()
+            vx1 = vx0 + list_area.winfo_width()
+            vy1 = vy0 + list_area.winfo_height()
+        except tk.TclError:
+            return
+        # --- 行背景矩形（簇行 frame + 展开实例区 area） ---
+        def draw_frame_bg(fr) -> None:
+            try:
+                if fr is None or not fr.winfo_ismapped():
+                    return
+                x0 = fr.winfo_rootx() - px
+                y0 = fr.winfo_rooty() - py
+                x1 = x0 + fr.winfo_width()
+                y1 = y0 + fr.winfo_height()
+                if y1 <= vy0 - py or y0 >= vy1 - py:
+                    return
+                canvas.create_rectangle(x0, y0, x1, y1,
+                                        fill=fr.cget("bg"), width=0)
+            except tk.TclError:
+                return
+        for row in self._fs_rows:
+            draw_frame_bg(row.get("frame"))
+        for st in self._fs_expanded.values():
+            draw_frame_bg(st.get("area"))
+        # --- 可见 Label 文本（字体行距缓存，177+ 行只建常数个 Font） ---
+        import tkinter.font as _tkfont
+        lh_cache: dict = {}
+
+        def text_lh(font_str) -> int:
+            lh = lh_cache.get(font_str)
+            if lh is None:
+                try:
+                    lh = max(1, _tkfont.Font(font=font_str)
+                             .metrics("linespace"))
+                except tk.TclError:
+                    lh = 16
+                lh_cache[font_str] = lh
+            return lh
+
+        def walk(w) -> None:
+            try:
+                children = w.winfo_children()
+            except tk.TclError:
+                return
+            for c in children:
+                try:
+                    if c.winfo_class() == "Label":
+                        if not c.winfo_ismapped():
+                            continue
+                        cx0 = c.winfo_rootx()
+                        cy0 = c.winfo_rooty()
+                        cx1 = cx0 + c.winfo_width()
+                        cy1 = cy0 + c.winfo_height()
+                        if cx1 <= vx0 or cx0 >= vx1 or \
+                                cy1 <= vy0 or cy0 >= vy1:
+                            continue
+                        text = c.cget("text")
+                        if not text:
+                            continue
+                        font_str = c.cget("font")
+                        lh = text_lh(font_str)
+                        ty = cy0 + max(0, (cy1 - cy0 - lh) // 2)
+                        canvas.create_text(cx0 - px, ty - py,
+                                           anchor="nw", font=font_str,
+                                           fill=c.cget("fg"), text=text)
+                    else:
+                        walk(c)
+                except tk.TclError:
+                    continue
+        walk(list_area)
+
+    def _fs_live_draw_detail(self, canvas, p, cvh) -> None:
+        """右列详情文本行（全屏详情框当前可见行区间，逐行完整绘制）。"""
+        box = getattr(self, "_fs_list_detail", None)
+        panel = self._fs_body
+        if box is None:
+            return
+        try:
+            tb = box._textbox
+            f = self._scaled_font(box._font)
+            import tkinter.font as _tkfont
+            fm = _tkfont.Font(font=f)
+            lh = max(1, fm.metrics("linespace"))
+            x0 = tb.winfo_rootx() - panel.winfo_rootx() + 4
+            y0 = tb.winfo_rooty() - panel.winfo_rooty() + 2
+            start = int(str(tb.index("@0,0")).split(".")[0])
+            nlines = cvh // lh + 2
+            text = tb.get(f"{start}.0", f"{start + nlines}.end")
+            for i, line in enumerate(text.splitlines()):
+                canvas.create_text(x0, y0 + i * lh, anchor="nw", font=f,
+                                   fill=p["row_text"], text=line)
+        except (tk.TclError, AttributeError, ValueError):
+            pass
+
+    def _fs_live_draw_scrollbars(self, canvas, lw, pw, ph, p) -> dict:
+        """滚动条近似（左列垂直条静态 / 左水平条与右垂直条逐帧补偿）。"""
+        B = 12
+        bars: dict = {}
+        try:
+            grip, slot = p["splitter_grip"], p["splitter"]
+            panel = self._fs_body
+            # 左列垂直条（list_area 内部画布 yview；贴左列右缘，静态）
+            canvas.create_rectangle(lw - B, 0, lw, ph, fill=slot, width=0)
+            pc = self._fs_list_area._parent_canvas
+            y0, y1 = self._vbar_thumb(pc)
+            canvas.create_rectangle(lw - B + 2, ph * y0,
+                                    lw - 2, ph * max(y1, y0 + 0.08),
+                                    fill=grip, width=0)
+            # 左列水平条（fs_hbar 实测 y；屏幕左缘固定 → 每帧补偿）
+            hy = self._fs_hbar.winfo_rooty() - panel.winfo_rooty()
+            hh = max(B, self._fs_hbar.winfo_height())
+            hx0, hx1 = self._hbar_thumb(pc)
+            bars["hslot"] = canvas.create_rectangle(
+                10, hy, lw - B, hy + hh, fill=slot, width=0)
+            bars["hthumb"] = canvas.create_rectangle(
+                10, hy + 2, 60, hy + hh - 2, fill=grip, width=0)
+            bars["hfrac"] = (hx0, hx1)
+            # 右列垂直条（详情框滚动条；屏幕右缘固定 → 每帧补偿）
+            tb = self._fs_list_detail._textbox
+            dy0 = self._fs_list_detail.winfo_rooty() - panel.winfo_rooty()
+            dy1 = dy0 + self._fs_list_detail.winfo_height()
+            bars["rslot"] = canvas.create_rectangle(
+                pw - B, dy0, pw, dy1, fill=slot, width=0)
+            ry0, ry1 = self._vbar_thumb(tb)
+            bars["rthumb"] = canvas.create_rectangle(
+                pw - B + 2, dy0 + 2, pw - 2, dy0 + 40,
+                fill=grip, width=0)
+            bars["rfrac"] = (ry0, ry1)
+            bars["ry"] = (float(dy0), float(dy1))
+            bars["B"] = B
+        except (tk.TclError, AttributeError, KeyError):
+            pass
+        return bars
 
     def _open_compare_fullscreen(self) -> None:
         """对比差异列表全屏（独立窗口，每次新建后销毁）。"""
