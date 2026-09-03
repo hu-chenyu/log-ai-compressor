@@ -863,6 +863,13 @@ class TestSplitter:
         # 修复缺陷R13：真实分隔条 press 时隐藏（竖线全由代理呈现，
         # 每帧窗口操作 4→3，根除双线）
         assert not sp.winfo_ismapped(), "拖动中真实分隔条应隐藏"
+        # 修复缺陷R15：ⓘ 保持真实控件显示（固定在右端全屏按钮左边，
+        # 不随分隔条移动；仅「详情」标题 Label 被隐藏由代理近似）
+        info_lbl = app._detail_head.winfo_children()[1]
+        info_x0 = info_lbl.winfo_rootx()
+        assert info_lbl.winfo_ismapped(), "拖动中 ⓘ 应真实显示"
+        assert not app._detail_head.winfo_children()[0].winfo_ismapped(), \
+            "拖动中真实「详情」标题应隐藏（代理近似）"
         frozen = app._list_col.winfo_width()
         for dx in (80, 160, 240):
             sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
@@ -892,6 +899,9 @@ class TestSplitter:
                       - panel.winfo_rootx())
             assert abs(ctrl_x - max(0, expect - live["ctrl_dx"])) <= 2, \
                 "标题栏控件组应实时跟随左列右缘"
+            # 修复缺陷R15：ⓘ 位置固定（不随分隔条移动）
+            assert info_lbl.winfo_rootx() == info_x0, \
+                "ⓘ 应固定在全屏按钮左边（不随分隔条）"
             assert app._list_col.winfo_width() == frozen, \
                 "拖动中真实列冻结（代理之下，松开一次应用）"
         sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)

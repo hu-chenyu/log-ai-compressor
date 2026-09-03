@@ -1730,7 +1730,7 @@ class LogCompressorApp(_make_app_base()):
             except tk.TclError:
                 pass
             return False
-        # --- 右标题条：分隔条标题栏段竖线 + 「详情」标题+ⓘ 跟随 ---
+        # --- 右标题条：分隔条标题栏段竖线 + 「详情」标题跟随 ---
         # 修复缺陷R13（双线/撕裂/字小/位置左上）：
         # 1) 真实分隔条 press 时 place_forget 隐藏 —— 每帧窗口操作
         #    4→3（少一次 SetWindowPos/stacking 变动，跨 VSync 拆分
@@ -1739,36 +1739,39 @@ class LogCompressorApp(_make_app_base()):
         #    物理上根除双竖线残影；
         # 2) 覆盖条左扩到 x=left（含分隔条区），每帧 move+resize —
         #    Frame 边缘擦除 + 内部固定宽画布被裁剪，均不重绘；
-        # 3) 标题/ⓘ 字体【克隆真实 Label 实际渲染字体】
+        # 3) 标题字体【克隆真实 Label 实际渲染字体】
         #    （_font.create_scaled_tuple(_get_widget_scaling())），
         #    与真实标题逐像素一致 —— 原 _scaled_font(CTkFont(13))
         #    依赖全局 _font_scale，用户机实测代理标题偏小；
         # 4) 文字垂直居中（y=host_y/2, anchor="w"）—— 与真实标题
         #    在标题栏内的纵向位置一致（原 y=4 贴顶偏左上）。
+        # 修复缺陷R15：ⓘ 不隐藏、保持真实控件 —— 正常态 grid column 0
+        # weight=1 拉伸使 ⓘ 固定在右端「⛶ 全屏」按钮左边（位置与分隔
+        # 条无关），真实露出即与正常态逐像素一致且 Tooltip 可用；只
+        # 隐藏标题 Label（它随右列左缘移动，由本条 canvas 近似）。
         hidden = []
         try:
             head_w = self._detail_head.winfo_children()
-            for w in head_w[:2]:
-                w.grid_remove()          # 标题 Label + ⓘ Label
-                hidden.append(w)
+            head_w[0].grid_remove()      # 仅标题 Label
+            hidden.append(head_w[0])
         except (tk.TclError, AttributeError, IndexError):
             head_w = ()
             hidden = []
         try:
             f_title = head_w[0]._font.create_scaled_tuple(
                 head_w[0]._get_widget_scaling())
-            f_info = head_w[1]._font.create_scaled_tuple(
-                head_w[1]._get_widget_scaling())
         except (AttributeError, IndexError, ValueError, tk.TclError):
             f_title = self._scaled_font(ctk.CTkFont(size=13, weight="bold"))
-            f_info = self._scaled_font(ctk.CTkFont(size=14, weight="bold"))
-        # 修复缺陷R14：右端「⛶ 全屏」按钮实测宽+边距作为覆盖条右缘
+        # 修复缺陷R14：右端「ⓘ + ⛶ 全屏」实测总宽+边距作为覆盖条右缘
         # 余量 —— 原固定 100px 在 200% DPI 下小于按钮实际宽（84 逻辑
-        # ×2+padx ≈ 190px），按钮左半被覆盖条吃掉
+        # ×2+padx ≈ 190px），按钮左半被覆盖条吃掉；R15 起 ⓘ 真实露出，
+        # 余量须含 ⓘ 宽度与 grid padx（ⓘ 4 / 按钮 6 / 栏右缘 10）
         scale = max(1.0, getattr(self, "_font_scale", 1.0))
         try:
-            fs_w = int(self._detail_fs_btn.winfo_reqwidth()
-                       + 10 * scale + 6)
+            info_w = head_w[1].winfo_reqwidth() if len(head_w) > 1 \
+                else int(14 * scale)
+            fs_w = int(self._detail_fs_btn.winfo_reqwidth() + info_w
+                       + 20 * scale + 6)
         except (tk.TclError, AttributeError):
             fs_w = 100
         tbar_w = max(1, pw - lo - fs_w)  # 最宽值（拖左时右缘留 fs_w）
@@ -1785,10 +1788,8 @@ class LogCompressorApp(_make_app_base()):
         mid_y = host_y / 2
         tbar_c.create_text(sp_w + 10, mid_y, anchor="w", font=f_title,
                            fill=p["row_text"], text=title)
-        import tkinter.font as _tkfont
-        tw = _tkfont.Font(font=f_title).measure(title)
-        tbar_c.create_text(sp_w + 10 + tw + 4, mid_y, anchor="w",
-                           font=f_info, fill="#3B82F6", text="ⓘ")
+        # 修复缺陷R15：ⓘ 由真实控件呈现（固定在右端全屏按钮左边），
+        # 本条不再绘制近似 ⓘ（原画在标题文字后与正常态布局不符）
         # 隐藏真实分隔条（代理竖线全权呈现；release/dblclick 经
         # _layout_splitter 重新 place 恢复显示，位置一致无跳变）
         try:
