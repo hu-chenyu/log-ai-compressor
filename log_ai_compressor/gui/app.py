@@ -1633,37 +1633,39 @@ class LogCompressorApp(_make_app_base()):
             return False
         p = self._palette()
         hi = max(hi, lw)
-        # --- 右画布：固定全幅 + 视口滚动（内容映射：屏幕 s ↔ 面板
-        # 像素 s + lw − left，详情文本/竖线随视口贴住分隔条） ---
-        right_c = tk.Canvas(panel, bd=0, highlightthickness=0,
-                            bg=p["card"], cursor="sb_h_double_arrow")
-        right_c.place(x=0, y=0, relwidth=1, relheight=1)
-        m2 = max(0, hi - lw)         # 左侧余量（拖右时视口为负）
-        m1 = max(0, lw - lo)         # 右侧余量（拖左时视口越过右缘）
-        span = pw + m1 + m2
-        right_c.configure(scrollregion=(-m2, 0, pw + m1, ph),
-                          xscrollincrement=1)
-        # 初始视口 0（left=lw 时映射正确）：canvasx(0)=0
-        if span > pw:
-            right_c.xview_moveto(m2 / (span - pw))
-        self._live_draw_detail(right_c, p, ph)
-        # 分隔条竖线 + 握点：固定内容坐标 [lw, lw+sp]，随视口平移
-        # 自动出现在屏幕 [left, left+sp]
-        right_c.create_rectangle(lw, 0, lw + sp_w, ph,
-                                 fill=p["row_selected"], width=0)
-        for dy in (-8, 0, 8):
-            right_c.create_rectangle(
-                lw + sp_w / 2 - 1, ph / 2 + dy - 1,
-                lw + sp_w / 2 + 1, ph / 2 + dy + 1,
-                fill=p["splitter_grip"], width=0)
-        # --- 左裁剪框（只覆盖列表区域）+ 固定宽左画布 ---
+        # 列表宿主几何（右画布与左裁剪框共同的内容区起点；标题栏
+        # 区域不覆盖 —— 真实标题栏含字体选择器/全屏按钮/ⓘ 保持
+        # 露出，字体/交互自然正确）
         try:
             host_y = (self._list_host.winfo_rooty()
                       - panel.winfo_rooty())
             host_h = max(1, self._list_host.winfo_height())
         except tk.TclError:
-            right_c.destroy()
             return False
+        # --- 右画布：固定全幅宽、只覆盖内容区（y≥host_y）+ 视口滚动
+        # （内容映射：屏幕 s ↔ 面板像素 s + lw − left，详情文本/竖线/
+        # 左列滚动条随视口贴住分隔条） ---
+        cvh = ph - host_y
+        right_c = tk.Canvas(panel, bd=0, highlightthickness=0,
+                            bg=p["card"], cursor="sb_h_double_arrow")
+        right_c.place(x=0, y=host_y, relwidth=1, height=cvh)
+        m2 = max(0, hi - lw)         # 左侧余量（拖右时视口为负）
+        m1 = max(0, lw - lo)         # 右侧余量（拖左时视口越过右缘）
+        span = pw + m1 + m2
+        right_c.configure(scrollregion=(-m2, 0, pw + m1, cvh),
+                          xscrollincrement=1)
+        # 初始视口 0（left=lw 时映射正确）：canvasx(0)=0
+        if span > pw:
+            right_c.xview_moveto(m2 / (span - pw))
+        self._live_draw_detail(right_c, p, cvh)
+        bars = self._live_draw_scrollbars(right_c, lw, sp_w, pw,
+                                          cvh, host_h, p)
+        # 分隔条竖线：固定内容坐标 [lw, lw+sp]，随视口平移自动出现在
+        # 屏幕 [left, left+sp]（标题栏段由真实分隔条跟随呈现，见
+        # _live_flush 的 splitter place）
+        right_c.create_rectangle(lw, 0, lw + sp_w, cvh,
+                                 fill=p["row_selected"], width=0)
+        # --- 左裁剪框（只覆盖列表区域）+ 固定宽左画布 ---
         left_clip = tk.Frame(panel, bg=p["window"], bd=0,
                              highlightthickness=0,
                              cursor="sb_h_double_arrow")
@@ -1674,7 +1676,7 @@ class LogCompressorApp(_make_app_base()):
         self._live_draw_rows(left_c, pw, p)
         self._splitter_live = {
             "clip": left_clip, "left": left_c, "right": right_c,
-            "lw": lw, "sp_w": sp_w, "ph": ph,
+            "lw": lw, "sp_w": sp_w, "ph": ph, "pw": pw, "bars": bars,
             "pending": lw, "t0": 0.0, "after_id": None}
         return True
 
@@ -1745,47 +1747,89 @@ class LogCompressorApp(_make_app_base()):
                                text=self._clip(cluster.summary,
                                                vl.SUMMARY_CLIP))
 
-    def _live_draw_detail(self, canvas, p, ph) -> None:
-        """右列详情文本行 + 左右标题近似文本（面板像素坐标系）。
+    def _live_draw_detail(self, canvas, p, cvh) -> None:
+        """右列详情文本行（画布坐标系，y0=详情框在内容区的 y）。
 
         详情按行完整绘制（text widget 当前可见行区间），视口平移
-        自然露出更多行尾内容（真实延展）。标题栏以近似文本呈现
-        （拖动中不可交互，松开即恢复真实控件）。
+        自然露出更多行尾内容（真实延展）。字体用 _scaled_font 缩放
+        元组 —— 与真实 textbox 渲染尺寸一致（直接 cget("font") 在
+        高 DPI 下尺寸不可靠）。标题栏由真实控件呈现（不覆盖），
+        此处不画。
         """
         panel = self._result_panel
         try:
-            # 左标题（列表列标题文字近似）
-            lh_x = (self._list_head.winfo_rootx() - panel.winfo_rootx())
-            lh_y = (self._list_head.winfo_rooty() - panel.winfo_rooty())
-            canvas.create_text(lh_x + 10, lh_y + 4, anchor="nw",
-                               font=ctk.CTkFont(size=13, weight="bold"),
-                               fill=p["row_text"],
-                               text="错误分类列表（按优先级降序）")
-            # 右标题（详情列标题文字近似）
-            dh_x = (self._detail_head.winfo_rootx() - panel.winfo_rootx())
-            canvas.create_text(dh_x + 10, lh_y + 4, anchor="nw",
-                               font=ctk.CTkFont(size=13, weight="bold"),
-                               fill=p["row_text"],
-                               text="详情（典型样例 · 上下文 · 降噪堆栈）")
-        except (tk.TclError, AttributeError):
-            pass
-        # 详情文本可见行
-        try:
             tb = self._detail_box._textbox
-            f = tb.cget("font")
+            f = self._scaled_font(self._detail_box._font)
             import tkinter.font as _tkfont
-            fm = _tkfont.Font(font=str(f))
+            fm = _tkfont.Font(font=f)   # 元组经 _stringify 解析（同 _m_head）
             lh = max(1, fm.metrics("linespace"))
             x0 = tb.winfo_rootx() - panel.winfo_rootx() + 4
-            y0 = tb.winfo_rooty() - panel.winfo_rooty() + 2
+            y0 = (tb.winfo_rooty() - panel.winfo_rooty()
+                  - canvas.winfo_y() + 2)
             start = int(str(tb.index("@0,0")).split(".")[0])
-            nlines = ph // lh + 2
+            nlines = cvh // lh + 2
             text = tb.get(f"{start}.0", f"{start + nlines}.end")
             for i, line in enumerate(text.splitlines()):
                 canvas.create_text(x0, y0 + i * lh, anchor="nw", font=f,
                                    fill=p["row_text"], text=line)
         except (tk.TclError, AttributeError, ValueError):
             pass
+
+    def _live_draw_scrollbars(self, canvas, lw, sp_w, pw, cvh,
+                              host_h, p) -> dict:
+        """滚动条近似（槽+滑块矩形），返回需逐帧补偿的 items。
+
+        - 左列垂直条：内容坐标 [lw-B, lw] —— 随视口平移自动贴住
+          左列右缘（同竖线原理），静态；
+        - 左列水平条 / 右列垂直条：屏幕位置固定（左缘/右缘贴面板
+          边缘），视口滚动会带走 —— 每帧 coords 补偿（flush 中）。
+        颜色复用分隔条色系（splitter 槽 / splitter_grip 滑块）。
+        """
+        B = 12                     # 条宽（近似 CTkScrollbar 14 缩放）
+        bars = {}
+        try:
+            grip, slot = p["splitter_grip"], p["splitter"]
+            # 左列垂直条（静态，随视口自动贴左缘）
+            canvas.create_rectangle(lw - B, 0, lw, host_h,
+                                    fill=slot, width=0)
+            y0, y1 = self._vbar_thumb(self._virtual_list._canvas)
+            canvas.create_rectangle(lw - B + 2, host_h * y0,
+                                    lw - 2, host_h * max(y1, y0 + 0.08),
+                                    fill=grip, width=0)
+            # 左列水平条（屏幕左缘固定 → 每帧补偿）
+            hx0, hx1 = self._hbar_thumb(self._virtual_list._canvas)
+            bars["hslot"] = canvas.create_rectangle(
+                10, host_h - B, lw - B, host_h, fill=slot, width=0)
+            bars["hthumb"] = canvas.create_rectangle(
+                10, host_h - B + 2, 60, host_h - 2, fill=grip, width=0)
+            bars["hfrac"] = (hx0, hx1)
+            # 右列垂直条（屏幕右缘固定 → 每帧补偿）
+            bars["rslot"] = canvas.create_rectangle(
+                pw - B, 0, pw, cvh, fill=slot, width=0)
+            ry0, ry1 = self._vbar_thumb(self._detail_box._textbox)
+            bars["rthumb"] = canvas.create_rectangle(
+                pw - B + 2, 2, pw - 2, 40, fill=grip, width=0)
+            bars["rfrac"] = (ry0, ry1)
+            bars["B"] = B
+        except (tk.TclError, AttributeError, KeyError):
+            pass
+        return bars
+
+    @staticmethod
+    def _vbar_thumb(widget) -> tuple:
+        """垂直滚动条滑块区间（yview first/last，异常时全幅）。"""
+        try:
+            return tuple(widget.yview())
+        except (tk.TclError, AttributeError):
+            return (0.0, 1.0)
+
+    @staticmethod
+    def _hbar_thumb(widget) -> tuple:
+        """水平滚动条滑块区间（xview first/last，异常时全幅）。"""
+        try:
+            return tuple(widget.xview())
+        except (tk.TclError, AttributeError):
+            return (0.0, 1.0)
 
     def _iter_ctk_widgets(self, root):
         """深度优先遍历 root 子树的全部控件（含 root，供冻结遍历）。"""
@@ -1912,13 +1956,17 @@ class LogCompressorApp(_make_app_base()):
             self._set_ctk_drag_freeze(False)
 
     def _live_flush(self) -> None:
-        """应用节流的最新拖动位置（裁剪框宽 + 右画布视口滚动）。
+        """应用节流的最新拖动位置（裁剪框宽 + 视口滚动 + 分隔条跟随）。
 
-        每应用帧仅两个 GDI 级原语（实测合计 ~8ms）：左裁剪框
-        place_configure(width)（内部固定画布不缩放，文本 items
-        边界自然露出更多 → 内容延展）+ 右画布 xview_scroll 到
-        lw−left（视口平移使详情文本/竖线精确贴住分隔条）。不触碰
-        真实控件、不调用 update()/update_idletasks()。
+        每应用帧的原语（合计 ~8ms，GDI 级）：
+        1. 左裁剪框 place_configure(width)（内部固定画布不缩放，
+           文本 items 边界自然露出更多 → 内容延展）；
+        2. 右画布 xview_scroll 到 lw−left（视口平移使详情文本/竖线/
+           左列滚动条精确贴住分隔条）；
+        3. 真实分隔条 place(relx) 跟随（纯位置移动不触发重绘 ——
+           标题栏段真实呈现，内容区段被右画布遮住由代理竖线呈现）；
+        4. 左水平条/右垂直条 coords 补偿（屏幕固定元素反向抵消
+           视口平移）。不触碰真实内容控件、不调用 update()。
         """
         live = getattr(self, "_splitter_live", None)
         if live is None:
@@ -1928,13 +1976,41 @@ class LogCompressorApp(_make_app_base()):
         if left is None:
             return
         try:
+            lw, sp_w, pw = live["lw"], live["sp_w"], live["pw"]
             live["clip"].place_configure(width=left)
-            target = live["lw"] - left
-            cur = live["right"].canvasx(0)
-            delta = int(round(target - cur))
+            shift = lw - left               # 视口平移量（内容=屏幕+shift）
+            right_c = live["right"]
+            cur = right_c.canvasx(0)
+            delta = int(round(shift - cur))
             if delta:
-                live["right"].xview_scroll(delta, "units")
-        except (tk.TclError, KeyError):
+                right_c.xview_scroll(delta, "units")
+            # 真实分隔条跟随（移动不重绘；标题栏段真实可见）
+            self._splitter.place(relx=left / pw, rely=0, relheight=1)
+            # 屏幕固定滚动条的反向补偿（内容坐标 = 屏幕 + shift）
+            bars = live.get("bars") or {}
+            B = bars.get("B", 12)
+            if "hslot" in bars:
+                x0, x1 = 10 + shift, left - B + shift
+                right_c.coords(bars["hslot"], x0,
+                               right_c.coords(bars["hslot"])[1],
+                               x1, right_c.coords(bars["hslot"])[3])
+                hx0, hx1 = bars.get("hfrac", (0.0, 1.0))
+                tw = max(16.0, (x1 - x0) * (hx1 - hx0))
+                right_c.coords(bars["hthumb"], x0 + (x1 - x0) * hx0,
+                               right_c.coords(bars["hthumb"])[1],
+                               x0 + (x1 - x0) * hx0 + tw,
+                               right_c.coords(bars["hthumb"])[3])
+            if "rslot" in bars:
+                rx0, rx1 = pw - B + shift, pw + shift
+                right_c.coords(bars["rslot"], rx0, 0, rx1,
+                               right_c.coords(bars["rslot"])[3])
+                ry0, ry1 = bars.get("rfrac", (0.0, 1.0))
+                cvh = right_c.winfo_height()
+                th0 = cvh * ry0
+                th1 = cvh * max(ry1, ry0 + 0.08)
+                right_c.coords(bars["rthumb"], rx0 + 2, th0,
+                               rx1 - 2, th1)
+        except (tk.TclError, KeyError, AttributeError):
             pass
 
     def _on_splitter_release(self, event) -> None:
