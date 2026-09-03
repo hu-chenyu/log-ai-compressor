@@ -1671,7 +1671,7 @@ class LogCompressorApp(_make_app_base()):
         left_c = tk.Canvas(left_clip, bd=0, highlightthickness=0,
                            bg=p["window"], width=hi)
         left_c.place(x=0, y=0, relheight=1)
-        self._live_draw_rows(left_c, host_y, pw, p)
+        self._live_draw_rows(left_c, pw, p)
         self._splitter_live = {
             "clip": left_clip, "left": left_c, "right": right_c,
             "lw": lw, "sp_w": sp_w, "ph": ph}
@@ -1689,23 +1689,27 @@ class LogCompressorApp(_make_app_base()):
             except (tk.TclError, KeyError):
                 pass
 
-    def _live_draw_rows(self, canvas, host_y, pw, p) -> None:
+    def _live_draw_rows(self, canvas, pw, p) -> None:
         """左列可见行 items（标题+摘要完整文本，裁剪框自然延展）。
 
-        行按「面板像素坐标系」绘制（与右画布同一坐标系），y 起点
-        为列表宿主在面板内的偏移 + 行在虚拟列表画布内的 y。文本
-        完整绘制（含水平滚动偏移），裁剪框边界裁剪显示区域。
+        行按【裁剪框坐标系】绘制（左画布 place 在裁剪框内，裁剪框
+        自身已定位于列表宿主 y 处——此处若再加 host_y 会导致内容
+        整体下移一个标题栏高度），y = 行在虚拟列表画布内的 y 减去
+        滚动偏移（= 行在列表宿主内的屏幕 y）。文本完整绘制（含
+        水平滚动偏移），裁剪框边界裁剪显示区域。
         """
         vl = self._virtual_list
         if vl is None or not vl._data:
             return
         states = self._row_states()
         try:
+            # x：裁剪框与面板左缘对齐（x=0）→ 用面板坐标系
             x_base = (vl._canvas.winfo_rootx()
                       - self._result_panel.winfo_rootx())
             scroll_x = vl._canvas.canvasx(0)
+            scroll_y = vl._canvas.canvasy(0)
         except tk.TclError:
-            x_base, scroll_x = 0, 0
+            x_base, scroll_x, scroll_y = 0, 0, 0
         rh = vl.ROW_HEIGHT
         head_lh = vl._m_head.metrics("linespace")
         for slot in vl._slots:
@@ -1716,7 +1720,7 @@ class LogCompressorApp(_make_app_base()):
                 sy = vl._canvas.coords(slot["win"])[1]
             except (tk.TclError, KeyError):
                 continue
-            y = host_y + sy
+            y = sy - scroll_y
             cluster = vl._data[idx]
             if idx == self._selected_row:
                 bg = states["selected"]
