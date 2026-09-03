@@ -79,15 +79,17 @@ def _make_app_base():
 
     return PlainApp
 
-# 修复缺陷R10：级别过滤增加 FATAL（最严重的级别放最前面）
-LEVEL_CHECKS = ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG")
+# 修复缺陷R19：FATAL 复选框删除（R18 起关键词推断不再产生
+# FATAL —— 编译命令行 -Wfatal-errors 误判源已消除；FATAL 级别
+# 本身保留：显式 [FATAL]/CRITICAL/gcc fatal error 仍识别为 FATAL
+# 并【始终放行显示】（致命错误无开关、永远可见，回归安全语义）。
+# 剩余五级别自然前移补齐。
+LEVEL_CHECKS = ("ERROR", "FAIL", "WARN", "INFO", "DEBUG")
 RULE_NAMES = ("generic", "embedded", "jenkins")
 _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
 
-# 优化：六个级别复选框旁的 ⓘ 悬停说明（每个级别对应自己的解释）
+# 优化：五个级别复选框旁的 ⓘ 悬停说明（每个级别对应自己的解释）
 _LEVEL_HELP = {
-    "FATAL": "FATAL：致命错误，程序无法继续运行的严重故障，"
-             "严重程度高于ERROR",
     "ERROR": "ERROR：错误，程序运行中出现的异常，"
              "可能导致功能异常但程序仍可继续运行",
     "FAIL": "FAIL：失败，操作或测试未成功完成的结果",
@@ -1343,17 +1345,16 @@ class LogCompressorApp(_make_app_base()):
 
         ctk.CTkLabel(panel, text="级别过滤", font=ctk.CTkFont(weight="bold")
                      ).grid(row=0, column=0, padx=(12, 4), sticky="w")
-        # 修复缺陷R10：复选框集中容器（FATAL 置首）
-        # 优化：六个级别复选框左侧各挂一个 ⓘ 悬停说明
-        # （原仅 FATAL 右侧一个；样式统一 #3B82F6 + 手型光标 +
-        # 悬停加深，垂直与复选框居中对齐）
+        # 修复缺陷R19：FATAL 复选框已删除（始终放行显示，见 R19 注释）
+        # 优化：五个级别复选框左侧各挂一个 ⓘ 悬停说明
+        # （样式统一 #3B82F6 + 手型光标 + 悬停加深，垂直与复选框居中对齐）
         self._level_vars: Dict[str, tk.BooleanVar] = {}
         self._level_tooltips: Dict[str, Tooltip] = {}
         level_box = ctk.CTkFrame(panel, fg_color="transparent")
         level_box.grid(row=0, column=1, columnspan=6, sticky="w")
         col = 0
         for level in LEVEL_CHECKS:
-            # 修复缺陷R10：默认勾选 FATAL/ERROR/FAIL（FATAL 受控显示）
+            # 默认勾选 ERROR/FAIL（DEFAULT_SELECTED_LEVELS）
             var = tk.BooleanVar(value=level in DEFAULT_SELECTED_LEVELS)
             self._level_vars[level] = var
             # 优化：每个级别复选框左侧 ⓘ（与详情面板 ⓘ 同款蓝色）
@@ -2471,14 +2472,9 @@ class LogCompressorApp(_make_app_base()):
     # ==================================================================
     def _restore_config(self) -> None:
         cfg = self._config
-        # 修复缺陷R10：旧配置一次性升级 —— 新增 FATAL 复选框前 FATAL
-        # 是「始终放行」语义（用户无感知），升级默认勾选保持 FATAL 可见
+        # 修复缺陷R19：FATAL 复选框已删除（始终放行）—— 旧配置中的
+        # FATAL/fatal_level_upgraded 键静默忽略（_level_vars 无 FATAL）
         levels = list(cfg.get("levels") or DEFAULT_SELECTED_LEVELS)
-        if not cfg.get("fatal_level_upgraded"):
-            if "FATAL" not in levels:
-                levels.insert(0, "FATAL")
-            cfg["fatal_level_upgraded"] = True
-            cfg["levels"] = levels
         for level, var in self._level_vars.items():
             var.set(level in levels)
         if cfg.get("include"):
@@ -2521,8 +2517,6 @@ class LogCompressorApp(_make_app_base()):
             "splitter_ratio": self._splitter_ratio,
             # 修复缺陷R17：全屏列表窗口分隔条位置持久化
             "fs_splitter_ratio": self._fs_splitter_ratio,
-            "fatal_level_upgraded": self._config.get(
-                "fatal_level_upgraded", False),
             "window": {"width": self.winfo_width(),
                        "height": self.winfo_height()},
             "last_files": [self._file_entry.get()] +
