@@ -1084,6 +1084,9 @@ class LogCompressorApp(_make_app_base()):
         self._fs_list_refresh = None
         self._fs_list_sig = None
         self._fs_detail_box = None
+        # 修复缺陷R14：档位切换后控件组（含选择器）请求宽度变化，
+        # 重新贴齐左列右缘
+        self._layout_splitter()
         self._save_config()
 
     # ==================================================================
@@ -1375,20 +1378,29 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkLabel(list_head, text="错误分类列表（按优先级降序）",
                      font=ctk.CTkFont(size=13, weight="bold")).grid(
             row=0, column=0, sticky="w")
+        # 修复缺陷R14：标题栏右侧控件组（字体大小+选择器+全屏）装进
+        # 独立容器并【常驻 panel】（place 贴左列右缘，_layout_splitter
+        # 统一跟随）—— 正常态/拖动态同一跟随机制：分隔条拖动时容器
+        # 纯移动（SetWindowPos BitBlt，零重绘零失真），真实控件而非
+        # 代理近似。Tk place -in 不允许跨容器挂接（实测 TclError:
+        # can't place ... relative to ...），故容器直接创建为 panel
+        # 子，从机制上避免取出/放回。
+        ctrl_box = ctk.CTkFrame(panel, fg_color="transparent")
+        self._list_ctrl_box = ctrl_box
         # 修复缺陷R11：「字体大小」选择器（小/中/大/特大档，控制列表字号）
-        self._font_label = ctk.CTkLabel(list_head, text="字体大小",
+        self._font_label = ctk.CTkLabel(ctrl_box, text="字体大小",
                                         font=ctk.CTkFont(size=12))
-        self._font_label.grid(row=0, column=1, padx=(10, 2), sticky="e")
+        self._font_label.grid(row=0, column=0, padx=(0, 2), sticky="e")
         self._muted_labels.append(self._font_label)
         self._font_menu = ctk.CTkOptionMenu(
-            list_head, values=list(FONT_SIZE_OPTIONS), width=80, height=26,
+            ctrl_box, values=list(FONT_SIZE_OPTIONS), width=80, height=26,
             command=self._apply_font_size)
         self._font_menu.set(self._font_size)
-        self._font_menu.grid(row=0, column=2, padx=(0, 6), sticky="e")
-        self._list_fs_btn = ctk.CTkButton(list_head, text="⛶ 全屏", width=84,
+        self._font_menu.grid(row=0, column=1, padx=(0, 6), sticky="e")
+        self._list_fs_btn = ctk.CTkButton(ctrl_box, text="⛶ 全屏", width=84,
                                           height=26,
                                           command=self._open_list_fullscreen)
-        self._list_fs_btn.grid(row=0, column=3, padx=(0, 0), sticky="e")
+        self._list_fs_btn.grid(row=0, column=2, padx=(0, 0), sticky="e")
         self._accent_buttons.append((self._list_fs_btn, "accent"))
 
         # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
@@ -1438,6 +1450,10 @@ class LogCompressorApp(_make_app_base()):
                               pady=(2, 8))
         self._bg_widgets.append((self._detail_box, "card"))
         self._setup_detail_tags()
+        # 修复缺陷R14：标题栏控件组（常驻 panel）初始定位 —— 构建期
+        # 1366 行 _layout_splitter 调用时控件组尚未创建；面板首次
+        # <Configure> 也会纠正，此处兜底保证首帧即贴左列右缘
+        self.after_idle(self._layout_splitter)
 
     # ------------------------------------------------------------------
     # 修复缺陷R12：错误列表 | 详情面板 可拖动分隔条
@@ -1510,12 +1526,16 @@ class LogCompressorApp(_make_app_base()):
         base = 10 * scale * 2 + 20 * scale
         try:
             lreq = self._list_head.winfo_reqwidth()
+            # 修复缺陷R14：左列最小宽度须含标题栏控件组（字体大小+
+            # 选择器+全屏，常驻 panel 独立容器）—— 否则拖到最左时
+            # 控件组压住标题文字
+            creq = self._list_ctrl_box.winfo_reqwidth()
             rreq = self._detail_head.winfo_reqwidth()
         except (tk.TclError, AttributeError):
-            lreq = rreq = 0
-        if lreq <= 1 or rreq <= 1:        # 标题栏尚未布局完成
+            lreq = creq = rreq = 0
+        if min(lreq, creq, rreq) <= 1:    # 标题栏尚未布局完成
             return _SPLITTER_MIN_LIST * scale, _SPLITTER_MIN_DETAIL * scale
-        return lreq + base, rreq + base
+        return lreq + creq + base, rreq + base
 
     def _layout_splitter(self) -> None:
         """按比例布局左右列与分隔条（全部 relx/relwidth 比例参数）。
@@ -1551,6 +1571,7 @@ class LogCompressorApp(_make_app_base()):
             self._detail_col.place(relx=min(1.0, r + sp_r), rely=0,
                                    relwidth=max(0.0, 1 - r - sp_r),
                                    relheight=1)
+            self._place_list_ctrl(r, pw)
             return
         # 最小宽度换算为比例钳制（左≥标题栏实测宽 / 右≥标题栏实测宽）
         lo_r = left_min / pw
@@ -1563,6 +1584,26 @@ class LogCompressorApp(_make_app_base()):
         self._detail_col.place(relx=r + sp_r, rely=0,
                                relwidth=max(0.0, 1 - r - sp_r),
                                relheight=1)
+        self._place_list_ctrl(r, pw)
+
+    def _place_list_ctrl(self, r: float, pw: int) -> None:
+        """标题栏控件组贴左列右缘（修复缺陷R14：正常/拖动同一跟随）。
+
+        tk 原生 place（x/y 为面板物理像素）—— 绕过 CTk place 对显式
+        像素参数的二次缩放（高 DPI 错位）；容器内控件不 resize，纯
+        SetWindowPos 移动（BitBlt 零重绘）。y 取左列标题栏实测位置
+        （_list_col y=0 相对面板，其 winfo_y 即面板坐标）。
+        """
+        try:
+            cw = self._list_ctrl_box.winfo_reqwidth()
+            hy = self._list_head.winfo_y()
+            # 右边距与标题栏 grid padx=10（逻辑 px）一致：换算物理
+            margin = int(10 * max(1.0, getattr(self, "_font_scale", 1.0)))
+            tk.Frame.place(self._list_ctrl_box,
+                           x=max(0, int(r * pw) - cw - margin),
+                           y=max(0, hy))
+        except (tk.TclError, AttributeError):
+            pass
 
     def _on_splitter_press(self, event) -> None:
         """按下：缓存拖动几何 + 构建矢量文本代理（内容实时延展 + 无撕裂）。
@@ -1721,10 +1762,19 @@ class LogCompressorApp(_make_app_base()):
         except (AttributeError, IndexError, ValueError, tk.TclError):
             f_title = self._scaled_font(ctk.CTkFont(size=13, weight="bold"))
             f_info = self._scaled_font(ctk.CTkFont(size=14, weight="bold"))
-        tbar_w = max(1, pw - lo - 100)   # 最宽值（拖左时右缘留 100px）
+        # 修复缺陷R14：右端「⛶ 全屏」按钮实测宽+边距作为覆盖条右缘
+        # 余量 —— 原固定 100px 在 200% DPI 下小于按钮实际宽（84 逻辑
+        # ×2+padx ≈ 190px），按钮左半被覆盖条吃掉
+        scale = max(1.0, getattr(self, "_font_scale", 1.0))
+        try:
+            fs_w = int(self._detail_fs_btn.winfo_reqwidth()
+                       + 10 * scale + 6)
+        except (tk.TclError, AttributeError):
+            fs_w = 100
+        tbar_w = max(1, pw - lo - fs_w)  # 最宽值（拖左时右缘留 fs_w）
         tbar = tk.Frame(panel, bg=p["card"], bd=0, highlightthickness=0,
                         cursor="sb_h_double_arrow")
-        tbar.place(x=lw, y=0, width=max(1, pw - lw - 100), height=host_y)
+        tbar.place(x=lw, y=0, width=max(1, pw - lw - fs_w), height=host_y)
         tbar_c = tk.Canvas(tbar, bd=0, highlightthickness=0, bg=p["card"],
                            width=tbar_w)
         tbar_c.place(x=0, y=0, relheight=1)
@@ -1745,10 +1795,20 @@ class LogCompressorApp(_make_app_base()):
             self._splitter.place_forget()
         except tk.TclError:
             pass
+        # 修复缺陷R14：左列标题栏控件组跟随参数（容器常驻 panel，
+        # flush 逐帧 tk 原生 place 纯移动至左列右缘；ctrl_dx=容器宽+
+        # 右边距 10 逻辑 px 换算物理，与 _place_list_ctrl 一致）
+        try:
+            margin = int(10 * max(1.0, getattr(self, "_font_scale", 1.0)))
+            ctrl_dx = int(self._list_ctrl_box.winfo_reqwidth()) + margin
+            ctrl_y = max(0, self._list_head.winfo_y())
+        except (tk.TclError, AttributeError):
+            ctrl_dx, ctrl_y = 0, 0
         self._splitter_live = {
             "clip": left_clip, "left": left_c, "right": right_c,
             "lw": lw, "sp_w": sp_w, "ph": ph, "pw": pw, "bars": bars,
             "lo": lo, "tbar": tbar, "tbar_c": tbar_c, "hidden": hidden,
+            "fs_w": fs_w, "ctrl_dx": ctrl_dx, "ctrl_y": ctrl_y,
             "pending": lw, "t0": 0.0, "after_id": None}
         self._live_flush()     # 初始帧同步（消除 press 瞬间错位）
         return True
@@ -2067,11 +2127,23 @@ class LogCompressorApp(_make_app_base()):
             # 的双线残影；竖线由右画布（内容区段）+ tbar（标题栏
             # 段）两个代理图元呈现。
             # 右标题条跟随：左缘 x=left（含分隔条区，内部 canvas 在
-            # [0, sp_w] 画竖线），右缘留 100px 给真实「⛶ 全屏」按钮
+            # [0, sp_w] 画竖线），右缘留 fs_w（右「⛶ 全屏」按钮实测
+            # 宽+边距，修复缺陷R14：原 100px 高 DPI 下吃掉按钮左半）
             tbar = live.get("tbar")
             if tbar is not None:
                 tbar.place_configure(
-                    x=left, width=max(1, pw - left - 100))
+                    x=left, width=max(1, pw - left - live["fs_w"]))
+            # 修复缺陷R14：左列标题栏控件组（字体大小+全屏）逐帧实时
+            # 跟随左列右缘 —— 真实容器 tk 原生 place 纯移动（BitBlt
+            # 零重绘零失真），正常态定位见 _place_list_ctrl
+            ctrl_dx = live.get("ctrl_dx")
+            if ctrl_dx:
+                try:
+                    tk.Frame.place(self._list_ctrl_box,
+                                   x=max(0, left - ctrl_dx),
+                                   y=live.get("ctrl_y", 0))
+                except tk.TclError:
+                    pass
             # 屏幕固定滚动条的反向补偿（内容坐标 = 屏幕 + shift）
             bars = live.get("bars") or {}
             B = bars.get("B", 12)
