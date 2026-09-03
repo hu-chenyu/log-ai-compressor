@@ -590,29 +590,63 @@ class VirtualClusterList:
     # ------------------------------------------------------------------
     # 数据 / 生命周期
     # ------------------------------------------------------------------
-    def set_data(self, data: List[ErrorCluster]) -> None:
-        """设置列表数据并回到顶部（含水平内容宽测量）。"""
-        self._data = data
+    def set_data(self, rows: list) -> None:
+        """设置列表数据并回到顶部（含水平内容宽测量）。
+
+        修复缺陷R16：数据为【视图行】—— ("c", 簇索引) 簇行 /
+        ("i", 簇索引, 实例索引) 实例行；展开簇的全部实例作为独立
+        视图行注入（主列表就地展示全部 N 个错误位置）。
+        """
+        self._data = rows
         self._hovered = -1
         # 数据更换时残留的快照图元一并清理（正常时序不会发生）
         if self._xsnap is not None:
             self._on_hbar_release(None)
         # 修复缺陷R9：内容自然宽（摘要单行不换行后的完整像素宽）
-        self._content_w = self._measure_width(data)
+        self._content_w = self._measure_width(rows)
         self._update_region()
         self._canvas.yview_moveto(0.0)
         self._canvas.xview_moveto(0.0)
         self._sync()
 
-    def _measure_width(self, data: List[ErrorCluster]) -> int:
+    def update_rows(self, rows: list) -> None:
+        """更新视图行但【保持滚动位置】（展开/收起簇，修复缺陷R16）。
+
+        与 set_data 不同：不重置 x/y 视口 —— Tk canvas 在
+        scrollregion 变化时保持内容偏移（视口内内容不动），用户
+        展开/收起簇时浏览位置不跳动。
+        """
+        self._data = rows
+        self._content_w = self._measure_width(rows)
+        self._update_region()
+        self._sync()
+
+    def _measure_width(self, rows: list) -> int:
         """全部行的最大文本像素宽（按实际渲染的缩放字体度量）。"""
+        app = self._app
         need = 0
-        for cluster in data:
-            need = max(
-                need,
-                self._m_sum.measure(
-                    self._app._clip(cluster.summary, self.SUMMARY_CLIP)),
-                self._m_head.measure(self._app._row_text(cluster)))
+        for row in rows:
+            try:
+                if row[0] == "c":
+                    cluster = app._displayed[row[1]]
+                    need = max(
+                        need,
+                        self._m_sum.measure(app._clip(
+                            cluster.summary, self.SUMMARY_CLIP)),
+                        self._m_head.measure(app._row_text(
+                            cluster, with_count=False))
+                        + self._m_head.measure(
+                            f"\u25bc \u00d7{cluster.count}"))
+                else:
+                    inst = app._displayed[row[1]].instances[row[2]]
+                    need = max(
+                        need,
+                        self._m_head.measure(
+                            "      " + app._inst_head_text(inst)),
+                        self._m_sum.measure("        " + app._clip(
+                            inst.summary, self.SUMMARY_CLIP)))
+            except (IndexError, AttributeError, tk.TclError):
+                continue
         return need + 44          # 行内左右边距
 
     def _region_w(self) -> int:
@@ -742,8 +776,27 @@ class VirtualClusterList:
                 y = idx * self.ROW_HEIGHT
                 if y + self.ROW_HEIGHT <= top or y >= top + vh:
                     continue
-                cluster = self._data[idx]
-                if idx == app._selected_row:
+                # 修复缺陷R16：视图行双类型（簇行/实例行）快照
+                row = self._data[idx]
+                if row[0] == "c":
+                    cidx = row[1]
+                    cluster = app._displayed[cidx]
+                    selected = cidx == app._selected_row
+                    head_color = app._row_color(cluster) or p["row_text"]
+                    head_text = (f"\u25b6 \u00d7{cluster.count}  "
+                                 + app._row_text(cluster,
+                                                 with_count=False))
+                    sum_text = app._clip(cluster.summary,
+                                         self.SUMMARY_CLIP)
+                else:
+                    inst = app._displayed[row[1]].instances[row[2]]
+                    selected = ((row[1], row[2]) ==
+                                getattr(app, "_selected_inst", None))
+                    head_color = p["muted"]
+                    head_text = "      " + app._inst_head_text(inst)
+                    sum_text = "        " + app._clip(
+                        inst.summary, self.SUMMARY_CLIP)
+                if selected:
                     bg = states["selected"]
                 elif idx == self._hovered:
                     bg = states["hover"]
@@ -751,17 +804,15 @@ class VirtualClusterList:
                     bg = states["bg"]
                 items.append(self._canvas.create_rectangle(
                     0, y, width, y + self.ROW_HEIGHT, fill=bg, width=0))
-                head_color = app._row_color(cluster) or p["row_text"]
                 items.append(self._canvas.create_text(
                     10, y + 7, anchor="nw", font=self._m_head,
-                    fill=head_color, text=app._row_text(cluster)))
+                    fill=head_color, text=head_text))
                 # 摘要 y = 头部行距 + 头部上边距 7 + 间隙 2（与
                 # _make_slot 的 pack pady 一致）
                 sum_y = y + 7 + self._m_head.metrics("linespace") + 2
                 items.append(self._canvas.create_text(
                     10, sum_y, anchor="nw", font=self._m_sum,
-                    fill=p["row_text"],
-                    text=app._clip(cluster.summary, self.SUMMARY_CLIP)))
+                    fill=p["row_text"], text=sum_text))
             for slot in self._slots:
                 try:
                     self._canvas.itemconfigure(slot["win"], state="hidden")
@@ -874,12 +925,23 @@ class VirtualClusterList:
         p = self._app._palette()
         frame = tk.Frame(self._canvas, bg=p["row_bg"], bd=0,
                          highlightthickness=0)
+        # 修复缺陷R16：头部行 = 「▶ ×N」展开按钮 + 元信息（实例行
+        # 时按钮置空、文本缩进表示层级），按钮独立点击展开/收起
+        line = tk.Frame(frame, bg=p["row_bg"], bd=0,
+                        highlightthickness=0)
+        line.pack(fill="x")
         # 修复缺陷R9：头部/摘要字体均施加与经典模式 CTkLabel 一致的
         # DPI 缩放（原生 tk.Label 不缩放命名字体，直接传会偏小/不一致）
-        head = tk.Label(frame, anchor="w",
+        toggle = tk.Label(
+            line, anchor="w",
+            font=self._app._scaled_font(self._app._font_row_head),
+            bg=p["row_bg"], fg="#2563EB", cursor="hand2")
+        toggle.pack(side="left", padx=(10, 0), pady=(7, 2))
+        head = tk.Label(line, anchor="w",
                         font=self._app._scaled_font(self._app._font_row_head),
                         bg=p["row_bg"], fg=p["row_text"])
-        head.pack(fill="x", padx=(10, 10), pady=(7, 2))
+        head.pack(side="left", fill="x", expand=True,
+                  padx=(10, 10), pady=(7, 2))
         # 修复缺陷R9：摘要单行不换行（wraplength=0），长摘要靠水平滚动查看
         summary = tk.Label(frame, anchor="w", justify="left",
                            font=self._app._scaled_font(
@@ -891,50 +953,91 @@ class VirtualClusterList:
         win = self._canvas.create_window(0, 0, window=frame,
                                          anchor="nw", width=width,
                                          height=self.ROW_HEIGHT)
-        self._bind_row_wheel(frame, head, summary)
-        return {"frame": frame, "head": head, "summary": summary,
-                "win": win, "idx": -1, "virtual": True}
+        self._bind_row_wheel(frame, toggle, head, summary)
+        return {"frame": frame, "toggle": toggle, "head": head,
+                "summary": summary, "win": win, "idx": -1,
+                "virtual": True}
 
     def _fill_slot(self, slot: dict, idx: int, width: int) -> None:
-        """池行填充数据索引 idx（复用控件，仅改文本/颜色/绑定）。"""
+        """池行填充视图行 idx（簇行/实例行双类型，修复缺陷R16）。"""
         app = self._app
-        cluster = self._data[idx]
+        try:
+            row = self._data[idx]
+        except IndexError:
+            return
         p = app._palette()
         states = app._row_states()
-        if idx == app._selected_row:
-            bg = states["selected"]
-        elif idx == self._hovered:
-            bg = states["hover"]
-        else:
-            bg = states["bg"]
-        head_color = app._row_color(cluster) or p["row_text"]
-        slot["idx"] = idx
+        bg = (states["hover"] if idx == self._hovered else states["bg"])
         try:
-            slot["frame"].configure(bg=bg)
-            slot["head"].configure(
-                bg=bg, fg=head_color, text=app._row_text(cluster))
-            slot["summary"].configure(
-                bg=bg, fg=p["row_text"],
-                text=app._clip(cluster.summary, self.SUMMARY_CLIP))
+            if row[0] == "c":
+                cidx = row[1]
+                cluster = app._displayed[cidx]
+                if cidx == app._selected_row:
+                    bg = states["selected"]
+                expanded = cidx in app._expanded_clusters
+                head_color = app._row_color(cluster) or p["row_text"]
+                link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
+                slot["idx"] = idx
+                slot["frame"].configure(bg=bg)
+                slot["toggle"].configure(
+                    bg=bg, fg=link,
+                    text=(f"\u25bc \u00d7{cluster.count}" if expanded
+                          else f"\u25b6 \u00d7{cluster.count}"))
+                slot["head"].configure(
+                    bg=bg, fg=head_color,
+                    text=app._row_text(cluster, with_count=False))
+                slot["summary"].configure(
+                    bg=bg, fg=p["row_text"],
+                    text=app._clip(cluster.summary, self.SUMMARY_CLIP))
+                for w in (slot["frame"], slot["head"], slot["summary"],
+                          slot["toggle"]):
+                    w.bind("<Enter>",
+                           lambda e, i=idx: self._hover(i, True))
+                    w.bind("<Leave>",
+                           lambda e, i=idx: self._hover(i, False))
+                for w in (slot["frame"], slot["head"], slot["summary"]):
+                    w.bind("<Button-1>",
+                           lambda e, i=cidx: app._select_cluster(i))
+                # 展开按钮独立绑定（不触发行选中）
+                slot["toggle"].bind(
+                    "<Button-1>",
+                    lambda e, i=cidx: app._toggle_cluster_expand(i))
+            else:
+                cidx, iidx = row[1], row[2]
+                inst = app._displayed[cidx].instances[iidx]
+                if (cidx, iidx) == getattr(app, "_selected_inst", None):
+                    bg = states["selected"]
+                slot["idx"] = idx
+                slot["frame"].configure(bg=bg)
+                slot["toggle"].configure(bg=bg, text="")
+                slot["head"].configure(
+                    bg=bg, fg=p["muted"],
+                    text="      " + app._inst_head_text(inst))
+                slot["summary"].configure(
+                    bg=bg, fg=p["row_text"],
+                    text="        " + app._clip(inst.summary,
+                                                self.SUMMARY_CLIP))
+                for w in (slot["frame"], slot["head"], slot["summary"],
+                          slot["toggle"]):
+                    w.bind("<Button-1>",
+                           lambda e, ci=cidx, ii=iidx:
+                           app._select_instance(ci, ii))
+                    w.bind("<Enter>",
+                           lambda e, i=idx: self._hover(i, True))
+                    w.bind("<Leave>",
+                           lambda e, i=idx: self._hover(i, False))
             self._canvas.itemconfigure(slot["win"], state="normal",
                                        width=width,
                                        height=self.ROW_HEIGHT)
             self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
-            # 重新绑定到当前数据索引（池行复用后索引变化）
-            for w in (slot["frame"], slot["head"], slot["summary"]):
-                w.bind("<Button-1>",
-                       lambda e, i=idx: app._select_cluster(i))
-                w.bind("<Enter>",
-                       lambda e, i=idx: self._hover(i, True))
-                w.bind("<Leave>",
-                       lambda e, i=idx: self._hover(i, False))
-        except (tk.TclError, ValueError):
+        except (tk.TclError, ValueError, IndexError):
             pass
 
     def _hover(self, idx: int, hovered: bool) -> None:
         self._hovered = idx if hovered else -1
-        # 复用 app 的行悬停绘制（含选中态保持逻辑）
-        self._app._hover_row(idx, hovered)
+        # 修复缺陷R16：池行悬停统一由 _fill_slot 着色（视图行模型
+        # 下 app._hover_row 的 displayed 索引语义不再适用）
+        self._sync()
 
 
 class LogCompressorApp(_make_app_base()):
@@ -978,6 +1081,12 @@ class LogCompressorApp(_make_app_base()):
         self._displayed: List[ErrorCluster] = []
         self._cluster_rows: List[dict] = []
         self._selected_row: int = -1
+        # 修复缺陷R16：主列表簇就地展开状态（展示全部 N 个错误位置）
+        # + 实例选中态（(簇索引, 实例索引)）
+        self._expanded_clusters: Dict[int, bool] = {}
+        self._selected_inst = None
+        self._classic_expanded: Dict[int, dict] = {}
+        self._classic_inst_sel = None
         self._queue: "queue.Queue" = queue.Queue()
         # 共享字体：行级字体必须复用（每行新建 CTkFont 会被 GC 在
         # 任意线程析构，tkinter.Font.__del__ 跨线程调用 Tk 造成死锁）
@@ -1869,22 +1978,48 @@ class LogCompressorApp(_make_app_base()):
             except (tk.TclError, KeyError):
                 continue
             y = sy - scroll_y
-            cluster = vl._data[idx]
-            if idx == self._selected_row:
+            # 修复缺陷R16：视图行双类型（簇行/实例行）代理绘制
+            row = vl._data[idx]
+            if row[0] == "c":
+                cidx = row[1]
+                cluster = self._displayed[cidx]
+                selected = cidx == self._selected_row
+                expanded = cidx in self._expanded_clusters
+                head_color = self._row_color(cluster) or p["row_text"]
+                link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
+                tgl = (f"\u25bc \u00d7{cluster.count}" if expanded
+                       else f"\u25b6 \u00d7{cluster.count}")
+                head_text = self._row_text(cluster, with_count=False)
+                sum_text = self._clip(cluster.summary, vl.SUMMARY_CLIP)
+                sum_fill = p["row_text"]
+            else:
+                inst = self._displayed[row[1]].instances[row[2]]
+                selected = ((row[1], row[2]) == self._selected_inst)
+                tgl = ""
+                head_color = p["muted"]
+                head_text = "      " + self._inst_head_text(inst)
+                sum_text = "        " + self._clip(inst.summary,
+                                                   vl.SUMMARY_CLIP)
+                sum_fill = p["row_text"]
+                link = None
+            if selected:
                 bg = states["selected"]
             elif idx == vl._hovered:
                 bg = states["hover"]
             else:
                 bg = states["bg"]
             canvas.create_rectangle(0, y, pw, y + rh, fill=bg, width=0)
-            head_color = self._row_color(cluster) or p["row_text"]
             tx = x_base + 10 - scroll_x
+            if tgl:
+                canvas.create_text(tx, y + 7, anchor="nw",
+                                   font=vl._m_head, fill=link, text=tgl)
+                tx += vl._m_head.measure(tgl) + 10
             canvas.create_text(tx, y + 7, anchor="nw", font=vl._m_head,
-                               fill=head_color, text=self._row_text(cluster))
-            canvas.create_text(tx, y + 7 + head_lh + 2, anchor="nw",
-                               font=vl._m_sum, fill=p["row_text"],
-                               text=self._clip(cluster.summary,
-                                               vl.SUMMARY_CLIP))
+                               fill=head_color, text=head_text)
+            canvas.create_text(x_base + 10 - scroll_x,
+                               y + 7 + head_lh + 2, anchor="nw",
+                               font=vl._m_sum, fill=sum_fill,
+                               text=sum_text)
 
     def _live_draw_detail(self, canvas, p, cvh) -> None:
         """右列详情文本行（画布坐标系，y0=详情框在内容区的 y）。
@@ -2789,6 +2924,30 @@ class LogCompressorApp(_make_app_base()):
                 row["frame"].configure(fg_color=bg)
             except (tk.TclError, ValueError, KeyError):
                 continue
+        # 修复缺陷R16：经典模式刷新「▶ ×N」按钮与展开实例区配色
+        link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
+        for row in rows:
+            toggle = row.get("toggle")
+            if toggle is not None:
+                try:
+                    toggle.configure(text_color=link)
+                except (tk.TclError, ValueError):
+                    continue
+        for st in getattr(self, "_classic_expanded", {}).values():
+            try:
+                st["area"].configure(bg=p["window"])
+                for lbl in st["labels"]:
+                    if lbl.winfo_exists():
+                        lbl.configure(bg=p["window"], fg=p["row_text"])
+            except (tk.TclError, ValueError, KeyError):
+                continue
+        sel = self._classic_inst_sel
+        if sel is not None:
+            try:
+                if sel.winfo_exists():
+                    sel.configure(bg=p["row_selected"])
+            except tk.TclError:
+                pass
 
     # ==================================================================
     # 任务调度（后台线程 + 队列轮询）
@@ -2984,6 +3143,20 @@ class LogCompressorApp(_make_app_base()):
             w for w in self._muted_labels
             if not hasattr(w, "winfo_exists") or _widget_alive(w)]
         self._selected_row = -1
+        # 修复缺陷R16：重新渲染清空簇展开与实例选中状态（经典模式
+        # 挂起的渐进批次一并取消，实例区随列表销毁）
+        self._expanded_clusters.clear()
+        self._selected_inst = None
+        self._classic_inst_sel = None
+        for st in self._classic_expanded.values():
+            st["cancelled"] = True
+            job = st.get("job")
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+        self._classic_expanded.clear()
         if not self._displayed:
             empty = ctk.CTkLabel(self._cluster_list, text="未发现符合条件的错误")
             empty.pack(pady=20)
@@ -2997,10 +3170,14 @@ class LogCompressorApp(_make_app_base()):
                 self._list_hbar.grid_remove()
             self._virtual_list = VirtualClusterList(self._list_host, self)
             self._cluster_rows = self._virtual_list.slots
-            self._virtual_list.set_data(self._displayed)
+            # 修复缺陷R16：虚拟列表数据为视图行（簇行+展开实例行）
+            self._virtual_list.set_data(self._build_view_rows())
             return
         for idx, cluster in enumerate(self._displayed):
-            self._make_cluster_row(self._cluster_list, idx, cluster)
+            # 修复缺陷R16：经典行带「▶ ×N」就地展开按钮
+            self._make_cluster_row(self._cluster_list, idx, cluster,
+                                   on_toggle=lambda i=idx:
+                                   self._toggle_cluster_expand(i))
         total = len(self._result.clusters)
         if total > n:
             more = ctk.CTkLabel(
@@ -3081,8 +3258,8 @@ class LogCompressorApp(_make_app_base()):
                 lambda hovered: self._hover_row(idx, hovered))
             self._bind_row_events((frame, head, summary), select_cb,
                                   hover_cb)
-            row = {"frame": frame, "summary": summary, "idx": idx,
-                   "native": True}
+            row = {"frame": frame, "head": head, "summary": summary,
+                   "idx": idx, "native": True}
             if toggle is not None:
                 row["toggle"] = toggle
             if register:
@@ -3127,7 +3304,8 @@ class LogCompressorApp(_make_app_base()):
         hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
         # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
         self._bind_row_events((frame, head, summary), select_cb, hover_cb)
-        row = {"frame": frame, "summary": summary, "idx": idx}
+        row = {"frame": frame, "head": head, "summary": summary,
+               "idx": idx}
         if toggle is not None:
             row["toggle"] = toggle
         if register:
@@ -3209,7 +3387,13 @@ class LogCompressorApp(_make_app_base()):
             return
 
     def _hover_row(self, idx: int, hovered: bool) -> None:
-        """行悬停高亮（选中行保持选中色）。"""
+        """行悬停高亮（选中行保持选中色）。
+
+        修复缺陷R16：虚拟模式池行悬停统一由 vl._hover + _fill_slot
+        着色（视图行模型下 displayed 索引与池行视图索引不再等价）。
+        """
+        if self._virtual_list is not None:
+            return
         if not (0 <= idx < len(self._cluster_rows)):
             return
         if idx == self._selected_row:
@@ -3219,7 +3403,16 @@ class LogCompressorApp(_make_app_base()):
             idx, states["hover"] if hovered else states["bg"])
 
     def _mark_selected_row(self, idx: int) -> None:
-        """更新选中行高亮（清除旧选中，标记新选中；蓝色选中态）。"""
+        """更新选中行高亮（清除旧选中，标记新选中；蓝色选中态）。
+
+        修复缺陷R16：虚拟模式池行着色统一走 _fill_slot（按
+        _selected_row/_selected_inst/_hovered 计算），避免视图索引
+        与簇索引不匹配导致的错位着色。
+        """
+        if self._virtual_list is not None:
+            self._selected_row = idx
+            self._virtual_list._sync()
+            return
         previous = getattr(self, "_selected_row", -1)
         states = self._row_states()
         if 0 <= previous < len(self._cluster_rows):
@@ -3271,8 +3464,176 @@ class LogCompressorApp(_make_app_base()):
     def _select_cluster(self, idx: int) -> None:
         if not (0 <= idx < len(self._displayed)):
             return
+        self._selected_inst = None      # R16：切簇清除实例选中态
         self._mark_selected_row(idx)
         self._show_cluster_detail(self._displayed[idx])
+
+    # ------------------------------------------------------------------
+    # 修复缺陷R16：主列表簇就地展开（展示全部 N 个错误位置）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _inst_head_text(inst) -> str:
+        """实例行头部文本（时间戳 + 行号区间）。"""
+        return (f"{format_timestamp(inst.timestamp)}   "
+                f"行 {inst.line_no}~{inst.last_line_no}")
+
+    def _build_view_rows(self) -> list:
+        """生成主列表视图行：簇行 + 展开簇的全部实例行。
+
+        视图行 = ("c", 簇索引) | ("i", 簇索引, 实例索引)；虚拟列表
+        以此为数据（池化渲染两种行）。
+        """
+        rows = []
+        for idx, cluster in enumerate(self._displayed):
+            rows.append(("c", idx))
+            if idx in self._expanded_clusters:
+                for iidx in range(len(cluster.instances)):
+                    rows.append(("i", idx, iidx))
+        return rows
+
+    def _toggle_cluster_expand(self, idx: int) -> None:
+        """展开/收起簇实例列表（「▶ ×N」按钮，主列表就地）。
+
+        展开后该簇全部 N 个实例以独立行呈现（时间戳+行号+摘要），
+        点击实例行右侧详情显示【该实例自身】的上下文与堆栈
+        （_fill_instance_detail）—— 不再局限于典型样例（第一次
+        出现的错误位置）。
+        """
+        if not (0 <= idx < len(self._displayed)):
+            return
+        if self._virtual_list is not None:
+            if idx in self._expanded_clusters:
+                self._expanded_clusters.pop(idx, None)
+            else:
+                self._expanded_clusters[idx] = True
+            # 保持滚动位置更新（Tk canvas 保持内容偏移，浏览位置不动）
+            self._virtual_list.update_rows(self._build_view_rows())
+        else:
+            self._toggle_expand_classic(idx)
+
+    def _select_instance(self, cidx: int, iidx: int) -> None:
+        """点击实例行：右侧详情显示该实例自身的上下文/堆栈。
+
+        所属簇保持选中高亮；_selected_inst 记录实例选中态（虚拟
+        列表 _fill_slot 据此对实例行着选中色）。
+        """
+        if not (0 <= cidx < len(self._displayed)):
+            return
+        cluster = self._displayed[cidx]
+        if not (0 <= iidx < len(cluster.instances)):
+            return
+        self._selected_inst = (cidx, iidx)
+        self._mark_selected_row(cidx)
+        self._fill_instance_detail(self._detail_box, cluster,
+                                   cluster.instances[iidx])
+
+    def _toggle_expand_classic(self, idx: int) -> None:
+        """经典列表展开/收起簇实例（行内就地插入实例区）。
+
+        与全屏展开同一交互（▶/▼ + 25 条/帧渐进创建，大簇不卡 UI）；
+        实例区 pack 定位在本簇行之后、下一簇行之前。
+        """
+        cluster = self._displayed[idx]
+        row = next((r for r in self._cluster_rows
+                    if r.get("idx") == idx), None)
+        if row is None or "toggle" not in row:
+            return
+        state = self._classic_expanded.get(idx)
+        if state is not None:
+            # 收起：取消挂起批次并销毁实例区
+            state["cancelled"] = True
+            job = state.get("job")
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except (tk.TclError, ValueError):
+                    pass
+            self._classic_expanded.pop(idx, None)
+            self._expanded_clusters.pop(idx, None)
+            row["toggle"].configure(text=f"\u25b6 \u00d7{cluster.count}")
+            try:
+                state["area"].destroy()
+            except tk.TclError:
+                pass
+            return
+        # 展开
+        p = self._palette()
+        inst_bg = p["window"]
+        area = tk.Frame(self._cluster_list, bg=inst_bg, bd=0,
+                        highlightthickness=0)
+        state = {"area": area, "labels": [], "cancelled": False,
+                 "pos": 0}
+        self._classic_expanded[idx] = state
+        self._expanded_clusters[idx] = True
+        row["toggle"].configure(text=f"\u25bc \u00d7{cluster.count}")
+        pos = next(i for i, r in enumerate(self._cluster_rows)
+                   if r.get("idx") == idx)
+        if pos + 1 < len(self._cluster_rows):
+            area.pack(fill="x", padx=(12, 2),
+                      before=self._cluster_rows[pos + 1]["frame"])
+        else:
+            area.pack(fill="x", padx=(12, 2))
+        insts = cluster.instances
+
+        def add_batch() -> None:
+            if state["cancelled"] or idx not in self._classic_expanded:
+                return
+            batch = insts[state["pos"]:state["pos"] + 25]
+            for iidx, inst in enumerate(batch):
+                state["labels"].append(
+                    self._make_classic_inst_label(
+                        area, idx, state["pos"] + iidx, inst, inst_bg))
+            state["pos"] += len(batch)
+            if state["pos"] < len(insts):
+                state["job"] = self.after(12, add_batch)
+            elif len(insts) < cluster.count:
+                # 实例记录超出保留上限的截断提示
+                lbl = tk.Label(
+                    area,
+                    text=f"…… 共 {cluster.count} 次，"
+                         f"仅展示前 {len(insts)} 条实例",
+                    font=self._scaled_font(self._font_row_summary),
+                    bg=inst_bg, fg=p["muted"], anchor="w")
+                lbl.pack(fill="x", padx=(34, 8), pady=(2, 4))
+                state["labels"].append(lbl)
+        add_batch()
+
+    def _make_classic_inst_label(self, parent, cidx, iidx, inst, bg):
+        """经典列表实例行（时间戳+行号+摘要；点击显示实例详情）。"""
+        p = self._palette()
+        text = (f"{format_timestamp(inst.timestamp)}  "
+                f"L{inst.line_no}  {inst.summary}")
+        lbl = tk.Label(parent, text=text, anchor="w", justify="left",
+                       font=self._scaled_font(self._font_row_summary),
+                       bg=bg, fg=p["row_text"], cursor="hand2",
+                       wraplength=0)
+        lbl.pack(fill="x", padx=(34, 8), pady=2)
+        lbl.bind("<Button-1>",
+                 lambda e: self._classic_inst_click(cidx, iidx, lbl))
+        lbl.bind("<Enter>", lambda e: lbl.configure(
+            bg=p["row_selected"] if self._classic_inst_sel is lbl
+            else p["row_hover"]))
+        lbl.bind("<Leave>", lambda e: lbl.configure(
+            bg=p["row_selected"] if self._classic_inst_sel is lbl
+            else bg))
+        return lbl
+
+    def _classic_inst_click(self, cidx, iidx, lbl) -> None:
+        """经典实例行点击：单选高亮 + 实例详情。"""
+        p = self._palette()
+        prev = self._classic_inst_sel
+        if prev is not None and prev is not lbl:
+            try:
+                if prev.winfo_exists():
+                    prev.configure(bg=p["window"])
+            except tk.TclError:
+                pass
+        self._classic_inst_sel = lbl
+        try:
+            lbl.configure(bg=p["row_selected"])
+        except tk.TclError:
+            pass
+        self._select_instance(cidx, iidx)
 
     def _show_cluster_detail(self, cluster: ErrorCluster) -> None:
         """主界面详情面板渲染（转发到通用填充函数）。"""
