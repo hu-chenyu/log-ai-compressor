@@ -1903,16 +1903,15 @@ class TestFullscreenView:
         win = [w for w in app.winfo_children()
                if isinstance(w, tk.Toplevel)
                and "错误分类列表" in w.title()][0]
-        # 找到行 frame 并点击（行 1 的 frame）
-        rows = [w for w in _all_widgets(win)
-                if isinstance(w, ctk.CTkFrame) and w.winfo_children()]
         # 触发行 1 的点击（通过事件绑定）——直接调用绑定回调
-        # 行 frame 的第一个可点击子控件
+        # 行 frame 的第一个可点击子控件。修复缺陷R17：查找限定
+        # 【列表区子树】—— 新增的分隔条握点同样是带 Button-1 绑定的
+        # tk.Frame 且在逆序遍历中更先命中（点到它会启动分隔条拖动
+        # 而非选中行），必须从候选中排除
         clickables = []
-        for f in rows:
-            for sub in _all_widgets(f):
-                if sub.winfo_class() in ("CTkLabel", "Label", "Frame"):
-                    clickables.append(sub)
+        for sub in _all_widgets(app._fs_list_area):
+            if sub.winfo_class() in ("CTkLabel", "Label", "Frame"):
+                clickables.append(sub)
         target = None
         for w in clickables:
             binds = w.bind("<Button-1>")
@@ -2502,6 +2501,158 @@ class TestFullscreenReuse:
             if app._fs_list_win is not None:
                 app._fs_list_win.destroy()
                 app.update()
+
+
+class TestFullscreenSplitter:
+    """修复缺陷R17：全屏列表窗口 列表|详情 可拖分隔条（与主界面同款）。"""
+
+    @staticmethod
+    def _open_fs(app):
+        """打开全屏并放大到可拖尺寸（测试环境屏幕小，默认 85% 宽度
+        可能小于「两列最小宽+分隔条」导致分隔条锁定）。"""
+        _run_many_clusters(app)
+        app._open_list_fullscreen()
+        for _ in range(25):
+            app.update()
+            time.sleep(0.005)
+        win = app._fs_list_win
+        assert win is not None and win.winfo_exists()
+        try:
+            win.state("normal")
+        except tk.TclError:
+            pass
+        win.geometry("2400x1300+0+0")
+        for _ in range(6):
+            app.update()
+        return win
+
+    @staticmethod
+    def _close(app, win):
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+        app.update()
+
+    def test_fs_splitter_exists(self, app):
+        """全屏应有可见分隔条（样式/光标/握点/三列 place 布局）。"""
+        win = self._open_fs(app)
+        try:
+            sp = app._fs_splitter
+            assert sp.winfo_ismapped(), "全屏应有可见分隔条"
+            assert sp.cget("cursor") == "sb_h_double_arrow"
+            assert len(app._fs_splitter_dots) == 3, "应有三个握点"
+            pw = app._fs_body.winfo_width()
+            lw = app._fs_list_col.winfo_width()
+            dw = app._fs_detail_col.winfo_width()
+            assert lw > 300 and dw > 300, "左右列应正常分宽"
+            assert abs(lw / pw - app._fs_splitter_ratio) < 0.03, \
+                "左列宽应按比例布局"
+        finally:
+            self._close(app, win)
+
+    def test_fs_splitter_drag_proxy_follows(self, app):
+        """矢量代理拖动：裁剪框/视口/标题条逐 motion 实时跟随。"""
+        win = self._open_fs(app)
+        try:
+            sp = app._fs_splitter
+            pw = app._fs_body.winfo_width()
+            sp.event_generate("<ButtonPress-1>", x=3, y=100)
+            app.update()
+            live = app._fs_live
+            assert live is not None, "应构建矢量文本代理"
+            lw0 = live["lw"]
+            assert abs(live["right"].canvasx(0)) <= 1, \
+                "press 后初始视口应归零"
+            assert not sp.winfo_ismapped(), "拖动中真实分隔条应隐藏"
+            frozen = app._fs_list_col.winfo_width()
+            for dx in (80, 160, 240):
+                sp.event_generate("<B1-Motion>", x=3 + dx, y=100)
+                app._fs_live_flush()
+                app.update()
+                expect = app._fs_splitter_ratio * pw
+                assert abs(live["clip"].winfo_width() - expect) <= 2, \
+                    "左裁剪框宽应逐 motion 实时跟随"
+                assert abs(live["right"].canvasx(0)
+                           - (lw0 - expect)) <= 2, \
+                    "右画布视口应实时滚动（详情文本贴住分隔条）"
+                tbar_x = (live["tbar"].winfo_rootx()
+                          - app._fs_body.winfo_rootx())
+                assert abs(tbar_x - expect) <= 2, \
+                    "右标题条（详情标题）应跟随分隔条"
+                assert app._fs_list_col.winfo_width() == frozen, \
+                    "拖动中真实列冻结（代理之下，松开一次应用）"
+            sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=100)
+            app.update()
+            assert app._fs_live is None, "释放后代理应销毁"
+            assert sp.winfo_ismapped(), "释放后真实分隔条应恢复"
+            head0 = app._fs_detail_head.winfo_children()[0]
+            assert head0.winfo_ismapped(), "释放后真实「详情」标题应恢复"
+            assert abs(app._fs_splitter_ratio * pw
+                       - app._fs_list_col.winfo_width()) <= 8, \
+                "释放后真实列一次性到最终位置"
+        finally:
+            self._close(app, win)
+
+    def test_fs_splitter_dblclick_restores_default(self, app):
+        """双击恢复默认比例（2:3）。"""
+        win = self._open_fs(app)
+        try:
+            app._fs_splitter_ratio = 0.6
+            app._fs_layout_splitter()
+            app.update()
+            assert app._fs_list_col.winfo_width() \
+                != int(0.4 * app._fs_body.winfo_width())
+            app._on_fs_dblclick(None)
+            app.update()
+            assert abs(app._fs_splitter_ratio - 0.4) < 1e-6, \
+                "双击应恢复默认 2:3 比例"
+        finally:
+            self._close(app, win)
+
+    def test_fs_splitter_ratio_persisted(self, app):
+        """拖动松开后比例持久化（config fs_splitter_ratio）。"""
+        win = self._open_fs(app)
+        try:
+            sp = app._fs_splitter
+            pw = app._fs_body.winfo_width()
+            sp.event_generate("<ButtonPress-1>", x=3, y=100)
+            app.update()
+            sp.event_generate("<B1-Motion>", x=3 + int(pw * 0.1), y=100)
+            app.update()
+            sp.event_generate("<ButtonRelease-1>",
+                              x=3 + int(pw * 0.1), y=100)
+            app.update()
+            expect = app._fs_splitter_ratio
+            assert abs(app._config.get("fs_splitter_ratio")
+                       - expect) < 1e-6, "比例应写入配置"
+        finally:
+            self._close(app, win)
+
+    def test_fs_splitter_min_width_limits(self, app):
+        """拖到左右极限受最小宽度钳制（不遮挡标题/不锁死）。"""
+        win = self._open_fs(app)
+        try:
+            sp = app._fs_splitter
+            left_min, right_min = app._fs_min_widths()
+            sp.event_generate("<ButtonPress-1>", x=3, y=100)
+            app.update()
+            sp.event_generate("<B1-Motion>", x=-9999, y=100)
+            app.update()
+            sp.event_generate("<ButtonRelease-1>", x=-9999, y=100)
+            app.update()
+            assert app._fs_list_col.winfo_width() >= left_min - 4, \
+                "左列最小宽度钳制"
+            sp.event_generate("<ButtonPress-1>", x=3, y=100)
+            app.update()
+            sp.event_generate("<B1-Motion>", x=99999, y=100)
+            app.update()
+            sp.event_generate("<ButtonRelease-1>", x=99999, y=100)
+            app.update()
+            assert app._fs_detail_col.winfo_width() >= right_min - 4, \
+                "右列最小宽度钳制"
+        finally:
+            self._close(app, win)
 
 
 # ---------------------------------------------------------------------------
