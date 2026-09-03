@@ -131,6 +131,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "header": "#ffffff", "text": "#1f2937", "muted": "#6b7280",
         "accent": "#3B82F6", "accent_hover": "#2563EB", "accent_text": "#ffffff",
         "row_bg": "#ffffff", "row_hover": "#eff6ff", "row_selected": "#bfdbfe",
+        "row_selected_edge": "#3b82f6",
         "row_text": "#2d333b", "is_dark": "0",
         "splitter": "#c3ccd9", "splitter_grip": "#8a97a8",
     },
@@ -140,6 +141,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "header": "#161e2d", "text": "#e5e7eb", "muted": "#94a3b8",
         "accent": "#3B82F6", "accent_hover": "#60a5fa", "accent_text": "#ffffff",
         "row_bg": "#1c2433", "row_hover": "#2a3547", "row_selected": "#1d4ed8",
+        "row_selected_edge": "#60a5fa",
         "row_text": "#c8cdd4", "is_dark": "1",
         "splitter": "#3a485e", "splitter_grip": "#64758f",
     },
@@ -149,6 +151,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "header": "#bcd6f5", "text": "#173a63", "muted": "#486e9c",
         "accent": "#ffffff", "accent_hover": "#f4f9ff", "accent_text": "#1d4ed8",
         "row_bg": "#e8f1fd", "row_hover": "#cfe0f5", "row_selected": "#8cbaf0",
+        "row_selected_edge": "#1d4ed8",
         "row_text": "#173a63", "is_dark": "0",
         "splitter": "#a9c4e4", "splitter_grip": "#6d95c2",
     },
@@ -158,6 +161,7 @@ THEMES: Dict[str, Dict[str, str]] = {
         "header": "#b7e3c8", "text": "#14432a", "muted": "#3f7d59",
         "accent": "#ffffff", "accent_hover": "#f2fbf6", "accent_text": "#15803d",
         "row_bg": "#e6f7ec", "row_hover": "#cdecd9", "row_selected": "#8fdcab",
+        "row_selected_edge": "#15803d",
         "row_text": "#14432a", "is_dark": "0",
         "splitter": "#a6d2b9", "splitter_grip": "#5f9c7c",
     },
@@ -955,8 +959,11 @@ class VirtualClusterList:
                                          anchor="nw", width=width,
                                          height=self.ROW_HEIGHT)
         self._bind_row_wheel(frame, toggle, head, summary)
-        return {"frame": frame, "toggle": toggle, "head": head,
-                "summary": summary, "win": win, "idx": -1,
+        # 修复缺陷R22：line 入字典 —— 选中/悬停着色需覆盖头部条
+        # （原未保存引用，line 底色停留 row_bg，选中蓝块被头部
+        # 内边距区域的暗色横竖条切割成三段）
+        return {"frame": frame, "line": line, "toggle": toggle,
+                "head": head, "summary": summary, "win": win, "idx": -1,
                 "virtual": True}
 
     def _fill_slot(self, slot: dict, idx: int, width: int) -> None:
@@ -969,12 +976,14 @@ class VirtualClusterList:
         p = app._palette()
         states = app._row_states()
         bg = (states["hover"] if idx == self._hovered else states["bg"])
+        selected = False
         try:
             if row[0] == "c":
                 cidx = row[1]
                 cluster = app._displayed[cidx]
                 if cidx == app._selected_row:
                     bg = states["selected"]
+                    selected = True
                 expanded = cidx in app._expanded_clusters
                 head_color = app._row_color(cluster) or p["row_text"]
                 link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
@@ -1008,6 +1017,7 @@ class VirtualClusterList:
                 inst = app._displayed[cidx].instances[iidx]
                 if (cidx, iidx) == getattr(app, "_selected_inst", None):
                     bg = states["selected"]
+                    selected = True
                 slot["idx"] = idx
                 slot["frame"].configure(bg=bg)
                 slot["toggle"].configure(bg=bg, text="")
@@ -1027,6 +1037,15 @@ class VirtualClusterList:
                            lambda e, i=idx: self._hover(i, True))
                     w.bind("<Leave>",
                            lambda e, i=idx: self._hover(i, False))
+            # 修复缺陷R22：头部条 line 同步着色（消除选中蓝块被
+            # line 暗色底切成三段：toggle/head 的 padx/pady 区域
+            # 均透出 line 底色）；选中行加 1px 亮色描边营造凸起
+            # 立体感（highlightcolor 同步，避免聚焦时变黑框）
+            slot["line"].configure(bg=bg)
+            slot["frame"].configure(
+                highlightthickness=1 if selected else 0,
+                highlightbackground=p["row_selected_edge"],
+                highlightcolor=p["row_selected_edge"])
             self._canvas.itemconfigure(slot["win"], state="normal",
                                        width=width,
                                        height=self.ROW_HEIGHT)

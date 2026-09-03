@@ -2237,6 +2237,31 @@ class TestVirtualList:
             normal = str(slots[2]["frame"].cget("bg"))
             assert sel != normal, "选中/未选中背景应区分"
 
+    def test_selected_virtual_row_continuous_block(self, app):
+        """修复R22：选中行整行连续蓝色块 + 描边立体感。
+
+        头部条 line 容器原不参与着色（底色停留 row_bg），toggle/head
+        的 padx/pady 区域透出暗色，把选中蓝块切成三段；修复后
+        frame/line/toggle/head/summary 五件同色，整块无间隙；选中行
+        另加 1px row_selected_edge 描边（凸起观感），未选中行无描边。
+        """
+        _run_many_clusters(app)
+        app.update()
+        app._select_cluster(1)
+        app.update()
+        p = app._palette()
+        slots = {s["idx"]: s for s in app._virtual_list.slots}
+        assert 1 in slots and 2 in slots
+        sel = slots[1]
+        for key in ("frame", "line", "toggle", "head", "summary"):
+            assert str(sel[key].cget("bg")) == p["row_selected"], \
+                f"选中行 {key} 应为连续选中色（实际 {sel[key].cget('bg')}）"
+        assert int(sel["frame"].cget("highlightthickness")) == 1
+        assert str(sel["frame"].cget("highlightbackground")) == \
+            p["row_selected_edge"]
+        normal = slots[2]
+        assert int(normal["frame"].cget("highlightthickness")) == 0
+
     def test_virtual_list_survives_theme_switch(self, app):
         """修复R6：虚拟模式下主题切换刷新配色不崩溃。"""
         _run_many_clusters(app)
@@ -3307,8 +3332,8 @@ class TestThemeSwitch:
         from log_ai_compressor.gui.app import THEMES
         required = {"name", "icon", "label", "window", "card", "header",
                     "text", "muted", "accent", "accent_hover", "accent_text",
-                    "row_bg", "row_hover", "row_selected", "row_text",
-                    "is_dark"}
+                    "row_bg", "row_hover", "row_selected",
+                    "row_selected_edge", "row_text", "is_dark"}
         for key, palette in THEMES.items():
             assert required <= set(palette), f"{key} 缺字段: {required - set(palette)}"
 
