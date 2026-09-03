@@ -855,6 +855,8 @@ class TestSplitter:
         live = app._splitter_live
         assert live is not None, "虚拟列表模式应构建矢量文本代理"
         lw0 = live["lw"]
+        sp_w = live["sp_w"]
+        panel = app._result_panel
         frozen = app._list_col.winfo_width()
         for dx in (80, 160, 240):
             sp.event_generate("<B1-Motion>", x=3 + dx, y=40)
@@ -868,11 +870,19 @@ class TestSplitter:
                 "左裁剪框宽应逐 motion 实时跟随（内容视口延展）"
             assert abs(live["right"].canvasx(0) - (lw0 - expect)) <= 2, \
                 "右画布视口应实时滚动（详情文本贴住分隔条）"
+            # 右标题条（「详情」标题+ⓘ）应跟随贴住分隔条右缘
+            tbar_x = live["tbar"].winfo_rootx() - panel.winfo_rootx()
+            assert abs(tbar_x - (expect + sp_w)) <= 2, \
+                "右标题条应跟随分隔条（标题贴分隔条右缘）"
             assert app._list_col.winfo_width() == frozen, \
                 "拖动中真实列冻结（代理之下，松开一次应用）"
         sp.event_generate("<ButtonRelease-1>", x=3 + 240, y=40)
         app.update()
         assert app._splitter_live is None, "释放后代理应销毁"
+        # 真实「详情」标题+ⓘ 应恢复显示
+        assert all(w.winfo_ismapped()
+                   for w in app._detail_head.winfo_children()), \
+            "释放后真实标题栏控件应全部恢复"
         assert abs(app._splitter_ratio * pw
                    - app._list_col.winfo_width()) <= 8, \
             "释放后真实列一次性到最终位置"

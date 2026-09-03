@@ -1674,9 +1674,40 @@ class LogCompressorApp(_make_app_base()):
                            bg=p["window"], width=hi)
         left_c.place(x=0, y=0, relheight=1)
         self._live_draw_rows(left_c, pw, p)
+        # --- 右标题条：「详情」标题+ⓘ 跟随分隔条 ---
+        # 真实标题栏冻结在原位，拖动后标题与右列内容错位；press 时
+        # 隐藏真实「详情」标题与 ⓘ（grid_remove，release 恢复），
+        # 覆盖条每帧 place(x=left+sp) 跟随（内部画布固定、标题文字
+        # 缩放字体与真实一致）。右端「⛶ 全屏」按钮真实控件保持露出
+        # （覆盖条右缘留 100px）。真实分隔条标题栏段与覆盖条相邻
+        # 不重叠 —— 自然衔接。
+        hidden = []
+        try:
+            for w in self._detail_head.winfo_children()[:2]:
+                w.grid_remove()          # 标题 Label + ⓘ Label
+                hidden.append(w)
+        except (tk.TclError, AttributeError, IndexError):
+            hidden = []
+        tbar = tk.Frame(panel, bg=p["card"], bd=0, highlightthickness=0,
+                        cursor="sb_h_double_arrow")
+        tbar.place(x=lw + sp_w, y=0,
+                   width=max(1, pw - lw - sp_w - 100), height=host_y)
+        tbar_c = tk.Canvas(tbar, bd=0, highlightthickness=0, bg=p["card"],
+                           width=max(1, pw - lo))
+        tbar_c.place(x=0, y=0, relheight=1)
+        f_title = self._scaled_font(ctk.CTkFont(size=13, weight="bold"))
+        f_info = self._scaled_font(ctk.CTkFont(size=14, weight="bold"))
+        title = "详情（典型样例 · 上下文 · 降噪堆栈）"
+        tbar_c.create_text(10, 4, anchor="nw", font=f_title,
+                           fill=p["row_text"], text=title)
+        import tkinter.font as _tkfont
+        tw = _tkfont.Font(font=f_title).measure(title)
+        tbar_c.create_text(10 + tw + 4, 4, anchor="nw", font=f_info,
+                           fill="#3B82F6", text="ⓘ")
         self._splitter_live = {
             "clip": left_clip, "left": left_c, "right": right_c,
             "lw": lw, "sp_w": sp_w, "ph": ph, "pw": pw, "bars": bars,
+            "lo": lo, "tbar": tbar, "tbar_c": tbar_c, "hidden": hidden,
             "pending": lw, "t0": 0.0, "after_id": None}
         return True
 
@@ -1692,10 +1723,15 @@ class LogCompressorApp(_make_app_base()):
                 self.after_cancel(after_id)   # 取消挂起的节流帧
             except tk.TclError:
                 pass
-        for key in ("right", "clip"):
+        for key in ("right", "clip", "tbar"):
             try:
                 live[key].destroy()     # 左画布随裁剪框一并销毁
             except (tk.TclError, KeyError):
+                pass
+        for w in live.get("hidden", ()):  # 恢复真实「详情」标题+ⓘ
+            try:
+                w.grid()
+            except tk.TclError:
                 pass
 
     def _live_draw_rows(self, canvas, pw, p) -> None:
@@ -1986,6 +2022,13 @@ class LogCompressorApp(_make_app_base()):
                 right_c.xview_scroll(delta, "units")
             # 真实分隔条跟随（移动不重绘；标题栏段真实可见）
             self._splitter.place(relx=left / pw, rely=0, relheight=1)
+            # 右标题条跟随：「详情」标题+ⓘ 贴住分隔条右缘（Frame
+            # move+resize，背景纯色与标题栏一致，内部画布固定）
+            tbar = live.get("tbar")
+            if tbar is not None:
+                tbar.place_configure(
+                    x=left + sp_w,
+                    width=max(1, pw - left - sp_w - 100))
             # 屏幕固定滚动条的反向补偿（内容坐标 = 屏幕 + shift）
             bars = live.get("bars") or {}
             B = bars.get("B", 12)
