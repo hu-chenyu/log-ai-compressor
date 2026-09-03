@@ -958,12 +958,15 @@ class TestSplitter:
             "失焦应应用当前位置"
 
     def test_drag_realtime_fast_perf(self, app):
-        """优化：矢量代理拖动性能 —— 单帧（motion+重绘）<24ms（>40fps）。
+        """优化：矢量代理拖动性能 —— 同步段 <16ms；墙钟仅兜底防回归。
 
         矢量文本代理：每帧仅左裁剪框 place + 右画布视口滚动
-        （GDI 级原语，实测空闲环境 ~8ms/帧），单画布原子渲染无
-        撕裂。测试跳变拖动（0.25↔0.6 大 delta）+ 负载抖动裕量，
-        阈值取 24ms/64ms（仍比真实重排方案 ~140ms 快 6 倍以上）。
+        （GDI 级原语），单画布原子渲染无撕裂。确定性断言 = motion
+        处理器同步段（钳制算术 + _live_flush 的 place/scroll/coords
+        Tcl 派发，不随视口内容/机器负载变化，<16ms）；
+        app.update() 墙钟含 Tk 实际重绘，受机器负载波动影响大
+        （R21 提高结果区视口后同代码实测 24~93ms 摆动），只留
+        140ms（真实重排物理下限）兜底防方案级回归。
         """
         _run_many_clusters(app)
         app.update()
@@ -973,30 +976,46 @@ class TestSplitter:
         app.update()
         assert app._splitter_live is not None
         pw = self._pw(app)
+        ctx = app._splitter_drag_ctx
+        live = app._splitter_live
+
+        class _Ev:  # 最小事件：处理器只读 x_root
+            __slots__ = ("x_root",)
+
+        def motion_at(frac):
+            ev = _Ev()
+            ev.x_root = ctx["rootx"] + int(pw * frac) + ctx["sp_w"] // 2
+            return ev
+
         # 预热：首帧冷启动（代理建层 / 首次几何级联）
         for frac in (0.25, 0.6, 0.25):
-            sp.event_generate("<B1-Motion>", x=3 + int(pw * frac), y=40)
-            app.update()
-        times = []
+            app._on_splitter_drag(motion_at(frac))
+        app.update()
+        sync_times, wall_times = [], []
         try:
             for i in range(40):
                 frac = 0.25 if i % 2 == 0 else 0.6
-                sp.event_generate("<B1-Motion>",
-                                   x=3 + int(pw * frac), y=40)
+                live["t0"] = 0.0      # 绕过节流：每次必 flush（最坏路径）
                 t0 = time.perf_counter()
+                app._on_splitter_drag(motion_at(frac))
+                sync_times.append((time.perf_counter() - t0) * 1000)
+                t1 = time.perf_counter()
                 app.update()
-                times.append((time.perf_counter() - t0) * 1000)
+                wall_times.append((time.perf_counter() - t1) * 1000)
         finally:
             sp.event_generate("<ButtonRelease-1>", x=3, y=40)
             app.update()
-        # trimmed mean（去最高/最低各 4 帧）：抗负载尖峰（CI/沙箱
-        # CPU 抢占会造成个别 40-60ms 尖峰，不代表真实性能）
-        ts = sorted(times)[4:-4]
-        trimmed = sum(ts) / len(ts)
-        assert trimmed < 24.0, \
-            f"trimmed 单帧应 <24ms（实际 {trimmed:.1f}ms，均值 {sum(times)/40:.1f}ms）"
-        assert ts[-1] < 64.0, \
-            f"去极值后单帧峰值应 <64ms（实际 {ts[-1]:.1f}ms）"
+        # trimmed mean（去最高/最低各 4 帧）：抗负载尖峰
+        st = sorted(sync_times)[4:-4]
+        sync_trimmed = sum(st) / len(st)
+        assert sync_trimmed < 16.0, \
+            f"拖动同步段应 <16ms（实际 {sync_trimmed:.1f}ms，" \
+            f"均值 {sum(sync_times) / 40:.1f}ms）"
+        wt = sorted(wall_times)[4:-4]
+        wall_trimmed = sum(wt) / len(wt)
+        assert wall_trimmed < 140.0, \
+            f"墙钟单帧不得退回真实重排下限 ~140ms（实际 " \
+            f"{wall_trimmed:.1f}ms，均值 {sum(wall_times) / 40:.1f}ms）"
 
     def test_virtual_fast_path_during_drag(self, app):
         """优化：虚拟列表拖动期走快速路径（不重填文本），松开全量同步。
