@@ -42,9 +42,8 @@ class TestAnalyzeText:
         r = analyze_text(SAMPLE_LOG)
         s = r.stats
         assert s.total_lines == 15
-        assert s.error_lines == 7        # ERROR×6 + FATAL×1
-        # 修复缺陷R10：默认级别含 FATAL（FATAL 取消始终放行后由
-        # 默认勾选保留可见性）
+        assert s.error_lines == 7        # ERROR×6 + FATAL→ERROR×1
+        # 修复缺陷R40：FATAL 归一 ERROR，默认级别 ERROR+FAIL 全部准入
         assert s.error_entries == 7
         assert s.time_start is not None and s.time_end is not None
         assert s.duration > 0
@@ -55,9 +54,11 @@ class TestAnalyzeText:
         # request N failed 三次归一簇；clustered: pool refused / request / oom / worker / token
         counts = {c.summary: c.count for c in r.clusters}
         assert any("request" in k and v == 3 for k, v in counts.items())
-        # FATAL 置顶
-        assert r.clusters[0].level == "FATAL"
-        assert r.clusters[0].summary.startswith("out of memory")
+        # 修复缺陷R40：FATAL 归一 ERROR —— 原 FATAL 行进入 ERROR
+        # 簇；全 ERROR 时按优先级/次数排序（request ×3 居首）
+        assert r.clusters[0].level == "ERROR"
+        assert any(c.summary.startswith("out of memory")
+                   for c in r.clusters)
 
     def test_stack_attached_to_cluster(self):
         r = analyze_text(SAMPLE_LOG)
@@ -71,9 +72,12 @@ class TestAnalyzeText:
         assert pool.is_root_cause
 
     def test_filter_levels(self):
-        r = analyze_text(SAMPLE_LOG, levels=["FATAL"])
-        assert all(c.level == "FATAL" for c in r.clusters)
-        assert r.stats.error_entries == 1
+        # 修复缺陷R40：FATAL 归一 ERROR —— 原 FATAL 行由 ERROR
+        # 过滤命中（levels=["FATAL"] 不再是有效级别）
+        r = analyze_text(SAMPLE_LOG, levels=["ERROR"])
+        assert all(c.level == "ERROR" for c in r.clusters)
+        assert any("out of memory" in c.summary for c in r.clusters)
+        assert r.stats.error_entries == 7
 
     def test_filter_keywords(self):
         r = analyze_text(SAMPLE_LOG, include=["token"])
@@ -149,8 +153,9 @@ class TestAnalyzeText:
 
     def test_level_counts(self):
         r = analyze_text(SAMPLE_LOG)
-        assert r.stats.level_counts.get("ERROR") == 6
-        assert r.stats.level_counts.get("FATAL") == 1
+        # 修复缺陷R40：FATAL 归一 ERROR（6 + 1 = 7）
+        assert r.stats.level_counts.get("ERROR") == 7
+        assert r.stats.level_counts.get("FATAL") is None
         assert r.stats.level_counts.get("INFO") == 2
         assert r.stats.level_counts.get("WARN") == 1
         assert r.stats.level_counts.get("DEBUG") == 1

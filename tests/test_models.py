@@ -74,14 +74,18 @@ class TestModels:
         assert e.full_message == "start of message wrapped part 1 part 2"
 
     def test_error_cluster_priority_label(self):
+        # 修复缺陷R40：五档重划 P0 错误 / P1 失败 / P2 警告 /
+        # P3 信息 / P4 调试（阈值 75/55/35/15）
         c = ErrorCluster(cluster_id=0, template="t", priority=80)
         assert c.priority_label == "P0"
         c.priority = 60
         assert c.priority_label == "P1"
         c.priority = 40
         assert c.priority_label == "P2"
-        c.priority = 10
+        c.priority = 20
         assert c.priority_label == "P3"
+        c.priority = 10
+        assert c.priority_label == "P4"
 
     def test_run_stats_as_dict(self):
         s = RunStats(source="a.log", total_lines=100, error_lines=10,

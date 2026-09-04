@@ -26,26 +26,29 @@ class TestFilter:
         f = EntryFilter(FilterConfig(levels=["ERROR", "FAIL"]))
         assert f.match(entry("x", level="ERROR"))
         assert f.match(entry("x", level="FAIL"))
-        # 修复缺陷R19：FATAL 恢复「始终放行」（复选框已从 UI 删除，
-        # 真实致命错误永远显示不被隐藏）
-        assert f.match(entry("x", level="FATAL"))
+        # 修复缺陷R40：FATAL 级别删除（解析层经 LEVEL_ALIASES 归一
+        # ERROR）—— 过滤层回归纯级别集合匹配，无特殊放行分支
+        assert not f.match(entry("x", level="FATAL"))
         assert not f.match(entry("x", level="WARN"))
         assert not f.match(entry("x", level="INFO"))
 
-    def test_fatal_always_passes_level_gate(self):
-        # 修复缺陷R19：FATAL 不受级别集合控制 —— 始终放行
-        f = EntryFilter(FilterConfig(levels=["FAIL"]))
-        assert f.match(entry("x", level="FATAL"))
-        # 但 include/exclude 关键字语义照常生效（级别放行后才检查）
-        f2 = EntryFilter(FilterConfig(levels=["FAIL"], include=["timeout"]))
-        assert not f2.match(entry("out of memory", level="FATAL"))
-        f3 = EntryFilter(FilterConfig(levels=["FAIL"], exclude=["boom"]))
-        assert not f3.match(entry("boom happened", level="FATAL"))
+    def test_fatal_normalized_to_error_before_filter(self):
+        # 修复缺陷R40：FATAL 经 normalize_level 归一为 ERROR，
+        # 由 ERROR 级别准入（原「FATAL 始终放行」特殊分支删除）
+        from log_ai_compressor.constants import normalize_level
+        assert normalize_level("FATAL") == "ERROR"
+        f = EntryFilter(FilterConfig(levels=["ERROR"]))
+        assert f.match(entry("x", level=normalize_level("FATAL")))
+        # include/exclude 关键字语义照常生效（级别准入后才检查）
+        f2 = EntryFilter(FilterConfig(levels=["ERROR"], include=["timeout"]))
+        assert not f2.match(entry("out of memory", level="ERROR"))
+        f3 = EntryFilter(FilterConfig(levels=["ERROR"], exclude=["boom"]))
+        assert not f3.match(entry("boom happened", level="ERROR"))
 
-    def test_default_config_includes_fatal(self):
-        # 修复缺陷R19：默认配置下 FATAL 始终放行（无开关）
-        assert EntryFilter(FilterConfig()).match(entry("x", level="FATAL"))
+    def test_default_config_error_fail(self):
+        # 修复缺陷R40：默认配置 ERROR+FAIL（FATAL 归一 ERROR）
         assert EntryFilter(FilterConfig()).match(entry("x", level="ERROR"))
+        assert EntryFilter(FilterConfig()).match(entry("x", level="FAIL"))
 
     def test_include_keyword(self):
         f = EntryFilter(FilterConfig(levels=["ERROR"], include=["timeout"]))
@@ -77,8 +80,8 @@ class TestFilter:
 
     def test_config_from_dict_invalid_tolerant(self):
         cfg = FilterConfig.from_dict({"levels": "bad", "top_n": "x"})
-        # 修复缺陷R10：默认级别升级为 FATAL/ERROR/FAIL
-        assert cfg.levels == ["FATAL", "ERROR", "FAIL"]
+        # 修复缺陷R40：默认级别 ERROR+FAIL（FATAL 删除归一 ERROR）
+        assert cfg.levels == ["ERROR", "FAIL"]
         assert cfg.top_n == 20
 
 

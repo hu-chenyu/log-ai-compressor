@@ -250,19 +250,19 @@ class TestInference:
         assert e.level == "INFO", \
             "编译选项 -Wfatal-errors 不应被误判为致命错误"
 
-    def test_gcc_fatal_error_still_fatal(self, parser):
-        """修复缺陷R18：真实 gcc fatal error 仍判 FATAL（显式级别组）。"""
+    def test_gcc_fatal_error_normalized_to_error(self, parser):
+        """修复缺陷R40：gcc fatal error（显式级别组）归一为 ERROR。"""
         parser.feed("src/main.c:42: fatal error: foo.h: "
                     "No such file or directory", 1)
         e = parser.flush()
-        assert e.level == "FATAL", \
-            "gcc 风格 fatal error（显式级别字段）应保留 FATAL 识别"
+        assert e.level == "ERROR", \
+            "gcc 风格 fatal error 应经 LEVEL_ALIASES 归一为 ERROR"
 
-    def test_explicit_fatal_field_still_fatal(self, parser):
-        """修复缺陷R18：显式级别字段 [FATAL] 仍判 FATAL（不经关键词推断）。"""
+    def test_explicit_fatal_field_normalized_to_error(self, parser):
+        """修复缺陷R40：显式级别字段 [FATAL] 归一为 ERROR。"""
         parser.feed("2024-01-01 10:00:00 FATAL kernel panic - not syncing", 1)
         e = parser.flush()
-        assert e.level == "FATAL"
+        assert e.level == "ERROR"
 
     def test_unstructured_plain_line_defaults_info(self, parser):
         parser.feed("some random output line", 1)

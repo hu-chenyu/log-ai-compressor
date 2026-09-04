@@ -18,37 +18,45 @@ HUMAN_NAME = "日志AI压缩器"
 # 日志级别体系
 # ---------------------------------------------------------------------------
 # 优先级从高到低
-LEVEL_ORDER = ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG", "TRACE")
+# 修复缺陷R40：FATAL 级别删除 —— 显式 [FATAL]/CRITICAL 等致命
+# 写法经 LEVEL_ALIASES 归一为 ERROR（最高严重级），下游不再出现
+# FATAL；级别权重/优先级阈值同步重划（原 ERROR 0.80 达不到 P0
+# 阈值 75，P0 档位空缺）
+LEVEL_ORDER = ("ERROR", "FAIL", "WARN", "INFO", "DEBUG", "TRACE")
 
 # 级别权重（用于优先级综合计算）
+# 修复缺陷R40：五级别重新划分（ERROR 0.95 / FAIL 0.75 / WARN 0.45 /
+# INFO 0.20 / DEBUG 0.08）
 LEVEL_WEIGHT = {
-    "FATAL": 1.0,
-    "ERROR": 0.80,
-    "FAIL": 0.72,
-    "WARN": 0.30,
-    "INFO": 0.12,
-    "DEBUG": 0.06,
+    "ERROR": 0.95,
+    "FAIL": 0.75,
+    "WARN": 0.45,
+    "INFO": 0.20,
+    "DEBUG": 0.08,
     "TRACE": 0.03,
 }
 
 # 错误类级别：参与错误统计、时间趋势与聚类
-ERROR_LEVELS = frozenset({"FATAL", "ERROR", "FAIL"})
+# 修复缺陷R40：FATAL 删除（归一 ERROR），错误类 = ERROR + FAIL
+ERROR_LEVELS = frozenset({"ERROR", "FAIL"})
 
-# GUI / CLI 默认勾选级别（FATAL + ERROR + FAIL 三核心）
-# 修复缺陷R10：FATAL 纳入级别过滤复选框（默认勾选），取消
-# 「FATAL 始终放行」语义 —— 勾选才显示，取消即过滤。
-DEFAULT_SELECTED_LEVELS = ("FATAL", "ERROR", "FAIL")
+# GUI / CLI 默认勾选级别（ERROR + FAIL 两核心）
+# 修复缺陷R40：FATAL 删除（归一 ERROR 后由 ERROR 复选框统一控制）
+DEFAULT_SELECTED_LEVELS = ("ERROR", "FAIL")
 
 # 变体级别 -> 规范级别（大小写不敏感匹配，见 normalize_level）
+# 修复缺陷R40：致命写法（FATAL/SEVERE/CRITICAL/CRIT/PANIC/EMERG/
+# ALERT/FATAL ERROR）全部归一到 ERROR
 LEVEL_ALIASES = {
     "WARNING": "WARN",
     "ERR": "ERROR",
-    "SEVERE": "FATAL",
-    "CRITICAL": "FATAL",
-    "CRIT": "FATAL",
-    "PANIC": "FATAL",
-    "EMERG": "FATAL",
-    "ALERT": "FATAL",
+    "FATAL": "ERROR",
+    "SEVERE": "ERROR",
+    "CRITICAL": "ERROR",
+    "CRIT": "ERROR",
+    "PANIC": "ERROR",
+    "EMERG": "ERROR",
+    "ALERT": "ERROR",
     "FAILED": "FAIL",
     "FAILURE": "FAIL",
     "ASSERT": "FAIL",
@@ -57,7 +65,7 @@ LEVEL_ALIASES = {
     "NOTICE": "INFO",
     "NOTE": "INFO",
     "PASS": "INFO",
-    "FATAL ERROR": "FATAL",
+    "FATAL ERROR": "ERROR",
     "E": "ERROR",
     "W": "WARN",
     "I": "INFO",

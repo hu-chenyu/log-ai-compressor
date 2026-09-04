@@ -193,12 +193,13 @@ class RuleSet:
         return any(p.search(line) for p in self.stack_indicators)
 
     def infer_level_by_keyword(self, text: str) -> Optional[str]:
-        """对无级别字段的行按关键词推断级别（FATAL > ERROR > FAIL > WARN）。
+        """对无级别字段的行按关键词推断级别（ERROR > FAIL > WARN）。
 
+        修复缺陷R40：FATAL 级别删除（归一 ERROR），推断序列移除；
         修复缺陷#9：每级别先查合并正则（单次扫描），未命中再逐条
         兜底；级别间仍按优先级顺序判定，语义与逐条实现完全一致。
         """
-        for level in ("FATAL", "ERROR", "FAIL", "WARN"):
+        for level in ("ERROR", "FAIL", "WARN"):
             combined = self._hint_combined.get(level)
             if combined is not None:
                 if combined.search(text):
