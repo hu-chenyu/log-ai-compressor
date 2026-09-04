@@ -215,14 +215,17 @@ class ErrorCluster:
 
     @property
     def priority_label(self) -> str:
-        """优先级档位标签（P0 致命 / P1 高 / P2 中 / P3 低）。"""
+        """优先级档位标签（P0 错误 / P1 失败 / P2 警告 / P3 信息 /
+        P4 调试；修复缺陷R40：FATAL 删除后五档重划）。"""
         if self.priority >= 75:
             return "P0"
         if self.priority >= 55:
             return "P1"
         if self.priority >= 35:
             return "P2"
-        return "P3"
+        if self.priority >= 15:
+            return "P3"
+        return "P4"
 
 
 # ---------------------------------------------------------------------------

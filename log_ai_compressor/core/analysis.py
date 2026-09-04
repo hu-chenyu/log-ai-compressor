@@ -14,7 +14,8 @@
      簇峰值时间落入爆发区间则标注；
    - 罕见异常（rare）：总数可观而仅出现 1 次的错误。
 3. **优先级综合评分**：级别权重 40% + 频次（对数归一）30% +
-   根因 20% + 异常 10%；FATAL 级强制 P0 前置。
+   根因 20% + 异常 10%；五级别分档钳制（ERROR 保 P0 / FAIL 钳
+   P1 / WARN 钳 P2 / INFO 钳 P3 / DEBUG 封顶 P4，修复缺陷R40）。
 4. **堆栈降噪**：折叠系统库/第三方框架帧，保留业务栈帧与
    关键因果行（Caused by / Traceback / 异常摘要）。
 """
@@ -206,6 +207,20 @@ def _nearest_prior(ordered: Sequence[ErrorCluster],
 # ---------------------------------------------------------------------------
 # 优先级计算
 # ---------------------------------------------------------------------------
+# 修复缺陷R40：五级别优先级分档表（下界, 上界）—— 级别决定档位
+# 区间（P0 错误 / P1 失败 / P2 警告 / P3 信息 / P4 调试），频次/
+# 根因/异常加分只在档内拉开差距，不再跨档（原纯公式下 FAIL 高频
+# 可冲 P0、INFO 低频掉 P4，级别与档位脱钩）
+_LEVEL_BANDS = {
+    "ERROR": (80.0, None),     # 保底 P0（≥75）
+    "FAIL": (55.0, 75.0),      # 钳 P1
+    "WARN": (35.0, 55.0),      # 钳 P2
+    "INFO": (15.0, 35.0),      # 钳 P3
+    "DEBUG": (None, 15.0),     # 封顶 P4
+    "TRACE": (None, 15.0),     # 封顶 P4
+}
+
+
 def _compute_priorities(clusters: List[ErrorCluster]) -> None:
     max_count = max((c.count for c in clusters), default=0)
     denom = math.log10(max_count + 1) if max_count > 1 else 1.0
@@ -216,14 +231,19 @@ def _compute_priorities(clusters: List[ErrorCluster]) -> None:
         anomaly = 1.0 if c.anomaly else 0.0
         # 权重：级别 40% + 频次 30% + 根因 20% + 异常 10%
         score = 100.0 * (0.40 * level_w + 0.30 * freq + 0.20 * root + 0.10 * anomaly)
-        if c.level == "FATAL":
-            score = max(score, 90.0)   # 致命错误保证 P0 前置
+        # 修复缺陷R40：按级别分档钳制（ERROR 保底 80 确保 P0 前置；
+        # 原 FATAL 强制 90 随 FATAL 删除移除）
+        lo, hi = _LEVEL_BANDS.get(c.level, (None, None))
+        if lo is not None:
+            score = max(score, lo)
+        if hi is not None:
+            score = min(score, hi - 0.1)
         c.priority = round(score, 1)
 
 
 def _sort_clusters(clusters: List[ErrorCluster]) -> None:
-    """排序：FATAL 置顶 -> 优先级降序 -> 次数降序。"""
+    """排序：ERROR 置顶 -> 优先级降序 -> 次数降序（修复缺陷R40）。"""
     clusters.sort(
-        key=lambda c: (c.level == "FATAL", c.priority, c.count),
+        key=lambda c: (c.level == "ERROR", c.priority, c.count),
         reverse=True,
     )

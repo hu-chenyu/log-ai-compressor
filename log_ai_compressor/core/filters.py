@@ -73,7 +73,6 @@ class EntryFilter:
     """错误条目准入过滤器（级别 + 包含/排除关键字）。"""
 
     def __init__(self, config: FilterConfig):
-        # 修复缺陷R10：FATAL 与其他级别一致，由勾选集合统一控制
         self._levels = set(config.levels or DEFAULT_SELECTED_LEVELS)
         self._include = config.normalized_include()
         self._exclude = config.normalized_exclude()
@@ -82,12 +81,10 @@ class EntryFilter:
     def match(self, entry: LogEntry) -> bool:
         """判断条目是否通过过滤。
 
-        修复缺陷R19：FATAL【始终放行】—— UI 复选框已删除（R18 起
-        关键词推断不再产生 FATAL，误判源消除）；真实致命错误（显式
-        [FATAL]/CRITICAL/gcc fatal error/嵌入式 hardfault）无开关、
-        永远显示不被隐藏（回归 R10 之前的安全语义）。
+        修复缺陷R40：FATAL 级别删除（解析层经 LEVEL_ALIASES 归一为
+        ERROR），准入判断回归纯级别集合匹配，无特殊放行分支。
         """
-        if entry.level != "FATAL" and entry.level not in self._levels:
+        if entry.level not in self._levels:
             return False
         text = self._search_text(entry)
         if self._exclude and any(k in text for k in self._exclude):

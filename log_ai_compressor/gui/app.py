@@ -79,10 +79,10 @@ def _make_app_base():
     return PlainApp
 
 # 修复缺陷R19：FATAL 复选框删除（R18 起关键词推断不再产生
-# FATAL —— 编译命令行 -Wfatal-errors 误判源已消除；FATAL 级别
-# 本身保留：显式 [FATAL]/CRITICAL/gcc fatal error 仍识别为 FATAL
-# 并【始终放行显示】（致命错误无开关、永远可见，回归安全语义）。
-# 剩余五级别自然前移补齐。
+# FATAL —— 编译命令行 -Wfatal-errors 误判源已消除）。
+# 修复缺陷R40：FATAL 级别本身同步删除 —— 显式 [FATAL]/CRITICAL/
+# gcc fatal error 经 LEVEL_ALIASES 归一为 ERROR（最高严重级，
+# 由 ERROR 复选框统一控制）。剩余五级别自然前移补齐。
 LEVEL_CHECKS = ("ERROR", "FAIL", "WARN", "INFO", "DEBUG")
 RULE_NAMES = ("generic", "embedded", "jenkins")
 _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
@@ -105,9 +105,28 @@ _LEVEL_HELP = {
 FONT_SIZE_OPTIONS = ("小", "中", "大", "特大")
 FONT_SIZE_SCALE = {"小": 0.85, "中": 1.0, "大": 1.15, "特大": 1.3}
 
-# 错误行智能图标：▲ 根因 / ● 爆发 / ○ 稀有 / ◆ 致命
-_CLUSTER_ICON = {"fatal": "\u25c6", "root": "\u25b2", "burst": "\u25cf",
+# 错误行智能图标：▲ 根因 / ● 爆发 / ○ 稀有 / • 普通
+# 修复缺陷R40：◆ 致命图标随 FATAL 级别删除移除；五级别五色
+# + 根因紫（与级别色区分，一眼区分严重程度）
+_CLUSTER_ICON = {"root": "\u25b2", "burst": "\u25cf",
                  "rare": "\u25cb", "normal": "\u2022"}
+_LEVEL_COLORS = {
+    "ERROR": "#ff5252",   # 红
+    "FAIL": "#ff7a45",    # 橙红
+    "WARN": "#ffb74d",    # 橙黄
+    "INFO": "#5ac8fa",    # 天蓝
+    "DEBUG": "#9ca3af",   # 灰
+}
+_ROOT_COLOR = "#c084fc"        # 根因紫
+# 选中蓝底上的调亮版（级别文字在蓝色背景上的可读性）
+_LEVEL_COLORS_SEL = {
+    "ERROR": "#ff8a80",
+    "FAIL": "#ffab91",
+    "WARN": "#ffd54f",
+    "INFO": "#80d8ff",
+    "DEBUG": "#e5e7eb",
+}
+_ROOT_COLOR_SEL = "#d8b4fe"
 
 # ---------------------------------------------------------------------------
 # 修复缺陷R1：四态主题体系（亮色 → 暗色 → 蓝调 → 绿调 循环）
@@ -843,7 +862,12 @@ class VirtualClusterList:
                     cluster = app._displayed[cidx]
                     selected = cidx == app._selected_row
                     expanded = cidx in app._expanded_clusters
-                    head_color = app._row_color(cluster) or p["row_text"]
+                    # 修复缺陷R40：快照与真实行同色 —— 选中行头部
+                    # 用调亮级别色（蓝底可辨级别）
+                    head_color = (
+                        (app._row_color_sel(cluster) or p["sel_text"])
+                        if selected
+                        else (app._row_color(cluster) or p["row_text"]))
                     # 修复缺陷R37：快照与真实行同构 —— ▶/▼ 画在
                     # 等宽盒中心（展开/收起不位移），次数/元信息分列
                     tgl_icon = "\u25bc" if expanded else "\u25b6"
@@ -1122,8 +1146,11 @@ class VirtualClusterList:
                     bg=top_c, fg=fg or link,
                     text=f"\u00d7{cluster.count}")
                 slot["icon_box"].configure(bg=top_c)
+                # 修复缺陷R40：选中行头部用调亮级别色（蓝底可辨级别）
                 slot["head"].configure(
-                    bg=top_c, fg=fg or head_color,
+                    bg=top_c,
+                    fg=((app._row_color_sel(cluster) or p["sel_text"])
+                        if selected else head_color),
                     text=app._row_text(cluster, with_count=False))
                 slot["summary"].configure(
                     bg=bot_c, fg=fg or p["row_text"],
@@ -2533,7 +2560,12 @@ class LogCompressorApp(_make_app_base()):
                 cluster = self._displayed[cidx]
                 selected = cidx == self._selected_row
                 expanded = cidx in self._expanded_clusters
-                head_color = self._row_color(cluster) or p["row_text"]
+                # 修复缺陷R40：代理与真实行同色 —— 选中行头部
+                # 用调亮级别色（蓝底可辨级别）
+                head_color = (
+                    (self._row_color_sel(cluster) or p["sel_text"])
+                    if selected
+                    else (self._row_color(cluster) or p["row_text"]))
                 link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
                 tgl = (f"\u25bc \u00d7{cluster.count}" if expanded
                        else f"\u25b6 \u00d7{cluster.count}")
@@ -4116,7 +4148,15 @@ class LogCompressorApp(_make_app_base()):
                             pass
                         row["summary"].configure(
                             text_color=p["sel_text"])
-                        row["head"].configure(text_color=p["sel_text"])
+                        # 修复缺陷R40：选中行头部用调亮级别色（蓝底上
+                        # 仍能区分级别；无色级别回退白字）
+                        _c = (self._displayed[idx] if 0 <= idx
+                              < len(self._displayed) else None)
+                        row["head"].configure(
+                            text_color=(
+                                (self._row_color_sel(_c)
+                                 if _c is not None else None)
+                                or p["sel_text"]))
                         if row.get("toggle") is not None:
                             row["toggle"].configure(
                                 text_color=p["sel_text"])
@@ -4214,9 +4254,7 @@ class LogCompressorApp(_make_app_base()):
         修复缺陷R4：with_count=False 时次数移至独立的「▶ ×N」展开
         按钮（全屏窗口用），行首不再重复显示。
         """
-        if cluster.level == "FATAL":
-            icon = _CLUSTER_ICON["fatal"]
-        elif cluster.is_root_cause:
+        if cluster.is_root_cause:
             icon = _CLUSTER_ICON["root"]
         elif cluster.anomaly == "burst":
             icon = _CLUSTER_ICON["burst"]
@@ -4236,13 +4274,19 @@ class LogCompressorApp(_make_app_base()):
 
     @staticmethod
     def _row_color(cluster: ErrorCluster) -> Optional[str]:
-        # 修复缺陷R10：FATAL 红色（#ff5252）比 ERROR（默认行色）更醒目，
-        # 用户一眼区分致命错误
-        if cluster.level == "FATAL":
-            return "#ff5252"
+        # 修复缺陷R40：五级别五色 + 根因紫（原仅 FATAL 红色特殊化；
+        # FATAL 删除后全级别着色，一眼区分严重程度）
         if cluster.is_root_cause:
-            return "#ffb74d"
-        return None
+            return _ROOT_COLOR
+        return _LEVEL_COLORS.get(cluster.level)
+
+    @staticmethod
+    def _row_color_sel(cluster: ErrorCluster) -> Optional[str]:
+        # 修复缺陷R40：选中蓝底上的调亮版级别色（替代统一白字，
+        # 选中行仍能一眼区分级别严重程度）
+        if cluster.is_root_cause:
+            return _ROOT_COLOR_SEL
+        return _LEVEL_COLORS_SEL.get(cluster.level)
 
     # ------------------------------------------------------------------
     # 详情渲染
@@ -5042,6 +5086,18 @@ class LogCompressorApp(_make_app_base()):
                     # 统一底部深色（与主列表 _apply_row_bg 同色无缝）
                     for ch in row["frame"].winfo_children():
                         _paint(ch, p["sel_bot"])
+                    # 修复缺陷R40：选中行头部回调调亮级别色（_paint
+                    # 统一刷白后按级别覆盖，蓝底上仍可辨级别）
+                    _c = (self._displayed[row["idx"]]
+                          if 0 <= row["idx"] < len(self._displayed)
+                          else None)
+                    if _c is not None and row.get("head") is not None:
+                        try:
+                            row["head"].configure(
+                                fg=(self._row_color_sel(_c)
+                                    or p["sel_text"]))
+                        except (tk.TclError, ValueError):
+                            pass
                     # 分界线换亮色；3D 高光/阴影条就位（两端内缩
                     # 24px = 圆角半径 18 + 6 余量，不压切角区；tk
                     # place 为物理px，按 DPI 缩放与主列表一致）

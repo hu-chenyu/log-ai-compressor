@@ -200,13 +200,16 @@ class LogPipeline:
             if stats.time_end is None or entry.timestamp > stats.time_end:
                 stats.time_end = entry.timestamp
 
-        if entry.level not in ERROR_LEVELS:
-            return
-        stats.error_lines += 1
+        if entry.level in ERROR_LEVELS:
+            stats.error_lines += 1
 
+        # 修复缺陷R40：聚类准入由过滤器决定 —— 级别复选框选中
+        # WARN/INFO/DEBUG 时同样聚类展示（五级别五色五档）；
+        # error_lines/error_entries 统计口径不变（仍只计错误类级别）
         if not self._entry_filter.match(entry):
             return
-        stats.error_entries += 1
+        if entry.level in ERROR_LEVELS:
+            stats.error_entries += 1
 
         # 前上下文快照：按行号区间截取（排除条目自身的堆栈/折行）
         before: Optional[List[str]] = None

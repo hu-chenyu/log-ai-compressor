@@ -181,18 +181,23 @@ class TestAnomaly:
 # 优先级
 # ---------------------------------------------------------------------------
 class TestPriority:
-    def test_fatal_always_front(self):
-        fatal = make_cluster(0, "minor fatal note", level="FATAL", count=1)
-        big_error = make_cluster(1, "huge error storm", level="ERROR", count=500)
-        result = make_result([big_error, fatal], error_entries=501)
+    def test_error_always_front(self):
+        # 修复缺陷R40：ERROR 保证 P0 前置（兜底 80 ≥ P0 阈值 75；
+        # 原 FATAL 强制 90 随 FATAL 删除移除）
+        err = make_cluster(0, "minor error note", level="ERROR", count=1)
+        big_fail = make_cluster(1, "huge fail storm", level="FAIL", count=500)
+        result = make_result([big_fail, err], error_entries=501)
         analyze_clusters(result)
-        assert result.clusters[0] is fatal
-        assert fatal.priority >= 90
-        assert fatal.priority_label == "P0"
+        assert result.clusters[0] is err
+        assert err.priority >= 80
+        assert err.priority_label == "P0"
+        assert big_fail.priority_label == "P1"
 
     def test_frequency_boosts_priority(self):
-        low = make_cluster(0, "rare error a", level="ERROR", count=1)
-        high = make_cluster(1, "frequent error b", level="ERROR", count=200)
+        # 修复缺陷R40：ERROR 兜底 80 会拉平同档分数（频次差异只
+        # 体现在排序），频次加分断言改用无兜底的 WARN 级
+        low = make_cluster(0, "rare warn a", level="WARN", count=1)
+        high = make_cluster(1, "frequent warn b", level="WARN", count=200)
         result = make_result([low, high], error_entries=201)
         analyze_clusters(result)
         assert result.clusters[0] is high

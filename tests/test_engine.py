@@ -187,7 +187,7 @@ class TestCombinedRegexEquivalence:
         for text in samples:
             fast = rs.infer_level_by_keyword(text)
             sequential = None
-            for level in ("FATAL", "ERROR", "FAIL", "WARN"):
+            for level in ("ERROR", "FAIL", "WARN"):
                 if any(p.search(text) for p in rs.level_hints.get(level, ())):
                     sequential = level
                     break

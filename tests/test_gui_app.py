@@ -227,14 +227,15 @@ LONG_SUMMARY_LOG = (
 class TestClusterListWrap:
     def test_rows_rendered_with_summary_label(self, app):
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
-        # 两行错误 -> 两行记录（FATAL 排序在前）
+        # 两行错误 -> 两行记录（修复缺陷R40：FATAL 归一 ERROR，
+        # 同级等优先级按日志原序稳定排序，长摘要行在 row 0）
         assert len(app._cluster_rows) == 2
-        # 长摘要在行 1（FATAL"short fatal"置顶）：完整未截断
-        first_summary = str(app._cluster_rows[1]["summary"].cget("text"))
+        # 长摘要在行 0：完整未截断
+        first_summary = str(app._cluster_rows[0]["summary"].cget("text"))
         assert "TAIL" in first_summary
         assert len(first_summary) > 100
         # 行首元信息不包含摘要（R16 起用行内 head 引用）
-        head_text = str(app._cluster_rows[1]["head"].cget("text"))
+        head_text = str(app._cluster_rows[0]["head"].cget("text"))
         assert "TAIL" not in head_text
 
     def test_summary_single_line_no_wrap(self, app):
@@ -524,8 +525,7 @@ class TestClusterListFontAndWidth:
         #（经典 22 号基准 × 28/22，同一缩放系数）
         heads = [w for w in _all_widgets(win)
                  if isinstance(w, tk.Label)
-                 and ("ERROR" in str(w.cget("text"))
-                      or "FATAL" in str(w.cget("text")))]
+                 and "ERROR" in str(w.cget("text"))]
         assert heads, "全屏窗口应有行头部标签"
         fs_size = int(
             tkfont.Font(font=heads[0].cget("font")).cget("size"))
@@ -547,7 +547,7 @@ class TestClusterListFontAndWidth:
             time.sleep(0.005)
         win = app._fs_list_win
         assert win is not None and win.winfo_exists()
-        # 点击「▶ ×2」展开按钮（FATAL 簇 ×2；文本形如 "▶ ×2"）
+        # 点击「▶ ×2」展开按钮（FATAL→ERROR 归一簇 ×2；文本形如 "▶ ×2"）
         toggles = [w for w in _all_widgets(win)
                    if isinstance(w, tk.Label)
                    and "\u00d72" in str(w.cget("text"))]
@@ -680,14 +680,15 @@ class TestFatalLevelFilter:
         assert app._level_vars["FAIL"].get() is True
         assert app._level_vars["WARN"].get() is False
 
-    def test_fatal_always_displayed_without_checkbox(self, app):
-        """修复R19：真实 FATAL（显式级别字段）无开关、始终放行显示。"""
+    def test_fatal_normalized_to_error_displayed(self, app):
+        """修复R40：显式 [FATAL] 日志归一为 ERROR 显示（级别删除）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
         levels = [c.level for c in app._displayed]
-        assert "FATAL" in levels, \
-            "显式 [FATAL] 日志应始终显示（无复选框可隐藏致命错误）"
+        assert "FATAL" not in levels, "FATAL 级别应已删除（归一 ERROR）"
         assert "ERROR" in levels
+        # 原 FATAL 行（out of memory）以 ERROR 身份出现在列表中
+        assert any("out of memory" in c.summary for c in app._displayed)
 
     def test_fatal_help_tooltip_registered(self, app):
         """优化：五个级别复选框左侧都有 ⓘ 且悬停说明已登记。"""
@@ -744,18 +745,33 @@ class TestFatalLevelFilter:
             assert color.lower() == "#3b82f6", \
                 f"ⓘ 颜色应统一为 #3B82F6（实际 {color}）"
 
-    def test_fatal_row_color_is_red(self, app):
-        """修复R19：FATAL 行红色保留（真实致命日志仍醒目区分）。"""
+    def test_five_level_colors(self, app):
+        """修复R40：五级别五色 + 根因紫 + 选中调亮（一眼区分严重程度）。"""
         from log_ai_compressor.gui.app import LogCompressorApp
         from log_ai_compressor.core.models import ErrorCluster
-        fatal = ErrorCluster(cluster_id="f", template="t", summary="boom",
-                              level="FATAL", count=1)
-        err = ErrorCluster(cluster_id="e", template="t", summary="bad",
-                            level="ERROR", count=1)
-        red = LogCompressorApp._row_color(fatal)
-        assert red and red.lower().startswith("#ff"), \
-            f"FATAL 应用红色（实际 {red}）"
-        assert LogCompressorApp._row_color(err) is None
+
+        def mk(level, root=False):
+            return ErrorCluster(cluster_id=level, template="t",
+                                summary="s", level=level, count=1,
+                                is_root_cause=root)
+
+        expected = {"ERROR": "#ff5252", "FAIL": "#ff7a45",
+                    "WARN": "#ffb74d", "INFO": "#5ac8fa",
+                    "DEBUG": "#9ca3af"}
+        for level, color in expected.items():
+            got = LogCompressorApp._row_color(mk(level))
+            assert got and got.lower() == color, \
+                f"{level} 应为 {color}（实际 {got}）"
+        # 根因紫优先于级别色（与五级别色区分）
+        root = LogCompressorApp._row_color(mk("ERROR", root=True))
+        assert root and root.lower() == "#c084fc", \
+            f"根因应为紫色 #c084fc（实际 {root}）"
+        # 选中蓝底上的调亮版（无色级别回退 None 由调用方回退白字）
+        sel = LogCompressorApp._row_color_sel(mk("ERROR"))
+        assert sel and sel.lower() == "#ff8a80", \
+            f"选中 ERROR 应调亮为 #ff8a80（实际 {sel}）"
+        assert LogCompressorApp._row_color_sel(
+            mk("WARN", root=True)).lower() == "#d8b4fe"
 
     def test_old_config_with_fatal_loads_safely(self, app):
         """修复R19：旧配置（levels 含 FATAL）静默兼容不崩溃。"""
@@ -2333,7 +2349,13 @@ class TestVirtualList:
         for key in ("frame", "summary"):
             assert str(sel[key].cget("bg")) == p["sel_bot"], \
                 f"选中行 {key} 应为底部能带色（实际 {sel[key].cget('bg')}）"
-        for key in ("toggle", "head", "summary"):
+        # 修复缺陷R40：选中行头部用调亮级别色（非统一白）；展开
+        # 按钮/摘要仍统一选中白
+        cluster = app._displayed[1]
+        expect_head = app._row_color_sel(cluster) or p["sel_text"]
+        assert str(sel["head"].cget("fg")).lower() == expect_head.lower(), \
+            f"选中行 head 应为调亮级别色（实际 {sel['head'].cget('fg')}）"
+        for key in ("toggle", "summary"):
             assert str(sel[key].cget("fg")) == p["sel_text"], \
                 f"选中行 {key} 文字应为选中白（实际 {sel[key].cget('fg')}）"
         assert int(sel["frame"].cget("highlightthickness")) == 0, \
@@ -2809,8 +2831,12 @@ class TestFullscreenReuse:
                 "选中行分界线应为亮色"
             assert str(row["head"].cget("bg")) == p["sel_bot"], \
                 "选中行头部应与外层同色"
-            assert str(row["head"].cget("fg")) == p["sel_text"], \
-                "选中行文字应为选中白"
+            # 修复缺陷R40：选中行头部用调亮级别色（非统一白）
+            cluster = app._displayed[row["idx"]]
+            expect_head = app._row_color_sel(cluster) or p["sel_text"]
+            assert str(row["head"].cget("fg")).lower() == \
+                expect_head.lower(), \
+                f"选中行头部应为调亮级别色（实际 {row['head'].cget('fg')}）"
         finally:
             win.destroy()
             app.update()
