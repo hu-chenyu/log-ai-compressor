@@ -3638,41 +3638,41 @@ class LogCompressorApp(_make_app_base()):
         # 单条错误占多行、可视错误数骤减）。
         toggle = None
         if native:
-            # 全原生行（全屏列表）：CTkFrame圆角 + CTkLabel透明背景
-            # 修复缺陷R27：选中行24px药丸圆角+4px高光边框；font直接用
-            # CTkFont对象（CTkLabel自动DPI缩放，不用_scaled_font的tuple）
-            f_sum_native = font_summary or self._font_row_summary
-            frame = ctk.CTkFrame(parent, corner_radius=10,
-                                 fg_color=p["row_bg"], border_width=1,
-                                 border_color=p["row_border"])
+            # 全原生行（全屏列表）：bg/fg 直取调色板
+            # 修复缺陷R9：原生行头部同样施加 DPI 缩放（与经典 CTkLabel
+            # 渲染一致——命名字体直传 tk.Label 不缩放）
+            f_head = self._scaled_font(f_head)
+            frame = tk.Frame(parent, bg=p["row_bg"], bd=0,
+                             highlightthickness=0)
             frame.pack(fill="x", padx=5, pady=3)
             if on_toggle is not None:
                 link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
-                line = ctk.CTkFrame(frame, fg_color="transparent")
+                line = tk.Frame(frame, bg=p["row_bg"], bd=0,
+                                highlightthickness=0)
                 line.pack(fill="x", padx=(10, 10), pady=(7, 2))
-                toggle = ctk.CTkLabel(
+                toggle = tk.Label(
                     line, text=f"\u25b6 \u00d7{cluster.count}",
-                    font=f_head, fg_color="transparent",
-                    text_color=link, cursor="hand2")
+                    font=f_head, bg=p["row_bg"], fg=link,
+                    cursor="hand2")
                 toggle.pack(side="left", padx=(0, 10))
-                head = ctk.CTkLabel(
+                head = tk.Label(
                     line, text=self._row_text(cluster, with_count=False),
-                    anchor="w", font=f_head, fg_color="transparent",
-                    text_color=self._row_color(cluster) or p["row_text"])
+                    anchor="w", font=f_head, bg=p["row_bg"],
+                    fg=self._row_color(cluster) or p["row_text"])
                 head.pack(side="left", fill="x", expand=True)
                 self._bind_row_events((toggle,), on_toggle,
                                       lambda hovered: None)
             else:
-                head = ctk.CTkLabel(
+                head = tk.Label(
                     frame, text=self._row_text(cluster), anchor="w",
-                    font=f_head, fg_color="transparent",
-                    text_color=self._row_color(cluster) or p["row_text"])
+                    font=f_head, bg=p["row_bg"],
+                    fg=self._row_color(cluster) or p["row_text"])
                 head.pack(fill="x", padx=(10, 10), pady=(7, 2))
-            summary = ctk.CTkLabel(
+            summary = tk.Label(
                 frame, text=cluster.summary, anchor="w", justify="left",
-                wraplength=0, font=f_sum_native,
-                fg_color="transparent", text_color=p["row_text"])
-            summary.pack(fill="x", padx=(10, 10), pady=(2, 6))
+                wraplength=0, font=f_sum,
+                bg=p["row_bg"], fg=p["row_text"])
+            summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
             select_cb = on_select or (lambda: self._select_cluster(idx))
             hover_cb = on_hover or (
                 lambda hovered: self._hover_row(idx, hovered))
@@ -4691,11 +4691,9 @@ class LogCompressorApp(_make_app_base()):
                     paint_native(child)
 
             def paint_native_flat(row) -> None:
-                # 修复缺陷R27：未选中行 CTkFrame 10px圆角 + 1px细边框
+                paint_native(row["frame"])
                 try:
-                    row["frame"].configure(
-                        fg_color=p["row_bg"], corner_radius=10,
-                        border_width=1, border_color=p["row_border"])
+                    row["frame"].configure(highlightthickness=0)
                 except (tk.TclError, ValueError):
                     pass
                 c = (self._displayed[idx]
@@ -4704,22 +4702,28 @@ class LogCompressorApp(_make_app_base()):
                 try:
                     if c is not None:
                         row["head"].configure(
-                            text_color=self._row_color(c) or p["row_text"])
+                            fg=self._row_color(c) or p["row_text"])
                     if row.get("toggle") is not None:
-                        row["toggle"].configure(text_color=link)
-                    row["summary"].configure(text_color=p["row_text"])
+                        row["toggle"].configure(fg=link)
+                    row["summary"].configure(fg=p["row_text"])
                 except (tk.TclError, ValueError):
                     pass
 
             def paint_native_3d(row) -> None:
-                # 修复缺陷R27：选中行 CTkFrame 24px药丸圆角 + 4px高光边框
                 try:
                     row["frame"].configure(
-                        fg_color=p["sel_bot"], corner_radius=24,
-                        border_width=4, border_color=p["sel_hi"])
-                    for key in ("head", "toggle", "summary"):
-                        if row.get(key) is not None:
-                            row[key].configure(text_color=p["sel_text"])
+                        bg=p["sel_bot"], highlightthickness=1,
+                        highlightbackground=p["sel_border"],
+                        highlightcolor=p["sel_border"])
+                    for ch in row["frame"].winfo_children():
+                        if isinstance(ch, tk.Frame):       # 头部条
+                            ch.configure(bg=p["sel_top"])
+                            for lb in ch.winfo_children():
+                                lb.configure(bg=p["sel_top"],
+                                             fg=p["sel_text"])
+                        else:                              # 摘要 Label
+                            ch.configure(bg=p["sel_bot"],
+                                         fg=p["sel_text"])
                 except (tk.TclError, ValueError):
                     pass
 
