@@ -3638,12 +3638,13 @@ class LogCompressorApp(_make_app_base()):
         # 单条错误占多行、可视错误数骤减）。
         toggle = None
         if native:
-            # 全原生行（全屏列表）：bg/fg 直取调色板
-            # 修复缺陷R9：原生行头部同样施加 DPI 缩放（与经典 CTkLabel
-            # 渲染一致——命名字体直传 tk.Label 不缩放）
+            # 全原生行（全屏列表）：CTkFrame圆角 + 内部tk.Label（确保稳定）
+            # 修复缺陷R27：选中行圆角；corner_radius=8小于padx=10，
+            # 内部tk.Label直角背景不覆盖圆角区域
             f_head = self._scaled_font(f_head)
-            frame = tk.Frame(parent, bg=p["row_bg"], bd=0,
-                             highlightthickness=0)
+            frame = ctk.CTkFrame(parent, corner_radius=8,
+                                 fg_color=p["row_bg"], border_width=1,
+                                 border_color=p["row_border"])
             frame.pack(fill="x", padx=5, pady=3)
             if on_toggle is not None:
                 link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
@@ -4692,8 +4693,11 @@ class LogCompressorApp(_make_app_base()):
 
             def paint_native_flat(row) -> None:
                 paint_native(row["frame"])
+                # 修复缺陷R27：未选中行 CTkFrame 8px圆角 + 1px细边框
                 try:
-                    row["frame"].configure(highlightthickness=0)
+                    row["frame"].configure(
+                        fg_color=p["row_bg"], corner_radius=8,
+                        border_width=1, border_color=p["row_border"])
                 except (tk.TclError, ValueError):
                     pass
                 c = (self._displayed[idx]
@@ -4710,11 +4714,11 @@ class LogCompressorApp(_make_app_base()):
                     pass
 
             def paint_native_3d(row) -> None:
+                # 修复缺陷R27：选中行 CTkFrame 16px圆角 + 3px高光边框
                 try:
                     row["frame"].configure(
-                        bg=p["sel_bot"], highlightthickness=1,
-                        highlightbackground=p["sel_border"],
-                        highlightcolor=p["sel_border"])
+                        fg_color=p["sel_bot"], corner_radius=16,
+                        border_width=3, border_color=p["sel_hi"])
                     for ch in row["frame"].winfo_children():
                         if isinstance(ch, tk.Frame):       # 头部条
                             ch.configure(bg=p["sel_top"])
