@@ -2865,6 +2865,121 @@ class TestClusterExpandMain:
         assert app._selected_inst is None
 
 
+class TestMainWindowSearch:
+    """优化缺陷R45：主窗口结果搜索框（显示层过滤，不触发重新分析）。"""
+
+    @staticmethod
+    def _two_cluster_log():
+        """两簇日志：kernel ×3 + filesystem ×3（经典模式小数据；
+        消息差异足够大，不会触发相似度合并）。"""
+        lines = []
+        for i in range(3):
+            lines.append(
+                f"2024-01-01 09:00:0{i} ERROR [db] kernel panic in scheduler")
+        for i in range(3):
+            lines.append(
+                f"2024-01-01 09:01:0{i} ERROR [db] filesystem journal corrupted")
+        return "\n".join(lines)
+
+    def test_search_entry_in_filter_bar(self, app):
+        """搜索框位于级别过滤行（DEBUG 与上下文行数之间的空白区）。"""
+        assert app._search_entry is not None
+        assert "过滤列表" in app._search_entry.cget("placeholder_text")
+        info = app._search_entry.master.grid_info()
+        assert str(info["row"]) == "0", "搜索框应与级别过滤同行"
+        assert str(info["column"]) == "3", "搜索框应在复选框右侧空白区"
+
+    def test_search_filters_classic_list(self, app):
+        """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        assert app._virtual_list is None
+        assert len(app._cluster_rows) == 2
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        assert len(app._cluster_rows) == 1
+        row = app._cluster_rows[0]
+        assert "kernel" in app._displayed[row["idx"]].summary
+        assert app._search_count.cget("text") == "1 / 2 条"
+
+    def test_search_clear_restores_all(self, app):
+        """清空关键字 → 全部簇恢复显示，计数标签隐藏。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        assert len(app._cluster_rows) == 1
+        app._search_var.set("")
+        app._apply_search_filter()
+        app.update()
+        assert len(app._cluster_rows) == 2
+        assert app._search_count.cget("text") == ""
+
+    def test_search_no_match_shows_hint(self, app):
+        """无匹配 → 列表空态提示「无匹配的错误簇」。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("zzz-no-match")
+        app._apply_search_filter()
+        app.update()
+        assert not app._cluster_rows
+        texts = [w.cget("text") for w in app._cluster_list.winfo_children()
+                 if hasattr(w, "cget")]
+        assert any("无匹配" in t for t in texts)
+
+    def test_search_preserves_expand_and_selection(self, app):
+        """过滤命中的簇保持展开与选中状态（经典模式）。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        kidx = next(i for i, c in enumerate(app._displayed)
+                    if "kernel" in c.summary)
+        app._toggle_cluster_expand(kidx)
+        app._select_cluster(kidx)
+        app.update()
+        assert kidx in app._expanded_clusters
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        assert kidx in app._expanded_clusters, "命中的展开簇应保持展开"
+        assert app._selected_row == kidx, "命中的选中簇应保持选中"
+
+    def test_search_filters_virtual_list(self, app):
+        """虚拟模式：视图行按关键字过滤，展开状态保留。"""
+        _run_many_clusters(app)   # 60 条：signal/carrier/beacon 三组
+        app.update()
+        vl = app._virtual_list
+        assert vl is not None
+        # 簇数与分组受聚类/优先级排序影响 —— 以实际 _displayed 为准
+        kidx = next(i for i, c in enumerate(app._displayed)
+                    if "signal lost" in c.summary)
+        app._toggle_cluster_expand(kidx)
+        app.update()
+        app._search_var.set("signal lost")
+        app._apply_search_filter()
+        app.update()
+        expected = sum(1 for c in app._displayed
+                       if "signal lost" in c.summary)
+        c_rows = [r for r in vl._data if r[0] == "c"]
+        assert len(c_rows) == expected, "视图簇行数应等于命中数"
+        assert len(c_rows) < len(app._displayed), "确实发生了过滤"
+        # 展开状态保留（命中过滤的展开簇其实例行仍在视图中）
+        assert kidx in app._expanded_clusters
+        assert any(r[0] == "i" and r[1] == kidx for r in vl._data)
+        assert app._search_count.cget("text") == \
+            f"{expected} / {len(app._displayed)} 条"
+
+    def test_search_debounce_schedules_job(self, app):
+        """输入经 trace 调度防抖任务（200ms 合并连续输入）。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("filesystem")
+        assert app._search_job is not None, "输入应调度防抖任务"
+        app._apply_search_filter()
+        assert app._search_job is None
+
+
 class TestFullscreenReuse:
     def _open_fs(self, app):
         app._open_list_fullscreen()
