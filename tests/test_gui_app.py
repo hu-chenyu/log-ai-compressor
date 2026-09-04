@@ -2263,30 +2263,41 @@ class TestVirtualList:
         assert int(normal["frame"].cget("highlightthickness")) == 0
 
     def test_row_press_pop_animation(self, app):
-        """优化缺陷R23：点击行立体弹起（下沉→上弹+阴影→回落 240ms）。
+        """优化缺陷R23/R25：点击行立体弹起（下沉→上弹→回落 240ms）。
 
-        按下：行窗口 y 坐标下沉（按压感）；释放：启动两段缓动动画
-        （上弹带阴影 → 回落），完成后阴影删除、坐标精确复位。
+        按下：行窗口 y 坐标下沉（按压感）+ 常驻投影收缩；释放：两
+        段缓动动画（上弹投影加深 → 回落），完成后坐标精确复位、
+        常驻投影保留基础深度（R25：立体感不随动画结束消失）。
         """
         _run_many_clusters(app)
+        app.update()
+        app._select_cluster(1)
         app.update()
         vl = app._virtual_list
         slots = {s["idx"]: s for s in vl.slots}
         assert 1 in slots
         s1 = slots[1]
         base = 1 * vl.ROW_HEIGHT
+        grp = s1.get("_round")
+        assert grp and grp.get("shadow"), "选中行应有常驻投影"
+        sh_h0 = (vl._canvas.coords(grp["shadow"])[3]
+                 - vl._canvas.coords(grp["shadow"])[1])
         vl._pop_press(s1)
         assert vl._canvas.coords(s1["win"])[1] > base, "按下应下沉"
+        sh_h1 = (vl._canvas.coords(grp["shadow"])[3]
+                 - vl._canvas.coords(grp["shadow"])[1])
+        assert sh_h1 < sh_h0, "按压时投影应收缩"
         vl._pop_release(s1)
-        pop = s1.get("_pop")
-        assert pop and pop.get("shadow"), "释放应进入弹起动画（含阴影）"
+        assert s1.get("_pop") is not None, "释放应进入弹起动画"
         t0 = time.time()
         while s1.get("_pop") is not None and time.time() - t0 < 2.0:
             app.update()
             time.sleep(0.02)
-        assert s1.get("_pop") is None, "动画应在约 240ms 内完成并清理"
-        assert pop["shadow"] not in vl._canvas.find_all(), "阴影应删除"
+        assert s1.get("_pop") is None, "动画应在约 240ms 内完成"
         assert vl._canvas.coords(s1["win"])[1] == base, "结束应回落原位"
+        sh_h2 = (vl._canvas.coords(grp["shadow"])[3]
+                 - vl._canvas.coords(grp["shadow"])[1])
+        assert sh_h2 == sh_h0, "动画结束后常驻投影应恢复基础深度"
 
     def test_row_click_triggers_pop(self, app):
         """优化缺陷R23：行点击事件驱动按压/弹起（与选中同链路）。"""
@@ -2301,7 +2312,7 @@ class TestVirtualList:
         s1["head"].event_generate("<ButtonRelease-1>", x=20, y=10)
         app.update()
         pop = s1.get("_pop")
-        assert pop and pop.get("shadow"), "释放应启动弹起动画"
+        assert pop and pop.get("t0") is not None, "释放应启动弹起动画"
         t0 = time.time()
         while s1.get("_pop") is not None and time.time() - t0 < 2.0:
             app.update()
@@ -2309,22 +2320,28 @@ class TestVirtualList:
         assert s1.get("_pop") is None
 
     def test_pop_cancel_on_slot_recycle(self, app):
-        """优化缺陷R23：槽位回收取消弹起动画（阴影清理、坐标归新位）。"""
+        """优化缺陷R23/R25：槽位回收取消动画并清圆角组、坐标归新位。"""
         _run_many_clusters(app)
+        app.update()
+        app._select_cluster(1)
         app.update()
         vl = app._virtual_list
         slots = {s["idx"]: s for s in vl.slots}
         s1 = slots[1]
         vl._pop_press(s1)
         vl._pop_release(s1)
-        sh = s1["_pop"]["shadow"]
-        vl._fill_slot(s1, 5, vl._region_w())      # 回收到新索引
+        grp = s1.get("_round")
+        assert grp, "选中行应有圆角组"
+        items = list(grp["masks"]) + [grp["hi"], grp["shadow"]]
+        vl._fill_slot(s1, 5, vl._region_w())      # 回收到未选中索引
         assert s1.get("_pop") is None, "回收应取消动画"
-        assert sh not in vl._canvas.find_all(), "回收应删除阴影"
+        assert s1.get("_round") is None, "回收应清圆角组"
+        alive = set(vl._canvas.find_all())
+        assert not any(it in alive for it in items), "圆角图元应删除"
         assert vl._canvas.coords(s1["win"])[1] == 5 * vl.ROW_HEIGHT
 
     def test_selected_row_rounded_corners(self, app):
-        """优化缺陷R24：选中行四角圆角遮罩（椭圆角常驻），未选中无。"""
+        """优化缺陷R24/R25：选中行圆角组（遮罩+高光+投影），未选中无。"""
         _run_many_clusters(app)
         app.update()
         app._select_cluster(1)
@@ -2332,17 +2349,21 @@ class TestVirtualList:
         vl = app._virtual_list
         slots = {s["idx"]: s for s in vl.slots}
         sel, normal = slots[1], slots[2]
-        ids = sel.get("_round")
-        assert ids and len(ids) == 4, "选中行应有四角圆角遮罩"
-        for it in ids:
+        grp = sel.get("_round")
+        assert grp, "选中行应有圆角组"
+        assert len(grp["masks"]) == 4, "应有四角圆角遮罩"
+        for it in grp["masks"]:
             assert vl._canvas.type(it) == "polygon"
-        assert not normal.get("_round"), "未选中行应无遮罩（保持直角）"
+        assert grp.get("hi") and grp.get("shadow"), "应有高光+投影"
+        assert not normal.get("_round"), "未选中行应无圆角组（保持直角）"
         base = 1 * vl.ROW_HEIGHT
-        bbox = vl._canvas.bbox(ids[0])          # 左上遮罩贴行顶缘
+        bbox = vl._canvas.bbox(grp["masks"][0])  # 左上遮罩贴行顶缘
         assert abs(bbox[1] - base) <= 1
+        # 修复缺陷R25：圆角半径明显加大（≥18px，肉眼可见弯曲）
+        assert grp["r"] >= 18
 
     def test_round_masks_follow_pop_and_recycle(self, app):
-        """优化缺陷R24：圆角遮罩跟随弹起动画；槽位回收时清除。"""
+        """优化缺陷R24：圆角组跟随弹起动画；槽位回收时清除。"""
         _run_many_clusters(app)
         app.update()
         app._select_cluster(1)
@@ -2353,10 +2374,10 @@ class TestVirtualList:
         base = 1 * vl.ROW_HEIGHT
         vl._pop_press(s1)
         dy = s1["_pop"]["dy"]
-        bbox = vl._canvas.bbox(s1["_round"][0])  # 左上遮罩顶缘随下沉
+        bbox = vl._canvas.bbox(s1["_round"]["masks"][0])  # 顶缘随下沉
         assert abs(bbox[1] - (base + dy)) <= 1, "遮罩应跟随行位移"
         vl._fill_slot(s1, 5, vl._region_w())     # 回收到未选中索引
-        assert not s1.get("_round"), "回收/取消选中应清除遮罩"
+        assert not s1.get("_round"), "回收/取消选中应清除圆角组"
 
     def test_virtual_list_survives_theme_switch(self, app):
         """修复R6：虚拟模式下主题切换刷新配色不崩溃。"""
