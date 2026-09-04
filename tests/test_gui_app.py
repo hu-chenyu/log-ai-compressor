@@ -781,6 +781,72 @@ class TestFatalLevelFilter:
         assert app._level_vars["ERROR"].get() is True
 
 
+# ---------------------------------------------------------------------------
+# 修复缺陷R41：经典选中行闭合亮边框 + 3D 高光/阴影条完整显示
+# ---------------------------------------------------------------------------
+class TestClassicSelectedRow3D:
+    """R41 回归：CTkFrame 条 place 抛 ValueError 曾中断选中分支
+    （3D 条不显示 + 后续文字着色被跳过，底部视觉开口）。"""
+
+    def test_bars_native_tk_frame(self, app):
+        """高光/阴影条为原生 tk.Frame（非 CTkFrame，place 不抛异常）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        row = app._cluster_rows[0]
+        assert isinstance(row["_hi_bar"], tk.Frame)
+        assert not isinstance(row["_hi_bar"], ctk.CTkFrame), \
+            "高光条应为原生 tk.Frame（CTkFrame place 禁止宽高）"
+        assert isinstance(row["_shadow_bar"], tk.Frame)
+        assert not isinstance(row["_shadow_bar"], ctk.CTkFrame)
+
+    def test_selected_row_closed_border_and_3d_bars(self, app):
+        """选中行：4px 亮边框闭合 + 高光/阴影条显示 + 文字着色。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        row = app._cluster_rows[0]
+        # 未选中行（分析后自动选中首行，row 1 为未选中）：条隐藏
+        other = app._cluster_rows[1]
+        assert not other["_hi_bar"].winfo_ismapped()
+        assert not other["_shadow_bar"].winfo_ismapped()
+        app._select_cluster(0)
+        app.update()
+        p = app._palette()
+        # 3D 条显示且颜色正确
+        assert row["_hi_bar"].winfo_ismapped(), "选中应显示顶部高光条"
+        assert row["_shadow_bar"].winfo_ismapped(), "选中应显示底部阴影条"
+        assert str(row["_hi_bar"].cget("bg")).lower() == \
+            p["sel_hi"].lower()
+        assert str(row["_shadow_bar"].cget("bg")).lower() == \
+            p["sel_shadow"].lower()
+        # 闭合亮边框（4px sel_hi）
+        assert int(row["frame"].cget("border_width")) == 4
+        assert str(row["frame"].cget("border_color")).lower() == \
+            p["sel_hi"].lower()
+        # place 中断曾跳过其后的文字着色 —— 回归断言
+        cluster = app._displayed[0]
+        expect_head = app._row_color_sel(cluster) or p["sel_text"]
+        assert str(row["head"].cget("text_color")).lower() == \
+            expect_head.lower(), "选中行头部应为调亮级别色"
+        assert str(row["summary"].cget("text_color")).lower() == \
+            p["sel_text"].lower(), "选中行摘要应为选中白"
+
+    def test_deselect_restores_flat_and_hides_bars(self, app):
+        """换选：原行恢复未选中平面（1px 细边框 + 条隐藏）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        row = app._cluster_rows[0]
+        app._select_cluster(0)
+        app.update()
+        assert row["_shadow_bar"].winfo_ismapped()
+        app._select_cluster(1)
+        app.update()
+        assert not row["_hi_bar"].winfo_ismapped(), "换选后原行高光条应隐藏"
+        assert not row["_shadow_bar"].winfo_ismapped(), \
+            "换选后原行阴影条应隐藏"
+        assert int(row["frame"].cget("border_width")) == 1, \
+            "换选后原行应恢复 1px 细边框"
+
+
 class TestFontSizeSelector:
     def test_font_menu_exists_with_default(self, app):
         """修复R10：字体大小选择器存在且默认「中」。"""

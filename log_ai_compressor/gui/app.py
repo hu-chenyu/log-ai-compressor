@@ -3938,10 +3938,14 @@ class LogCompressorApp(_make_app_base()):
         # pady=0 制造「浮起凸起」视觉差（选中行比未选中行稍大）。
         frame.pack(fill="x", padx=5, pady=4)
         # 3D 立体效果：顶部受光高光条 + 底部投影（选中态显示，未选中隐藏）
-        _hi_bar = ctk.CTkFrame(frame, height=2, fg_color=p["sel_hi"],
-                                corner_radius=0)
-        _shadow_bar = ctk.CTkFrame(frame, height=2, fg_color=p["sel_shadow"],
-                                    corner_radius=0)
+        # 修复缺陷R41：CTkFrame 的 place() 禁止 width/height 参数（抛
+        # ValueError）—— _apply_row_bg 选中分支在 place 高光/阴影条时
+        # 异常中断（3D 条不显示 + 后续文字着色被跳过，底部视觉开口）；
+        # 改原生 tk.Frame（与全屏 native 行同款），高度按 DPI 缩放
+        _hi_bar = tk.Frame(frame, bg=p["sel_hi"], bd=0,
+                           highlightthickness=0, height=self._dpx(2))
+        _shadow_bar = tk.Frame(frame, bg=p["sel_shadow"], bd=0,
+                               highlightthickness=0, height=self._dpx(2))
         if on_toggle is not None:
             # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
             link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
@@ -4136,14 +4140,21 @@ class LogCompressorApp(_make_app_base()):
                         # 修复缺陷R29/R33：高光/阴影条两端内缩 24px
                         # （圆角半径 18 + 6 余量），方角端头不压圆角
                         # 切角区、不与圆角描边重合
+                        # 修复缺陷R41：条已改原生 tk.Frame（place 不再
+                        # 抛 ValueError 中断选中分支）；place 几何按
+                        # _dpx 缩放（tk place 为物理px，2 逻辑px 高在
+                        # 200% DPI 下只剩 1px 厚）；条色随主题刷新
                         try:
+                            _in = self._dpx(_ROW_BAR_INSET)
+                            _bh = max(1, self._dpx(2))
+                            row["_hi_bar"].configure(bg=p["sel_hi"])
                             row["_hi_bar"].place(
-                                x=_ROW_BAR_INSET, y=0, relwidth=1,
-                                width=-2 * _ROW_BAR_INSET, height=2)
+                                x=_in, y=0, relwidth=1,
+                                width=-2 * _in, height=_bh)
+                            row["_shadow_bar"].configure(bg=p["sel_shadow"])
                             row["_shadow_bar"].place(
-                                x=_ROW_BAR_INSET, rely=1.0, relwidth=1,
-                                width=-2 * _ROW_BAR_INSET,
-                                height=2, anchor="sw")
+                                x=_in, rely=1.0, relwidth=1,
+                                width=-2 * _in, height=_bh, anchor="sw")
                         except (tk.TclError, KeyError):
                             pass
                         row["summary"].configure(
