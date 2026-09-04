@@ -654,6 +654,17 @@ class VirtualClusterList:
         self._update_region()
         self._sync()
 
+    def _tgl_icon_w(self) -> int:
+        """「▶/▼」展开图标固定盒宽（物理px，修复缺陷R34）。
+
+        ▶ 比 ▼ 字形宽 8~10px：等宽盒取两字形最大宽 + 1 空格宽
+        （与原「▶ ×N」视觉间距一致），展开/收起切换只换盒内字
+        形，其后「×N」与头部文字起始 x 不变。
+        """
+        return (max(self._m_head.measure("\u25b6"),
+                    self._m_head.measure("\u25bc"))
+                + self._m_head.measure(" "))
+
     def _measure_width(self, rows: list) -> int:
         """全部行的最大文本像素宽（按实际渲染的缩放字体度量）。"""
         app = self._app
@@ -668,8 +679,9 @@ class VirtualClusterList:
                             cluster.summary, self.SUMMARY_CLIP)),
                         self._m_head.measure(app._row_text(
                             cluster, with_count=False))
+                        + self._tgl_icon_w()
                         + self._m_head.measure(
-                            f"\u25bc \u00d7{cluster.count}"))
+                            f"\u00d7{cluster.count}"))
                 else:
                     inst = app._displayed[row[1]].instances[row[2]]
                     need = max(
@@ -974,11 +986,24 @@ class VirtualClusterList:
         line.pack(fill="x")
         # 修复缺陷R9：头部/摘要字体均施加与经典模式 CTkLabel 一致的
         # DPI 缩放（原生 tk.Label 不缩放命名字体，直接传会偏小/不一致）
+        # 修复缺陷R34：▶/▼ 等宽图标盒（固定宽 Frame + place 居中）——
+        # 两字形宽差 8~10px，合写单标签时展开/收起切换推动后续
+        # 头部文字左右位移；盒宽固定后切换只换盒内字形
+        icon_box = tk.Frame(line, bg=p["row_bg"], bd=0,
+                            highlightthickness=0,
+                            width=self._tgl_icon_w())
+        icon_box.pack_propagate(False)
+        icon_box.pack(side="left", fill="y", padx=(10, 0), pady=(7, 2))
+        toggle_icon = tk.Label(
+            icon_box, anchor="center",
+            font=self._app._scaled_font(self._app._font_row_head),
+            bg=p["row_bg"], fg="#2563EB", cursor="hand2")
+        toggle_icon.place(relx=0.5, rely=0.5, anchor="center")
         toggle = tk.Label(
             line, anchor="w",
             font=self._app._scaled_font(self._app._font_row_head),
             bg=p["row_bg"], fg="#2563EB", cursor="hand2")
-        toggle.pack(side="left", padx=(10, 0), pady=(7, 2))
+        toggle.pack(side="left", pady=(7, 2))
         head = tk.Label(line, anchor="w",
                         font=self._app._scaled_font(self._app._font_row_head),
                         bg=p["row_bg"], fg=p["row_text"])
@@ -996,11 +1021,13 @@ class VirtualClusterList:
         win = self._canvas.create_window(0, 0, window=frame,
                                          anchor="nw", width=width - 48,
                                          height=self.ROW_HEIGHT - 24)
-        self._bind_row_wheel(frame, toggle, head, summary)
+        self._bind_row_wheel(frame, toggle_icon, icon_box, toggle,
+                             head, summary)
         # 修复缺陷R22：line 入字典 —— 选中/悬停着色需覆盖头部条
         # （原未保存引用，line 底色停留 row_bg，选中蓝块被头部
         # 内边距区域的暗色横竖条切割成三段）
         return {"frame": frame, "line": line, "toggle": toggle,
+                "toggle_icon": toggle_icon, "icon_box": icon_box,
                 "head": head, "summary": summary, "win": win, "idx": -1,
                 "virtual": True}
 
@@ -1037,10 +1064,15 @@ class VirtualClusterList:
                 bot_c = p["sel_bot"] if selected else bg
                 fg = p["sel_text"] if selected else None
                 slot["frame"].configure(bg=bot_c)
+                # 修复缺陷R34：等宽盒内只换 ▶/▼ 字形，次数另列，
+                # 盒底随头部条能带色
+                slot["toggle_icon"].configure(
+                    bg=top_c, fg=fg or link,
+                    text="\u25bc" if expanded else "\u25b6")
                 slot["toggle"].configure(
                     bg=top_c, fg=fg or link,
-                    text=(f"\u25bc \u00d7{cluster.count}" if expanded
-                          else f"\u25b6 \u00d7{cluster.count}"))
+                    text=f"\u00d7{cluster.count}")
+                slot["icon_box"].configure(bg=top_c)
                 slot["head"].configure(
                     bg=top_c, fg=fg or head_color,
                     text=app._row_text(cluster, with_count=False))
@@ -1048,7 +1080,8 @@ class VirtualClusterList:
                     bg=bot_c, fg=fg or p["row_text"],
                     text=app._clip(cluster.summary, self.SUMMARY_CLIP))
                 for w in (slot["frame"], slot["head"], slot["summary"],
-                          slot["toggle"]):
+                          slot["toggle"], slot["toggle_icon"],
+                          slot["icon_box"]):
                     w.bind("<Enter>",
                            lambda e, i=idx: self._hover(i, True))
                     w.bind("<Leave>",
@@ -1062,9 +1095,11 @@ class VirtualClusterList:
                     w.bind("<ButtonRelease-1>",
                            lambda e, s=slot: self._pop_release(s))
                 # 展开按钮独立绑定（不触发行选中）
-                slot["toggle"].bind(
-                    "<Button-1>",
-                    lambda e, i=cidx: app._toggle_cluster_expand(i))
+                for w in (slot["toggle"], slot["toggle_icon"],
+                          slot["icon_box"]):
+                    w.bind("<Button-1>",
+                           lambda e, i=cidx:
+                           app._toggle_cluster_expand(i))
             else:
                 cidx, iidx = row[1], row[2]
                 inst = app._displayed[cidx].instances[iidx]
@@ -1076,7 +1111,9 @@ class VirtualClusterList:
                 bot_c = p["sel_bot"] if selected else bg
                 fg = p["sel_text"] if selected else None
                 slot["frame"].configure(bg=bot_c)
+                slot["toggle_icon"].configure(bg=top_c, text="")
                 slot["toggle"].configure(bg=top_c, text="")
+                slot["icon_box"].configure(bg=top_c)
                 slot["head"].configure(
                     bg=top_c, fg=fg or p["muted"],
                     text="      " + app._inst_head_text(inst))
@@ -1085,7 +1122,8 @@ class VirtualClusterList:
                     text="        " + app._clip(inst.summary,
                                                 self.SUMMARY_CLIP))
                 for w in (slot["frame"], slot["head"], slot["summary"],
-                          slot["toggle"]):
+                          slot["toggle"], slot["toggle_icon"],
+                          slot["icon_box"]):
                     # 优化缺陷R23：实例行同款立体弹起
                     w.bind("<Button-1>",
                            lambda e, ci=cidx, ii=iidx, s=slot:
@@ -1555,6 +1593,35 @@ class LogCompressorApp(_make_app_base()):
     def _font_px(self, base: int) -> int:
         """基准字号 -> 当前档位实际字号（修复缺陷R10：四档缩放）。"""
         return max(10, round(base * FONT_SIZE_SCALE.get(self._font_size, 1.0)))
+
+    def _toggle_icon_w(self, scaled_font, for_ctk: bool) -> int:
+        """「▶/▼」展开图标固定盒宽（修复缺陷R34）。
+
+        ▶(U+25B6) 比 ▼(U+25BC) 字形宽 8~10px（Consolas 22/28 实
+        测），二者合写一个标签时展开/收起切换使标签总宽变化，
+        其后「×N ● 优先级 级别」头部文字随之左右位移（展开行与
+        未展开行头部不对齐）。图标拆进等宽盒（两字形最大宽 + 1
+        空格宽，保持原「▶ ×N」视觉间距），切换只换盒内字形，
+        盒宽与后续文字起始 x 不变。
+
+        scaled_font: 已按 DPI 缩放的字体元组（物理px 度量）。
+        for_ctk=True 返回 CTk 逻辑px（CTkLabel width 用，CTk 内部
+        再乘控件缩放）；False 返回物理px（原生 tk.Frame width 用）。
+        结果按字体元组缓存（字号档位切换后元组变化自动重测）。
+        """
+        key = (repr(scaled_font), for_ctk)
+        cache = getattr(self, "_tgl_w_cache", None)
+        if cache is None:
+            cache = self._tgl_w_cache = {}
+        if key not in cache:
+            fm = tkfont.Font(font=scaled_font)
+            phys = (max(fm.measure("▶"), fm.measure("▼"))
+                    + fm.measure(" "))
+            if for_ctk:
+                scale = max(1.0, getattr(self, "_font_scale", 1.0))
+                phys = int(-(-phys // scale))    # 物理 → CTk 逻辑px
+            cache[key] = phys
+        return cache[key]
 
     def _apply_font_size(self, choice: str) -> None:
         """字体大小档位切换（修复缺陷R10：小/中/大/特大，立即生效）。
@@ -2432,9 +2499,18 @@ class LogCompressorApp(_make_app_base()):
                                     y + rh - 2 * gy, fill=bg, width=0)
             tx = x_base + gx + 10 - scroll_x
             if tgl:
-                canvas.create_text(tx, y + 7, anchor="nw",
-                                   font=vl._m_head, fill=link, text=tgl)
-                tx += vl._m_head.measure(tgl) + 10
+                # 修复缺陷R34：图标画在等宽盒中心（与真实行
+                # _make_slot 布局一致），盒宽固定，「×N」与头部
+                # 文字起始 x 不随 ▶/▼ 切换变化
+                _iw = (max(vl._m_head.measure("\u25b6"),
+                           vl._m_head.measure("\u25bc"))
+                       + vl._m_head.measure(" "))
+                _ic, _sp, _cnt = tgl.partition(" ")
+                canvas.create_text(tx + _iw // 2, y + 7, anchor="n",
+                                   font=vl._m_head, fill=link, text=_ic)
+                canvas.create_text(tx + _iw, y + 7, anchor="nw",
+                                   font=vl._m_head, fill=link, text=_cnt)
+                tx += _iw + vl._m_head.measure(_cnt) + 10
             canvas.create_text(tx, y + 7, anchor="nw", font=vl._m_head,
                                fill=head_color, text=head_text)
             canvas.create_text(x_base + gx + 10 - scroll_x,
@@ -3347,12 +3423,15 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R16：经典模式刷新「▶ ×N」按钮与展开实例区配色
         link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
         for row in rows:
-            toggle = row.get("toggle")
-            if toggle is not None:
-                try:
-                    toggle.configure(text_color=link)
-                except (tk.TclError, ValueError):
-                    continue
+            # 修复缺陷R34：展开按钮拆为图标（toggle_icon）+ 次数
+            # （toggle）两个标签，链接色同步刷新
+            for _tkey in ("toggle", "toggle_icon"):
+                toggle = row.get(_tkey)
+                if toggle is not None:
+                    try:
+                        toggle.configure(text_color=link)
+                    except (tk.TclError, ValueError):
+                        continue
         for st in getattr(self, "_classic_expanded", {}).values():
             try:
                 st["area"].configure(bg=p["window"])
@@ -3651,6 +3730,7 @@ class LogCompressorApp(_make_app_base()):
         # 长摘要靠列表底部水平滚动条左右滑动查看（大字体下换行会使
         # 单条错误占多行、可视错误数骤减）。
         toggle = None
+        toggle_icon = None
         if native:
             # 全原生行（全屏列表）：CTkFrame圆角 + 内部tk.Label（确保稳定）
             # 修复缺陷R27：选中行圆角；corner_radius=8小于padx=10，
@@ -3665,8 +3745,21 @@ class LogCompressorApp(_make_app_base()):
                 line = tk.Frame(frame, bg=p["row_bg"], bd=0,
                                 highlightthickness=0)
                 line.pack(fill="x", padx=(10, 10), pady=(7, 2))
+                # 修复缺陷R34：▶/▼ 拆进等宽盒（固定宽 Frame + place
+                # 居中）—— 两字形宽差 8~10px，合写单标签时展开/收起
+                # 切换推动后续头部文字左右位移（展开行与未展开行
+                # 头部不对齐）；盒宽固定后切换只换盒内字形
+                icon_box = tk.Frame(
+                    line, bg=p["row_bg"], bd=0, highlightthickness=0,
+                    width=self._toggle_icon_w(f_head, for_ctk=False))
+                icon_box.pack_propagate(False)
+                icon_box.pack(side="left", fill="y")
+                toggle_icon = tk.Label(
+                    icon_box, text="\u25b6", font=f_head,
+                    bg=p["row_bg"], fg=link, cursor="hand2")
+                toggle_icon.place(relx=0.5, rely=0.5, anchor="center")
                 toggle = tk.Label(
-                    line, text=f"\u25b6 \u00d7{cluster.count}",
+                    line, text=f"\u00d7{cluster.count}",
                     font=f_head, bg=p["row_bg"], fg=link,
                     cursor="hand2")
                 toggle.pack(side="left", padx=(0, 10))
@@ -3675,7 +3768,7 @@ class LogCompressorApp(_make_app_base()):
                     anchor="w", font=f_head, bg=p["row_bg"],
                     fg=self._row_color(cluster) or p["row_text"])
                 head.pack(side="left", fill="x", expand=True)
-                self._bind_row_events((toggle,), on_toggle,
+                self._bind_row_events((toggle_icon, toggle), on_toggle,
                                       lambda hovered: None)
             else:
                 head = tk.Label(
@@ -3697,6 +3790,7 @@ class LogCompressorApp(_make_app_base()):
                    "idx": idx, "native": True}
             if toggle is not None:
                 row["toggle"] = toggle
+                row["toggle_icon"] = toggle_icon
             if register:
                 self._cluster_rows.append(row)
             return row
@@ -3729,8 +3823,19 @@ class LogCompressorApp(_make_app_base()):
             line.pack(fill="x", padx=(22, 22), pady=(7, 2))
             # 修复缺陷R29：头部控件一律透明 —— 背景只由外层圆角
             # frame 统一提供（各自带色会拼出两个方角矩形压圆角）
+            # 修复缺陷R34：▶/▼ 拆进等宽盒（CTkLabel 固定宽 + 居中）——
+            # 两字形宽差 8~10px，合写单标签时展开/收起切换推动
+            # 后续头部文字左右位移；盒宽固定后切换只换盒内字形
+            toggle_icon = ctk.CTkLabel(
+                line, text="\u25b6",
+                width=self._toggle_icon_w(self._scaled_font(f_head),
+                                          for_ctk=True),
+                anchor="center",
+                font=f_head, text_color=link, cursor="hand2",
+                fg_color="transparent")
+            toggle_icon.pack(side="left")
             toggle = ctk.CTkLabel(
-                line, text=f"\u25b6 \u00d7{cluster.count}",
+                line, text=f"\u00d7{cluster.count}",
                 font=f_head, text_color=link, cursor="hand2",
                 fg_color="transparent")
             toggle.pack(side="left", padx=(0, 10))
@@ -3741,7 +3846,7 @@ class LogCompressorApp(_make_app_base()):
                 font=f_head, fg_color="transparent")
             head.pack(side="left", fill="x", expand=True)
             # 展开按钮独立绑定（不触发行选中）
-            self._bind_row_events((toggle,), on_toggle,
+            self._bind_row_events((toggle_icon, toggle), on_toggle,
                                   lambda hovered: None)
         else:
             head = ctk.CTkLabel(
@@ -3784,6 +3889,7 @@ class LogCompressorApp(_make_app_base()):
                "divider": divider}
         if toggle is not None:
             row["toggle"] = toggle
+            row["toggle_icon"] = toggle_icon
         if register:
             self._cluster_rows.append(row)
         return row
@@ -3890,7 +3996,7 @@ class LogCompressorApp(_make_app_base()):
                         # 方角块压圆角）；同色绘制才是真无缝
                         if row.get("line") is not None:
                             row["line"].configure(fg_color=p["sel_bot"])
-                        for key in ("head", "summary", "toggle"):
+                        for key in ("head", "summary", "toggle", "toggle_icon"):
                             if row.get(key) is not None:
                                 row[key].configure(fg_color=p["sel_bot"])
                         if row.get("divider") is not None:
@@ -3914,6 +4020,9 @@ class LogCompressorApp(_make_app_base()):
                         if row.get("toggle") is not None:
                             row["toggle"].configure(
                                 text_color=p["sel_text"])
+                        if row.get("toggle_icon") is not None:
+                            row["toggle_icon"].configure(
+                                text_color=p["sel_text"])
                     else:
                         # 修复缺陷R31/R33：未选中圆角半径 9（与选中
                         # 18 保持 2:1 比例，视觉统一）
@@ -3930,7 +4039,7 @@ class LogCompressorApp(_make_app_base()):
                             row["line"].configure(fg_color=color)
                         # 修复缺陷R30：未选中内部控件背景同样与外层
                         # 同色（悬停色变化时画布不同步问题一致）
-                        for key in ("head", "summary", "toggle"):
+                        for key in ("head", "summary", "toggle", "toggle_icon"):
                             if row.get(key) is not None:
                                 row[key].configure(fg_color=color)
                         # 修复缺陷R29：未选中分界细线恢复低调色
@@ -3956,6 +4065,9 @@ class LogCompressorApp(_make_app_base()):
                             link = ("#60a5fa" if p["is_dark"] == "1"
                                     else "#2563EB")
                             row["toggle"].configure(text_color=link)
+                        if row.get("toggle_icon") is not None:
+                            row["toggle_icon"].configure(
+                                text_color=link)
             except (tk.TclError, ValueError):
                 continue
             return
@@ -4124,7 +4236,7 @@ class LogCompressorApp(_make_app_base()):
                     pass
             self._classic_expanded.pop(idx, None)
             self._expanded_clusters.pop(idx, None)
-            row["toggle"].configure(text=f"\u25b6 \u00d7{cluster.count}")
+            row["toggle_icon"].configure(text="\u25b6")
             try:
                 state["area"].destroy()
             except tk.TclError:
@@ -4139,7 +4251,7 @@ class LogCompressorApp(_make_app_base()):
                  "pos": 0}
         self._classic_expanded[idx] = state
         self._expanded_clusters[idx] = True
-        row["toggle"].configure(text=f"\u25bc \u00d7{cluster.count}")
+        row["toggle_icon"].configure(text="\u25bc")
         pos = next(i for i, r in enumerate(self._cluster_rows)
                    if r.get("idx") == idx)
         if pos + 1 < len(self._cluster_rows):
@@ -4790,19 +4902,30 @@ class LogCompressorApp(_make_app_base()):
 
             def paint_native_3d(row) -> None:
                 # 修复缺陷R27：选中行 CTkFrame 16px圆角 + 3px高光边框
+                # 修复缺陷R34：头部条内含图标等宽盒（Frame 嵌套），
+                # 两层遍历会对 Frame 配置 fg 抛 TclError 中断着色 ——
+                # 改逐层递归（Frame 无 fg 选项，逐控件 try 跳过）
                 try:
                     row["frame"].configure(
                         fg_color=p["sel_bot"], corner_radius=16,
                         border_width=3, border_color=p["sel_hi"])
+
+                    def _paint(w, bg) -> None:
+                        try:
+                            w.configure(bg=bg)
+                        except (tk.TclError, ValueError):
+                            pass
+                        try:
+                            w.configure(fg=p["sel_text"])
+                        except (tk.TclError, ValueError):
+                            pass
+                        for c2 in w.winfo_children():
+                            _paint(c2, bg)
+
                     for ch in row["frame"].winfo_children():
-                        if isinstance(ch, tk.Frame):       # 头部条
-                            ch.configure(bg=p["sel_top"])
-                            for lb in ch.winfo_children():
-                                lb.configure(bg=p["sel_top"],
-                                             fg=p["sel_text"])
-                        else:                              # 摘要 Label
-                            ch.configure(bg=p["sel_bot"],
-                                         fg=p["sel_text"])
+                        # 头部条（Frame 子树）顶亮色 / 摘要 Label 底深色
+                        _paint(ch, p["sel_top"] if isinstance(ch, tk.Frame)
+                               else p["sel_bot"])
                 except (tk.TclError, ValueError):
                     pass
 
@@ -4888,7 +5011,7 @@ class LogCompressorApp(_make_app_base()):
                     except (tk.TclError, ValueError, KeyError):
                         pass
                 expanded.pop(idx, None)
-                row["toggle"].configure(text=f"\u25b6 \u00d7{cluster.count}")
+                row["toggle_icon"].configure(text="\u25b6")
                 labels = state["labels"]
 
                 def remove_batch() -> None:
@@ -4915,7 +5038,7 @@ class LogCompressorApp(_make_app_base()):
             state = {"area": area, "labels": [], "cancelled": False,
                      "pos": 0}
             expanded[idx] = state
-            row["toggle"].configure(text=f"\u25bc \u00d7{cluster.count}")
+            row["toggle_icon"].configure(text="\u25bc")
             # 实例区插入到本簇行之后、下一簇行之前（pack before 定位）
             row_pos = next(i for i, r in enumerate(fs_rows)
                            if r["idx"] == idx)

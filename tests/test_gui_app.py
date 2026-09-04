@@ -2057,13 +2057,25 @@ class TestFullscreenExpand:
                 and w.winfo_class() == "Label"
                 and "×12" in str(w.cget("text"))]
 
+    def _toggle_icon(self, toggle):
+        """次数标签 → 同行图标等宽盒内的 ▶/▼ 标签（修复缺陷R34）。"""
+        line = toggle.master
+        for ch in line.winfo_children():
+            if isinstance(ch, tk.Frame):
+                kids = ch.winfo_children()
+                if kids and isinstance(kids[0], tk.Label):
+                    return kids[0]
+        return None
+
     def test_toggle_button_exists_with_count(self, app):
         """每簇有「▶ ×N」展开按钮（次数在按钮上可点击）。"""
         win = self._open_fs(app)
         try:
             toggles = self._find_toggles(win)
             assert toggles, "应有 ×12 展开按钮"
-            assert "▶" in str(toggles[0].cget("text")), "初始为收起态 ▶"
+            assert "▶" in str(
+                self._toggle_icon(toggles[0]).cget("text")), \
+                "初始为收起态 ▶"
         finally:
             win.destroy()
             app.update()
@@ -2077,7 +2089,8 @@ class TestFullscreenExpand:
             for _ in range(40):
                 app.update()
                 time.sleep(0.005)
-            assert "▼" in str(toggle.cget("text")), "展开后为 ▼"
+            assert "▼" in str(
+                self._toggle_icon(toggle).cget("text")), "展开后为 ▼"
             # 实例行：含「  L行号  」模式的原生 label
             inst_labels = [
                 w for w in _all_widgets(win)
@@ -2142,16 +2155,27 @@ class TestFullscreenExpand:
         win = self._open_fs(app)
         try:
             toggle = self._find_toggles(win)[0]
+            # 修复缺陷R34：展开/收起头部文字起始 x 不变（图标等宽盒）
+            head_lbl = [w for w in _all_widgets(win)
+                        if w.winfo_class() == "Label"
+                        and "ERROR" in str(w.cget("text"))
+                        and "×" not in str(w.cget("text"))][0]
+            head_x0 = head_lbl.winfo_x()
             _click_ctk_label(toggle)
             for _ in range(40):
                 app.update()
                 time.sleep(0.005)
-            assert "▼" in str(toggle.cget("text"))
+            assert "▼" in str(self._toggle_icon(toggle).cget("text"))
+            assert head_lbl.winfo_x() == head_x0, \
+                "展开后头部文字起始 x 不变"
             _click_ctk_label(toggle)
             for _ in range(60):
                 app.update()
                 time.sleep(0.005)
-            assert "▶" in str(toggle.cget("text")), "收起后为 ▶"
+            assert "▶" in str(self._toggle_icon(toggle).cget("text")), \
+                "收起后为 ▶"
+            assert head_lbl.winfo_x() == head_x0, \
+                "收起后头部文字起始 x 复原"
         finally:
             win.destroy()
             app.update()
@@ -2567,6 +2591,22 @@ class TestClusterExpandMain:
         app._toggle_cluster_expand(1)
         app.update()
 
+    def test_expand_virtual_head_alignment_stable(self, app):
+        """修复缺陷R34：虚拟模式展开/收起头部文字起始 x 不变。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = app._virtual_list
+        assert vl is not None
+        slot0 = next(s for s in vl.slots if s.get("idx") == 0)
+        x0 = slot0["head"].winfo_x()
+        app._toggle_cluster_expand(0)
+        app.update()
+        slot1 = next(s for s in vl.slots if s.get("idx") == 0)
+        assert slot1["head"].winfo_x() == x0, \
+            "展开后头部文字起始 x 不变"
+        app._toggle_cluster_expand(0)
+        app.update()
+
     def test_virtual_instance_row_click_shows_detail(self, app):
         """虚拟模式：点击实例行 → 右侧详情显示该实例自身（非典型样例）。"""
         _run_many_clusters(app)
@@ -2608,7 +2648,8 @@ class TestClusterExpandMain:
         assert 0 in app._classic_expanded
         state = app._classic_expanded[0]
         assert len(state["labels"]) >= len(insts), "实例行应全量创建"
-        assert row["toggle"].cget("text").startswith("\u25bc"), \
+        # 修复缺陷R34：▶/▼ 图标拆为独立 toggle_icon 等宽盒标签
+        assert row["toggle_icon"].cget("text") == "\u25bc", \
             "展开后按钮应为 ▼"
         # 修复缺陷R28：实例行为字典结构（label=CTkLabel, wrap=圆角容器）
         first_d = state["labels"][0]
@@ -2633,7 +2674,31 @@ class TestClusterExpandMain:
         app.update()
         assert 0 not in app._classic_expanded
         assert not state["area"].winfo_exists(), "收起后实例区应销毁"
-        assert row["toggle"].cget("text").startswith("\u25b6")
+        assert row["toggle_icon"].cget("text") == "\u25b6"
+
+    def test_expand_classic_head_alignment_stable(self, app):
+        """修复缺陷R34：展开/收起 ▶/▼ 切换，头部内容起始 x 不变。
+
+        ▶ 比 ▼ 字形宽 8~10px，合写单标签时切换推动后续文字位移
+        （展开行与未展开行头部不对齐）；图标等宽盒后位置不变。
+        """
+        _run_paste_analysis(app, self._repeat_log(8))
+        app.update()
+        assert app._virtual_list is None, "小数据应走经典列表"
+        row = next(r for r in app._cluster_rows if r.get("idx") == 0)
+        app.update()
+        x_collapsed = row["head"].winfo_x()
+        icon_w0 = row["toggle_icon"].winfo_width()
+        app._toggle_cluster_expand(0)
+        app.update()
+        assert row["head"].winfo_x() == x_collapsed, \
+            "展开后头部文字起始 x 不变"
+        assert row["toggle_icon"].winfo_width() == icon_w0, \
+            "图标盒宽不随 ▼ 切换变化"
+        app._toggle_cluster_expand(0)
+        app.update()
+        assert row["head"].winfo_x() == x_collapsed, \
+            "收起后头部文字起始 x 复原"
 
     def test_rerender_clears_expand_state(self, app):
         """重新渲染（过滤/TopN/再分析）后展开与实例选中状态清空。"""
