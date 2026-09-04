@@ -1555,16 +1555,81 @@ class TestContextLines:
         assert DEFAULT_CONTEXT_LINES == 50
 
     def test_filter_inputs_removed(self, app):
-        """优化缺陷R43：包含/排除关键字与上下文行数输入区整体删除。"""
+        """优化缺陷R43：包含/排除关键字与 Top N 输入区整体删除。"""
         assert not hasattr(app, "_include_entry"), "包含关键字输入框应已删除"
         assert not hasattr(app, "_exclude_entry"), "排除关键字输入框应已删除"
-        assert not hasattr(app, "_ctx_entry"), "上下文行数输入框应已删除"
         assert not hasattr(app, "_topn_entry"), "Top N 输入框应已删除"
         # 分析参数固定为管线默认（不再采集过滤输入）
         common_levels = [lv for lv, var in app._level_vars.items()
                          if var.get()]
         assert set(common_levels) == {"ERROR", "FAIL"}, \
             "默认级别仍为 ERROR+FAIL"
+
+    def test_context_entry_relocated_with_default(self, app):
+        """优化缺陷R44：上下文行数输入框回归（级别过滤与解析规则
+        之间的空白区），默认值 50。"""
+        assert app._ctx_entry is not None
+        assert app._ctx_entry.get() == "50"
+        assert str(app._ctx_entry.grid_info()["row"]) == "0", \
+            "输入框应与级别过滤同行（右侧空白区）"
+
+    def test_context_lines_negative_becomes_zero(self, app):
+        """优化缺陷R44：≥0 有效；负数按 0 行处理；非法/空回退 50。"""
+        for raw, expected in [("0", 0), ("5", 5), ("200", 200),
+                              ("99999", 99999),
+                              ("-1", 0), ("-3", 0), ("-999", 0),
+                              ("abc", 50), ("", 50)]:
+            app._ctx_entry.delete(0, "end")
+            app._ctx_entry.insert(0, raw)
+            assert app._current_context_lines() == expected, \
+                f"输入 {raw!r} 应得 {expected}（≥0 有效，负数按 0 行）"
+
+    def test_context_lines_passed_to_pipeline(self, app, monkeypatch):
+        """GUI 配置的上下文行数必须传给分析管线（含负数→0）。"""
+        import log_ai_compressor.gui.app as app_mod
+        captured = {}
+
+        def spy_analyze(text, **kwargs):
+            captured["context_lines"] = kwargs.get("context_lines")
+            from log_ai_compressor.core.models import RunStats, AnalysisResult
+            return AnalysisResult(stats=RunStats(source="<t>", total_lines=1),
+                                  clusters=[])
+
+        monkeypatch.setattr(app_mod, "analyze_text", spy_analyze)
+        app._ctx_entry.delete(0, "end")
+        app._ctx_entry.insert(0, "-5")
+        app._tabview.set("文本粘贴")
+        app._paste_box.delete("1.0", "end")
+        app._paste_box.insert("1.0", SAMPLE_PASTE)
+        app._on_start()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            app.update()
+            if app._result is not None:
+                break
+            time.sleep(0.02)
+        assert captured["context_lines"] == 0, \
+            "填负数分析应以上下文 0 行执行"
+
+    def test_context_lines_persisted(self, app, tmp_path):
+        """用户调整的上下文行数必须持久化，重启后恢复。"""
+        app._ctx_entry.delete(0, "end")
+        app._ctx_entry.insert(0, "100")
+        app._save_config()
+        saved = app._store.load()
+        assert saved.get("context_lines") == 100
+
+    def test_context_lines_restored_from_config(self, app, monkeypatch):
+        """配置文件中的 context_lines 启动时恢复到输入框。"""
+        app._ctx_entry.delete(0, "end")
+        app._ctx_entry.insert(0, "77")
+        app._save_config()
+        # 模拟重启：清空输入框后用保存的配置重放恢复逻辑
+        app._ctx_entry.delete(0, "end")
+        app._config = app._store.load()
+        app._restore_config()
+        app.update()
+        assert app._ctx_entry.get() == "77"
 
 
 # ---------------------------------------------------------------------------

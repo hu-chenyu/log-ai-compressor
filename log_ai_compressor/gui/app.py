@@ -27,6 +27,7 @@ import customtkinter as ctk
 
 from log_ai_compressor import __version__
 from log_ai_compressor.constants import (
+    DEFAULT_CONTEXT_LINES,
     DEFAULT_SELECTED_LEVELS,
     HUMAN_NAME,
 )
@@ -1932,7 +1933,7 @@ class LogCompressorApp(_make_app_base()):
         self._level_vars: Dict[str, tk.BooleanVar] = {}
         self._level_tooltips: Dict[str, Tooltip] = {}
         level_box = ctk.CTkFrame(panel, fg_color="transparent")
-        level_box.grid(row=0, column=1, columnspan=6, sticky="w")
+        level_box.grid(row=0, column=1, columnspan=4, sticky="w")
         col = 0
         for level in LEVEL_CHECKS:
             # 默认勾选 ERROR/FAIL（DEFAULT_SELECTED_LEVELS）
@@ -1956,9 +1957,14 @@ class LogCompressorApp(_make_app_base()):
             self._level_tooltips[level] = Tooltip(
                 info, lambda lv=level: _LEVEL_HELP[lv])
 
-        # 优化缺陷R43：过滤输入区整体删除（用户决策：包含/排除
-        # 关键字、上下文行数、Top N 全部从 GUI 移除；分析固定
-        # 使用管线默认值 —— 无关键字过滤、上下文 50 行、全量簇）
+        # 优化缺陷R43：包含/排除关键字、Top N 输入区删除（用户决策）
+        # 优化缺陷R44：上下文行数输入框回归 —— 置于级别过滤与解析
+        # 规则之间的空白区（≥0 有效，负数按 0 行处理）
+        ctk.CTkLabel(panel, text="上下文行数").grid(
+            row=0, column=5, padx=(6, 2), sticky="e")
+        self._ctx_entry = ctk.CTkEntry(panel, width=60)
+        self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
+        self._ctx_entry.grid(row=0, column=6, padx=(2, 12), sticky="w")
 
         # 修复缺陷R10：级别复选框容器跨列 1~6，解析规则右移至列 7~9
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=7, padx=(6, 2),
@@ -3065,8 +3071,12 @@ class LogCompressorApp(_make_app_base()):
         levels = list(cfg.get("levels") or DEFAULT_SELECTED_LEVELS)
         for level, var in self._level_vars.items():
             var.set(level in levels)
-        # 优化缺陷R43：旧配置中的 include/exclude/top_n/context_lines
-        # 键静默忽略（过滤输入区已整体删除）
+        # 优化缺陷R43：旧配置中的 include/exclude/top_n 键静默忽略
+        # （过滤输入区已删除）
+        # 优化缺陷R44：恢复上次设置的上下文行数
+        if isinstance(cfg.get("context_lines"), int):
+            self._ctx_entry.delete(0, "end")
+            self._ctx_entry.insert(0, str(cfg["context_lines"]))
         if cfg.get("rule") in RULE_NAMES:
             self._rule_menu.set(cfg["rule"])
         # 修复缺陷R10：字体大小档位恢复（__init__ 已按档位建字体，
@@ -3083,6 +3093,7 @@ class LogCompressorApp(_make_app_base()):
     def _current_config_dict(self) -> dict:
         return {
             "levels": [lv for lv, var in self._level_vars.items() if var.get()],
+            "context_lines": self._current_context_lines(),
             "rule": self._rule_menu.get(),
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
@@ -3101,6 +3112,17 @@ class LogCompressorApp(_make_app_base()):
     def _save_config(self) -> None:
         self._config = self._current_config_dict()
         self._store.save(self._config)
+
+    def _current_context_lines(self) -> int:
+        """读取上下文行数（优化缺陷R44：≥0 任意整数有效；负数
+        按 0 行处理（用户填负数仍分析 → 上下文 0 行）；非法/空
+        输入回退默认 50；无上限，内存代价随「行数×簇数」线性增长）。
+        """
+        try:
+            value = int(self._ctx_entry.get() or DEFAULT_CONTEXT_LINES)
+        except ValueError:
+            return DEFAULT_CONTEXT_LINES
+        return max(0, value)
 
     def _on_rule_changed(self, choice: str) -> None:
         """解析规则切换：状态栏即时展示该规则的适用场景说明。
@@ -3540,6 +3562,7 @@ class LogCompressorApp(_make_app_base()):
         # 全部 UI 状态必须在主线程采集（Tk 控件禁止跨线程访问）
         payload["common"] = dict(
             levels=[lv for lv, var in self._level_vars.items() if var.get()],
+            context_lines=self._current_context_lines(),
             rule=self._rule_menu.get(),
         )
         if mode == "文件导入":
