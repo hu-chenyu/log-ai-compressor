@@ -601,8 +601,12 @@ class VirtualClusterList:
                 font=app._scaled_font(app._font_row_head))
             self._m_sum = tkfont.Font(
                 font=app._scaled_font(app._font_row_summary))
+            # 修复缺陷R41b：行高内边距 44 同步 DPI 缩放（行距随
+            # 缩放字体翻倍而 44 不变 → 200% DPI 下行窗口为容纳内容
+            # 被迫底部溢出圆角背景，盖住底部亮描边/阴影条）
             self.ROW_HEIGHT = (self._m_head.metrics("linespace")
-                               + self._m_sum.metrics("linespace") + 44)
+                               + self._m_sum.metrics("linespace")
+                               + self._sx(44))
         except (tk.TclError, ValueError):
             self._m_head = app._font_row_head
             self._m_sum = app._font_row_summary
@@ -1089,11 +1093,14 @@ class VirtualClusterList:
         # 修复缺陷R37：行窗口内缩 = _sx(_ROW_PADX)（与主列表内容起点
         # 22 逻辑px 一致，随 DPI 缩放；原固定 24 物理px 高 DPI 下
         # 内容偏右且与主列表错位）；上下各留12px避免覆盖圆角背景
+        # 修复缺陷R41b：垂直内缩同步 DPI 缩放（原固定 24 物理px，
+        # 200% DPI 下行窗口底部溢出圆角背景 4px，盖住底部亮描边与
+        # 阴影条 → 选中行底部「边框开口」）
         _inset = self._sx(_ROW_PADX)
         win = self._canvas.create_window(
             0, 0, window=frame, anchor="nw",
             width=max(10, width - 2 * _inset),
-            height=self.ROW_HEIGHT - 24)
+            height=self.ROW_HEIGHT - 2 * self._sx(12))
         self._bind_row_wheel(frame, toggle_icon, icon_box, toggle,
                              head, divider, summary)
         # 修复缺陷R22：line 入字典 —— 选中/悬停着色需覆盖头部条
@@ -1234,15 +1241,16 @@ class VirtualClusterList:
             gx, gy = self._row_gaps()
             # 修复缺陷R37：行窗口内缩 = _sx(_ROW_PADX)（与主列表内容
             # 起点一致，随 DPI 缩放；上下各12px），居中在圆角背景内
+            # 修复缺陷R41b：垂直内缩同步 DPI 缩放（与 _make_slot 一致）
             self._canvas.itemconfigure(
                 slot["win"], state="normal",
                 width=max(10, width - 2 * self._sx(_ROW_PADX)),
-                height=self.ROW_HEIGHT - 24)
+                height=self.ROW_HEIGHT - 2 * self._sx(12))
             # 优化缺陷R23：弹起动画进行中坐标由动画持有（同 idx
             # 填充刷新不打断位移，避免悬停着色刷新造成 1 帧回跳）
             if slot.get("_pop") is None:
                 self._canvas.coords(slot["win"], gx + self._sx(_ROW_PADX),
-                                    self._row_y0(idx) + 12)
+                                    self._row_y0(idx) + self._sx(12))
         except (tk.TclError, ValueError, IndexError):
             pass
 
@@ -1294,7 +1302,10 @@ class VirtualClusterList:
         base = self._row_y0(idx)
         try:
             # 修复缺陷R27：行窗口位置偏移（居中在圆角背景内）
-            self._canvas.coords(slot["win"], gx + 24, base + 12 + dy)
+            # 修复缺陷R41b：坐标与 _fill_slot 同款缩放（原固定
+            # gx+24/+12，高 DPI 下按压左跳且底部溢出圆角背景）
+            self._canvas.coords(slot["win"], gx + self._sx(_ROW_PADX),
+                                base + self._sx(12) + dy)
         except tk.TclError:
             return
         slot["_pop"] = {"base": base, "dy": dy,
@@ -1344,7 +1355,9 @@ class VirtualClusterList:
         try:
             gx, _gy = self._row_gaps()
             # 修复缺陷R27：行窗口位置偏移（居中在圆角背景内）
-            self._canvas.coords(slot["win"], gx + 24, base + 12 + dy)
+            # 修复缺陷R41b：坐标与 _fill_slot 同款缩放
+            self._canvas.coords(slot["win"], gx + self._sx(_ROW_PADX),
+                                base + self._sx(12) + dy)
             self._round_move(slot)             # 圆角+投影逐帧跟随
         except tk.TclError:
             slot["_pop"] = None
@@ -1374,8 +1387,9 @@ class VirtualClusterList:
             try:
                 gx, _gy = self._row_gaps()
                 # 修复缺陷R27：行窗口位置偏移（居中在圆角背景内）
-                self._canvas.coords(slot["win"], gx + 24,
-                                    self._row_y0(idx) + 12)
+                # 修复缺陷R41b：坐标与 _fill_slot 同款缩放
+                self._canvas.coords(slot["win"], gx + self._sx(_ROW_PADX),
+                                    self._row_y0(idx) + self._sx(12))
             except tk.TclError:
                 pass
             self._round_move(slot)              # 圆角组随复位
