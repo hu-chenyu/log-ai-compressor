@@ -974,6 +974,12 @@ class VirtualClusterList:
         frame = ctk.CTkFrame(self._canvas, corner_radius=10,
                              fg_color=p["row_bg"], border_width=1,
                              border_color=p["row_border"])
+        # 修复缺陷R27：CTkFrame在Canvas create_window中需要显式设置尺寸
+        # 并强制_draw()，否则内部_canvas尺寸为1x1，圆角不绘制
+        frame.configure(width=width, height=self.ROW_HEIGHT)
+        frame.update_idletasks()
+        if hasattr(frame, '_draw'):
+            frame._draw()
         # 修复缺陷R16：头部行 = 「▶ ×N」展开按钮 + 元信息（实例行
         # 时按钮置空、文本缩进表示层级），按钮独立点击展开/收起
         line = ctk.CTkFrame(frame, fg_color="transparent")
@@ -1046,6 +1052,11 @@ class VirtualClusterList:
                     corner_radius=24 if selected else 10,
                     border_width=4 if selected else 1,
                     border_color=p["sel_hi"] if selected else p["row_border"])
+                # 修复缺陷R27：CTkFrame修改corner_radius后强制重绘
+                # （CTk内部_draw是延迟的，不update会显示旧的直角）
+                # 修复缺陷R27：强制CTkFrame重绘圆角（update_idletasks不够）
+                if hasattr(slot["frame"], '_draw'):
+                    slot["frame"]._draw()
                 slot["toggle"].configure(
                     fg_color="transparent",
                     text_color=fg or link,
@@ -1091,6 +1102,8 @@ class VirtualClusterList:
                     corner_radius=24 if selected else 10,
                     border_width=4 if selected else 1,
                     border_color=p["sel_hi"] if selected else p["row_border"])
+                if hasattr(slot["frame"], '_draw'):
+                    slot["frame"]._draw()
                 slot["toggle"].configure(fg_color="transparent", text="")
                 slot["head"].configure(
                     fg_color="transparent",
