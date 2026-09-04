@@ -3704,8 +3704,9 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R31：未选中行也要可见圆角 —— 创建即带 1px 细边框
         # （原仅 _apply_row_bg 后才有，未选中行 border_width=0 且行
         # 底色与列表底色对比极低，圆角存在但肉眼不可见）；圆角半径
-        # 12px（选中 24 药丸形 / 未选中 12 小圆角，风格统一有区分）
-        frame = ctk.CTkFrame(parent, corner_radius=12,
+        # 9px（选中 18 药丸形 / 未选中 9 小圆角，2:1 风格统一有区分）
+        # 修复缺陷R33：随选中圆角 24→18 同步 12→9，保持 2:1 比例
+        frame = ctk.CTkFrame(parent, corner_radius=9,
                              fg_color=p["row_bg"],
                              border_width=1,
                              border_color=p["row_border"])
@@ -3721,9 +3722,11 @@ class LogCompressorApp(_make_app_base()):
             # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
             link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
             line = ctk.CTkFrame(frame, fg_color="transparent")
-            # 修复缺陷R32：头部条左右 padx 28 > 选中圆角半径 24 ——
+            # 修复缺陷R32：头部条左右 padx > 选中圆角半径 ——
             # 内部控件完全收进圆角区域，左/右缘不与圆角描边重合
-            line.pack(fill="x", padx=(28, 28), pady=(7, 2))
+            # 修复缺陷R33：圆角 24→18、padx 28→22（仍 22>18 不重合），
+            # 内容左移 6px 减少左侧空白，视觉紧凑
+            line.pack(fill="x", padx=(22, 22), pady=(7, 2))
             # 修复缺陷R29：头部控件一律透明 —— 背景只由外层圆角
             # frame 统一提供（各自带色会拼出两个方角矩形压圆角）
             toggle = ctk.CTkLabel(
@@ -3745,15 +3748,15 @@ class LogCompressorApp(_make_app_base()):
                 frame, text=self._row_text(cluster), anchor="w",
                 text_color=self._row_color(cluster) or None,
                 font=f_head, fg_color="transparent")
-            # 修复缺陷R32：padx 28 > 圆角半径 24
-            head.pack(fill="x", padx=(28, 28), pady=(7, 2))
-        # 修复缺陷R29：头部/摘要间 1px 细分界线（R32：两端内缩 28px
-        # > 圆角半径 24，不碰左右边框；颜色随选中态在 _apply_row_bg
+            # 修复缺陷R32/R33：padx 22 > 圆角半径 18
+            head.pack(fill="x", padx=(22, 22), pady=(7, 2))
+        # 修复缺陷R29：头部/摘要间 1px 细分界线（R33：两端内缩 22px
+        # > 圆角半径 18，不碰左右边框；颜色随选中态在 _apply_row_bg
         # 切换）。CTkFrame 版 —— 原生 tk.Frame 的 pack padx 不随
-        # DPI 缩放（28 物理px 在 200% 下只有 14 逻辑px 内缩不足）
+        # DPI 缩放（物理px 在 200% 下内缩减半不足）
         divider = ctk.CTkFrame(frame, height=1, corner_radius=0,
                                fg_color=p["row_border"])
-        divider.pack(fill="x", padx=(28, 28))
+        divider.pack(fill="x", padx=(22, 22))
         # 修复缺陷R9：摘要单行不换行（wraplength=0）
         # CTkLabel 传 CTkFont 对象（自动 DPI 缩放+档位跟随），
         # 不能传 create_scaled_tuple 的 tuple（CTk 内部解析 'normal roman' 失败）
@@ -3763,9 +3766,9 @@ class LogCompressorApp(_make_app_base()):
             font=self._font_row_summary,
             fg_color="transparent",
             text_color=p["row_text"])
-        # 修复缺陷R32：摘要左右 padx 28 > 圆角半径 24（左下/右下角
+        # 修复缺陷R32/R33：摘要左右 padx 22 > 圆角半径 18（左下/右下角
         # 区域不留控件，不与圆角描边重合）
-        summary.pack(fill="x", padx=(28, 28), pady=(2, 6))
+        summary.pack(fill="x", padx=(22, 22), pady=(2, 6))
         select_cb = on_select or (lambda: self._select_cluster(idx))
         hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
         # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
@@ -3867,10 +3870,12 @@ class LogCompressorApp(_make_app_base()):
                         # （sel_hi 受光色）+ 选中行 pack 收紧 pady 制造
                         # 「浮起」感；渐变背景（line sel_top / frame sel_bot）
                         # 模拟光照，圆角 14 保持药丸形。
-                        # 修复缺陷R27：药丸形圆角(24px)+4px高光边框
+                        # 修复缺陷R27：药丸形圆角+4px高光边框
                         # + 顶部受光高光条 + 底部投影，制造明显3D凸起感
+                        # 修复缺陷R33：圆角 24→18（padx 同步 28→22，
+                        # 内容左移 6px 减少左侧空白，仍不压圆角描边）
                         row["frame"].configure(
-                            fg_color=p["sel_bot"], corner_radius=24,
+                            fg_color=p["sel_bot"], corner_radius=18,
                             border_width=4,
                             border_color=p["sel_hi"])
                         # 选中行 pady 收紧 -> 比未选中行稍大，浮起感
@@ -3892,14 +3897,14 @@ class LogCompressorApp(_make_app_base()):
                             row["divider"].configure(
                                 fg_color=p["sel_border"])
                         # 3D 立体：顶部高光条 + 底部阴影条（place 定位不占布局空间）
-                        # 修复缺陷R29/R32：高光/阴影条两端内缩 30px
-                        # （圆角半径 24 + 6 余量），方角端头不压圆角
+                        # 修复缺陷R29/R33：高光/阴影条两端内缩 24px
+                        # （圆角半径 18 + 6 余量），方角端头不压圆角
                         # 切角区、不与圆角描边重合
                         try:
                             row["_hi_bar"].place(
-                                x=30, y=0, relwidth=1, width=-60, height=2)
+                                x=24, y=0, relwidth=1, width=-48, height=2)
                             row["_shadow_bar"].place(
-                                x=30, rely=1.0, relwidth=1, width=-60,
+                                x=24, rely=1.0, relwidth=1, width=-48,
                                 height=2, anchor="sw")
                         except (tk.TclError, KeyError):
                             pass
@@ -3910,9 +3915,10 @@ class LogCompressorApp(_make_app_base()):
                             row["toggle"].configure(
                                 text_color=p["sel_text"])
                     else:
-                        # 修复缺陷R31：未选中圆角半径 12（原为 10）
+                        # 修复缺陷R31/R33：未选中圆角半径 9（与选中
+                        # 18 保持 2:1 比例，视觉统一）
                         row["frame"].configure(
-                            fg_color=color, corner_radius=12,
+                            fg_color=color, corner_radius=9,
                             border_width=1,
                             border_color=p["row_border"])
                         # 未选中恢复默认 pady
@@ -4162,7 +4168,8 @@ class LogCompressorApp(_make_app_base()):
                          f"仅展示前 {len(insts)} 条实例",
                     font=self._scaled_font(self._font_row_summary),
                     bg=inst_bg, fg=p["muted"], anchor="w")
-                lbl.pack(fill="x", padx=(34, 8), pady=(2, 4))
+                # 修复缺陷R33：截断提示随实例容器 22 同步 34→28
+                lbl.pack(fill="x", padx=(28, 8), pady=(2, 4))
                 state["labels"].append(lbl)
         add_batch()
 
@@ -4175,11 +4182,13 @@ class LogCompressorApp(_make_app_base()):
         # 与簇行风格统一（选中态圆角+立体）
         # 修复缺陷R27：实例行圆角容器 —— 未选中 8px 圆角+1px 细边，
         # 选中态由 _classic_inst_click 升级为 10px 圆角+2px 高光边
+        # 修复缺陷R33：实例行容器左内缩 28→22（随簇行内容 padx
+        # 同步，保持实例区与摘要左缘相对缩进关系不变）
         inst_wrap = ctk.CTkFrame(
             parent, corner_radius=8,
             fg_color=bg, border_width=1,
             border_color=p["row_border"])
-        inst_wrap.pack(fill="x", padx=(28, 8), pady=1)
+        inst_wrap.pack(fill="x", padx=(22, 8), pady=1)
         lbl = ctk.CTkLabel(
             inst_wrap, text=text, anchor="w", justify="left",
             wraplength=0,
@@ -4852,7 +4861,9 @@ class LogCompressorApp(_make_app_base()):
                            font=self._scaled_font(self._font_fs_inst),
                            bg=inst_bg, fg=p["row_text"],
                            cursor="hand2", wraplength=0)
-            lbl.pack(fill="x", padx=(34, 8), pady=3)
+            # 修复缺陷R33：全屏实例行左内缩 34→28（随簇行内容
+            # padx 28→22 同步，保持与摘要左缘相对缩进不变）
+            lbl.pack(fill="x", padx=(28, 8), pady=3)
             lbl.bind("<Button-1>",
                      lambda e, i=inst, l=lbl: select_instance(idx, i, l))
             lbl.bind("<Enter>", lambda e, l=lbl: l.configure(
@@ -4935,7 +4946,7 @@ class LogCompressorApp(_make_app_base()):
                             font=self._scaled_font(self._font_fs_inst),
                             bg=inst_bg,
                             fg=p["muted"], anchor="w"
-                        ).pack(fill="x", padx=(34, 8), pady=(2, 4))
+                        ).pack(fill="x", padx=(28, 8), pady=(2, 4))
             add_batch()
 
         def render(keyword: str = "") -> None:
