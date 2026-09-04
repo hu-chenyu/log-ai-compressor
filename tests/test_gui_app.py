@@ -2535,7 +2535,12 @@ class TestClusterExpandMain:
         assert f"行 {inst.line_no}~" in detail
 
     def test_expand_classic_shows_instances(self, app):
-        """经典模式：行内就地展开全部实例，点击看实例详情，收起销毁。"""
+        """经典模式：行内就地展开全部实例，点击看实例详情，收起销毁。
+
+        修复缺陷R28：R27 后实例行为 {label, wrap} 字典 —— 点击绑定
+        必须传字典（误传裸控件时 _classic_inst_click 取 inst_dict
+        ["label"] 报 TclError: unknown option "-label"，点击无反应）。
+        """
         _run_paste_analysis(app, self._repeat_log(8))
         app.update()
         assert app._virtual_list is None, "小数据应走经典列表"
@@ -2549,17 +2554,24 @@ class TestClusterExpandMain:
         assert len(state["labels"]) >= len(insts), "实例行应全量创建"
         assert row["toggle"].cget("text").startswith("\u25bc"), \
             "展开后按钮应为 ▼"
-        # 实例行文本含时间戳与行号
-        first = state["labels"][0]
+        # 修复缺陷R28：实例行为字典结构（label=CTkLabel, wrap=圆角容器）
+        first_d = state["labels"][0]
+        assert isinstance(first_d, dict) and "label" in first_d \
+            and "wrap" in first_d, "实例行应为 {label, wrap} 字典"
+        first = first_d["label"]
         assert "L" in first.cget("text") and insts[0].summary[:8] \
             in first.cget("text")
-        # 点击首个实例 → 右侧实例详情
-        first.event_generate("<Button-1>", x=3, y=2)
+        # 点击首个实例 → 右侧实例详情（R28 前：点击报错无反应）
+        # 注：CTkLabel.bind 绑定在内部 _label/_canvas 上，事件须发
+        # 到内部控件（真实鼠标点击命中的正是内部控件）
+        first._label.event_generate("<Button-1>", x=3, y=2)
         app.update()
         assert app._classic_inst_sel is first
         detail = app._detail_box.get("1.0", "end")
         assert "【实例详情】" in detail
         assert f"行 {insts[0].line_no}~" in detail
+        # 选中态 3D 样式落在 wrap 上（R27：10px 圆角 + 2px 高光边）
+        assert first_d["wrap"].cget("border_width") == 2
         # 收起
         app._toggle_cluster_expand(0)
         app.update()
@@ -3525,14 +3537,26 @@ class TestThemeSwitch:
         app._apply_theme_switch("dark" if before_dark else "light")
 
     def test_row_colors_refresh_on_theme(self, app):
-        """切换主题后列表行配色刷新（原生 label 不随 CTk 主题自动变）。"""
+        """切换主题后列表行配色刷新（原生 label 不随 CTk 主题自动变）。
+
+        修复缺陷R28：R27 后经典行摘要为 CTkLabel（无 fg 选项），
+        文字色读 text_color（旧读 fg 抛 ValueError）。
+        """
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         app.update()
+
+        def sum_fg():
+            w = app._cluster_rows[1]["summary"]
+            try:
+                return str(w.cget("text_color"))   # CTkLabel
+            except (ValueError, tk.TclError):
+                return str(w.cget("fg"))           # 原生 tk.Label
+
         dark = app._is_dark_mode()
-        fg_before = str(app._cluster_rows[1]["summary"].cget("fg"))
+        fg_before = sum_fg()
         app._apply_theme_switch("light" if dark else "dark")
         app.update()
-        fg_after = str(app._cluster_rows[1]["summary"].cget("fg"))
+        fg_after = sum_fg()
         assert fg_before != fg_after, "行文字颜色应随主题刷新"
         # 暗色模式用浅色文字 / 亮色模式用深色文字（对比度保障）
         if app._is_dark_mode():

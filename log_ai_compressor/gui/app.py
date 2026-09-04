@@ -3357,7 +3357,15 @@ class LogCompressorApp(_make_app_base()):
             try:
                 st["area"].configure(bg=p["window"])
                 for lbl in st["labels"]:
-                    if lbl.winfo_exists():
+                    # 修复缺陷R28：R27 后实例行为 {label, wrap} 字典
+                    # （原按裸 tk.Label 刷 bg 会 AttributeError）；
+                    # 截断提示仍是裸 tk.Label，混型分别处理
+                    if isinstance(lbl, dict):
+                        if lbl["wrap"].winfo_exists():
+                            lbl["wrap"].configure(fg_color=p["window"])
+                            lbl["label"].configure(
+                                text_color=p["row_text"])
+                    elif lbl.winfo_exists():
                         lbl.configure(bg=p["window"], fg=p["row_text"])
             except (tk.TclError, ValueError, KeyError):
                 continue
@@ -3365,8 +3373,14 @@ class LogCompressorApp(_make_app_base()):
         if sel is not None:
             try:
                 if sel.winfo_exists():
-                    sel.configure(bg=p["row_selected"])
-            except tk.TclError:
+                    # 修复缺陷R28：sel 为 CTkLabel（configure(bg=) 抛
+                    # ValueError 非 TclError）—— 选中态经圆角容器
+                    # wrap 刷新（与 _classic_inst_click 选中样式一致）
+                    sel.master.configure(
+                        fg_color=p["sel_bot"], corner_radius=10,
+                        border_width=2, border_color=p["sel_hi"])
+                    sel.configure(text_color=p["sel_text"])
+            except (tk.TclError, ValueError):
                 pass
 
     # ==================================================================
@@ -4126,15 +4140,20 @@ class LogCompressorApp(_make_app_base()):
             fg_color="transparent",
             text_color=p["row_text"], cursor="hand2")
         lbl.pack(fill="x", padx=10, pady=4)
+        # 修复缺陷R28：点击绑定必须传字典（R27 误传 lbl 裸控件，
+        # _classic_inst_click 按字典取 label/wrap 时报
+        # TclError: unknown option "-label"，实例行点击无反应）
+        inst = {"label": lbl, "wrap": inst_wrap}
         lbl.bind("<Button-1>",
-                 lambda e: self._classic_inst_click(cidx, iidx, lbl))
+                 lambda e, d=inst: self._classic_inst_click(
+                     cidx, iidx, d))
         lbl.bind("<Enter>", lambda e: inst_wrap.configure(
             fg_color=p["row_selected"] if self._classic_inst_sel is lbl
             else p["row_hover"]))
         lbl.bind("<Leave>", lambda e: inst_wrap.configure(
             fg_color=p["row_selected"] if self._classic_inst_sel is lbl
             else bg))
-        return {"label": lbl, "wrap": inst_wrap}
+        return inst
 
     def _classic_inst_click(self, cidx, iidx, inst_dict) -> None:
         """经典实例行点击：单选高亮 + 实例详情。"""
@@ -5383,9 +5402,16 @@ class LogCompressorApp(_make_app_base()):
                 y1 = y0 + fr.winfo_height()
                 if y1 <= vy0 - py or y0 >= vy1 - py:
                     return
+                try:
+                    fill = fr.cget("bg")
+                except (tk.TclError, ValueError):
+                    # 修复缺陷R28：R27 后全屏簇行 frame 为 CTkFrame
+                    # （cget("bg") 抛 ValueError）—— 回退 fg_color
+                    # （双色元组按当前主题解析为实际色值）
+                    fill = self._resolve_row_color(fr.cget("fg_color"))
                 canvas.create_rectangle(x0, y0, x1, y1,
-                                        fill=fr.cget("bg"), width=0)
-            except tk.TclError:
+                                        fill=fill, width=0)
+            except (tk.TclError, ValueError):
                 return
         for row in self._fs_rows:
             draw_frame_bg(row.get("frame"))
