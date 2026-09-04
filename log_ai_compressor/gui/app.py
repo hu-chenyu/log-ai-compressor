@@ -963,52 +963,42 @@ class VirtualClusterList:
                 pass
 
     def _make_slot(self, width: int) -> dict:
-        """创建一个池化行（CTk 控件，支持圆角+3D立体，创建后长期复用）。
-
-        修复缺陷R27：虚拟列表行从 tk.Frame（直角，Canvas子窗口覆盖
-        圆角遮罩）改成 CTkFrame + CTkLabel 透明背景 —— CTkFrame 本身
-        支持 corner_radius 圆角，内部 CTkLabel 透明背景不覆盖圆角，
-        选中态可设置 24px 药丸圆角 + 4px 高光边框 + 3D 立体效果。
-        """
+        """创建一个池化行（原生 tk 控件，创建后长期复用）。"""
         p = self._app._palette()
-        frame = ctk.CTkFrame(self._canvas, corner_radius=10,
-                             fg_color=p["row_bg"], border_width=1,
-                             border_color=p["row_border"])
-        # 修复缺陷R27：CTkFrame在Canvas create_window中需要显式设置尺寸
-        # 并强制_draw()，否则内部_canvas尺寸为1x1，圆角不绘制
-        frame.configure(width=width, height=self.ROW_HEIGHT)
-        frame.update_idletasks()
-        if hasattr(frame, '_draw'):
-            frame._draw()
+        frame = tk.Frame(self._canvas, bg=p["row_bg"], bd=0,
+                         highlightthickness=0)
         # 修复缺陷R16：头部行 = 「▶ ×N」展开按钮 + 元信息（实例行
         # 时按钮置空、文本缩进表示层级），按钮独立点击展开/收起
-        line = ctk.CTkFrame(frame, fg_color="transparent")
+        line = tk.Frame(frame, bg=p["row_bg"], bd=0,
+                        highlightthickness=0)
         line.pack(fill="x")
-        # 修复缺陷R9：头部/摘要字体用 CTkFont（自动 DPI 缩放，与经典一致）
-        toggle = ctk.CTkLabel(
+        # 修复缺陷R9：头部/摘要字体均施加与经典模式 CTkLabel 一致的
+        # DPI 缩放（原生 tk.Label 不缩放命名字体，直接传会偏小/不一致）
+        toggle = tk.Label(
             line, anchor="w",
-            font=self._app._font_row_head,
-            fg_color="transparent",
-            text_color="#2563EB", cursor="hand2")
-        toggle.pack(side="left", padx=(14, 0), pady=(7, 2))
-        head = ctk.CTkLabel(line, anchor="w",
-                            font=self._app._font_row_head,
-                            fg_color="transparent",
-                            text_color=p["row_text"])
+            font=self._app._scaled_font(self._app._font_row_head),
+            bg=p["row_bg"], fg="#2563EB", cursor="hand2")
+        toggle.pack(side="left", padx=(10, 0), pady=(7, 2))
+        head = tk.Label(line, anchor="w",
+                        font=self._app._scaled_font(self._app._font_row_head),
+                        bg=p["row_bg"], fg=p["row_text"])
         head.pack(side="left", fill="x", expand=True,
-                  padx=(10, 14), pady=(7, 2))
+                  padx=(10, 10), pady=(7, 2))
         # 修复缺陷R9：摘要单行不换行（wraplength=0），长摘要靠水平滚动查看
-        summary = ctk.CTkLabel(frame, anchor="w", justify="left",
-                               font=self._app._font_row_summary,
-                               wraplength=0,
-                               fg_color="transparent",
-                               text_color=p["row_text"])
-        summary.pack(fill="x", padx=(14, 18), pady=(2, 6))
+        summary = tk.Label(frame, anchor="w", justify="left",
+                           font=self._app._scaled_font(
+                               self._app._font_row_summary),
+                           wraplength=0,
+                           bg=p["row_bg"], fg=p["row_text"])
+        summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
         # 窗口项高度锁 ROW_HEIGHT：整行高亮覆盖完整行（无残留缝隙）
         win = self._canvas.create_window(0, 0, window=frame,
                                          anchor="nw", width=width,
                                          height=self.ROW_HEIGHT)
         self._bind_row_wheel(frame, toggle, head, summary)
+        # 修复缺陷R22：line 入字典 —— 选中/悬停着色需覆盖头部条
+        # （原未保存引用，line 底色停留 row_bg，选中蓝块被头部
+        # 内边距区域的暗色横竖条切割成三段）
         return {"frame": frame, "line": line, "toggle": toggle,
                 "head": head, "summary": summary, "win": win, "idx": -1,
                 "virtual": True}
@@ -1045,47 +1035,35 @@ class VirtualClusterList:
                 top_c = p["sel_top"] if selected else bg
                 bot_c = p["sel_bot"] if selected else bg
                 fg = p["sel_text"] if selected else None
-                # 修复缺陷R27：CTk 控件用 fg_color/text_color，选中态
-                # 24px 药丸圆角 + 4px 高光边框 + 3D 立体
-                slot["frame"].configure(
-                    fg_color=bot_c,
-                    corner_radius=24 if selected else 10,
-                    border_width=4 if selected else 1,
-                    border_color=p["sel_hi"] if selected else p["row_border"])
-                # 修复缺陷R27：CTkFrame修改corner_radius后强制重绘
-                # （CTk内部_draw是延迟的，不update会显示旧的直角）
-                # 修复缺陷R27：强制CTkFrame重绘圆角（update_idletasks不够）
-                if hasattr(slot["frame"], '_draw'):
-                    slot["frame"]._draw()
+                slot["frame"].configure(bg=bot_c)
                 slot["toggle"].configure(
-                    fg_color="transparent",
-                    text_color=fg or link,
+                    bg=top_c, fg=fg or link,
                     text=(f"\u25bc \u00d7{cluster.count}" if expanded
                           else f"\u25b6 \u00d7{cluster.count}"))
                 slot["head"].configure(
-                    fg_color="transparent",
-                    text_color=fg or head_color,
+                    bg=top_c, fg=fg or head_color,
                     text=app._row_text(cluster, with_count=False))
                 slot["summary"].configure(
-                    fg_color="transparent",
-                    text_color=fg or p["row_text"],
+                    bg=bot_c, fg=fg or p["row_text"],
                     text=app._clip(cluster.summary, self.SUMMARY_CLIP))
-                # 修复缺陷R27：CTk 控件用 tk.Misc.bind 原始绑定（CTk 重写
-                # 的 bind 会转发到内部子控件，导致 event_generate 到容器不触发）
                 for w in (slot["frame"], slot["head"], slot["summary"],
                           slot["toggle"]):
-                    tk.Misc.bind(w, "<Enter>",
-                                  lambda e, i=idx: self._hover(i, True))
-                    tk.Misc.bind(w, "<Leave>",
-                                  lambda e, i=idx: self._hover(i, False))
+                    w.bind("<Enter>",
+                           lambda e, i=idx: self._hover(i, True))
+                    w.bind("<Leave>",
+                           lambda e, i=idx: self._hover(i, False))
                 for w in (slot["frame"], slot["head"], slot["summary"]):
-                    tk.Misc.bind(w, "<Button-1>",
-                                  lambda e, i=cidx, s=slot:
-                                  (app._select_cluster(i), self._pop_press(s)))
-                    tk.Misc.bind(w, "<ButtonRelease-1>",
-                                  lambda e, s=slot: self._pop_release(s))
-                tk.Misc.bind(slot["toggle"], "<Button-1>",
-                              lambda e, i=cidx: app._toggle_cluster_expand(i))
+                    # 优化缺陷R23：点击触发立体弹起（先选中着色，
+                    # 再下沉按压；释放时上弹+阴影回落）
+                    w.bind("<Button-1>",
+                           lambda e, i=cidx, s=slot:
+                           (app._select_cluster(i), self._pop_press(s)))
+                    w.bind("<ButtonRelease-1>",
+                           lambda e, s=slot: self._pop_release(s))
+                # 展开按钮独立绑定（不触发行选中）
+                slot["toggle"].bind(
+                    "<Button-1>",
+                    lambda e, i=cidx: app._toggle_cluster_expand(i))
             else:
                 cidx, iidx = row[1], row[2]
                 inst = app._displayed[cidx].instances[iidx]
@@ -1096,45 +1074,41 @@ class VirtualClusterList:
                 top_c = p["sel_top"] if selected else bg
                 bot_c = p["sel_bot"] if selected else bg
                 fg = p["sel_text"] if selected else None
-                # 修复缺陷R27：实例行同款 CTk 配置
-                slot["frame"].configure(
-                    fg_color=bot_c,
-                    corner_radius=24 if selected else 10,
-                    border_width=4 if selected else 1,
-                    border_color=p["sel_hi"] if selected else p["row_border"])
-                if hasattr(slot["frame"], '_draw'):
-                    slot["frame"]._draw()
-                slot["toggle"].configure(fg_color="transparent", text="")
+                slot["frame"].configure(bg=bot_c)
+                slot["toggle"].configure(bg=top_c, text="")
                 slot["head"].configure(
-                    fg_color="transparent",
-                    text_color=fg or p["muted"],
+                    bg=top_c, fg=fg or p["muted"],
                     text="      " + app._inst_head_text(inst))
                 slot["summary"].configure(
-                    fg_color="transparent",
-                    text_color=fg or p["row_text"],
+                    bg=bot_c, fg=fg or p["row_text"],
                     text="        " + app._clip(inst.summary,
                                                 self.SUMMARY_CLIP))
-                # 修复缺陷R27：实例行同款 tk.Misc.bind 原始绑定
                 for w in (slot["frame"], slot["head"], slot["summary"],
                           slot["toggle"]):
-                    tk.Misc.bind(w, "<Button-1>",
-                                  lambda e, ci=cidx, ii=iidx, s=slot:
-                                  (app._select_instance(ci, ii),
-                                   self._pop_press(s)))
-                    tk.Misc.bind(w, "<ButtonRelease-1>",
-                                  lambda e, s=slot: self._pop_release(s))
-                    tk.Misc.bind(w, "<Enter>",
-                                  lambda e, i=idx: self._hover(i, True))
-                    tk.Misc.bind(w, "<Leave>",
-                                  lambda e, i=idx: self._hover(i, False))
+                    # 优化缺陷R23：实例行同款立体弹起
+                    w.bind("<Button-1>",
+                           lambda e, ci=cidx, ii=iidx, s=slot:
+                           (app._select_instance(ci, ii),
+                            self._pop_press(s)))
+                    w.bind("<ButtonRelease-1>",
+                           lambda e, s=slot: self._pop_release(s))
+                    w.bind("<Enter>",
+                           lambda e, i=idx: self._hover(i, True))
+                    w.bind("<Leave>",
+                           lambda e, i=idx: self._hover(i, False))
             # 修复缺陷R22：头部条 line 同步着色（消除选中蓝块被
             # line 暗色底切成三段）
             # 修复缺陷R26：line 跟随顶部能带色；选中行 1px 亮描边
             # 改由画布圆角轮廓呈现（_round_masks），原生方形描边
             # 仅未选中行保留（row_border 细边框，角部被遮罩切圆）
-            # 修复缺陷R27：line 透明背景（CTkFrame 圆角透出），不再需要
-            # Canvas 圆角遮罩（CTkFrame 本身支持 corner_radius）
-            slot["line"].configure(fg_color="transparent")
+            slot["line"].configure(bg=top_c)
+            slot["frame"].configure(
+                highlightthickness=0 if selected else 1,
+                highlightbackground=p["row_border"],
+                highlightcolor=p["row_border"])
+            # 优化缺陷R24/R26：全部行圆角遮罩（选中 14px/未选中 7px），
+            # 选中行另加画布亮描边+顶部高光+底部/右侧投影（3D 凸起）
+            self._round_masks(slot, selected)
             gx, gy = self._row_gaps()
             self._canvas.itemconfigure(
                 slot["win"], state="normal",
