@@ -222,10 +222,11 @@ _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
 # 修复缺陷R6：主列表虚拟滚动阈值（超过则切换池化虚拟渲染）
 VIRTUAL_LIST_THRESHOLD = 40
 
-# 修复缺陷R36：簇行样式统一常量（经典列表 / 全屏 native 行 / 虚拟
-# 列表三模式共用）—— 原硬编码在近十处（_make_cluster_row 两分支、
-# _apply_row_bg、paint_native_flat/3d、VirtualClusterList.ROW_R_*），
-# R33 一轮改了近十处极易漏改；抽常量后一处调整三模式同步。
+# 修复缺陷R36：簇行样式统一常量（经典列表 / 虚拟列表共用；
+# 优化缺陷R42 后全屏列表与主窗口同一 VirtualClusterList）——
+# 原硬编码在近十处（_make_cluster_row、_apply_row_bg、
+# VirtualClusterList.ROW_R_*），R33 一轮改了近十处极易漏改；
+# 抽常量后一处调整同步。
 # 几何约束：_ROW_PADX > _ROW_R_SEL（内容不压圆角切角区）；
 # _ROW_BAR_INSET = _ROW_R_SEL + 6（高光/阴影条端头不压切角区）。
 _ROW_R_SEL = 18      # 选中行圆角半径（药丸形，逻辑px）
@@ -587,20 +588,24 @@ class VirtualClusterList:
     ROW_R_SEL = _ROW_R_SEL  # 修复缺陷R36：三模式统一模块常量（药丸形）
     ROW_R_FLAT = _ROW_R_FLAT  # 修复缺陷R36：三模式统一模块常量（2:1）
 
-    def __init__(self, host, app):
+    def __init__(self, host, app, font_head=None, font_summary=None):
         self._app = app
         self._host = host
         self._data: List[ErrorCluster] = []
         self._slots: List[dict] = []      # 行控件池
         self._hovered = -1
         self._content_w = 600             # 数据内容自然宽（水平滚动区域宽）
+        # 优化缺陷R42：字体可注入（全屏列表复用本组件时传全屏档
+        # 28/24；主窗口默认行字体 22/18 不变）
+        self._f_head = font_head or app._font_row_head
+        self._f_sum = font_summary or app._font_row_summary
         # 修复缺陷R9：行高按实际渲染字体度量动态计算（DPI 无关，
         # 与经典模式行高一致：头部行距 + 摘要行距 + 行内边距/间隙）
         try:
             self._m_head = tkfont.Font(
-                font=app._scaled_font(app._font_row_head))
+                font=app._scaled_font(self._f_head))
             self._m_sum = tkfont.Font(
-                font=app._scaled_font(app._font_row_summary))
+                font=app._scaled_font(self._f_sum))
             # 修复缺陷R41b：行高内边距 44 同步 DPI 缩放（行距随
             # 缩放字体翻倍而 44 不变 → 200% DPI 下行窗口为容纳内容
             # 被迫底部溢出圆角背景，盖住底部亮描边/阴影条）
@@ -608,8 +613,8 @@ class VirtualClusterList:
                                + self._m_sum.metrics("linespace")
                                + self._sx(44))
         except (tk.TclError, ValueError):
-            self._m_head = app._font_row_head
-            self._m_sum = app._font_row_summary
+            self._m_head = self._f_head
+            self._m_sum = self._f_sum
         p = app._palette()
         # 修复缺陷R9：滚动步进随行高走（每 2 单位 ≈ 1 行）
         self._canvas = tk.Canvas(host, highlightthickness=0,
@@ -1064,16 +1069,16 @@ class VirtualClusterList:
         icon_box.pack(side="left", fill="y", pady=(7, 2))
         toggle_icon = tk.Label(
             icon_box, anchor="center",
-            font=self._app._scaled_font(self._app._font_row_head),
+            font=self._app._scaled_font(self._f_head),
             bg=p["row_bg"], fg="#2563EB", cursor="hand2")
         toggle_icon.place(relx=0.5, rely=0.5, anchor="center")
         toggle = tk.Label(
             line, anchor="w",
-            font=self._app._scaled_font(self._app._font_row_head),
+            font=self._app._scaled_font(self._f_head),
             bg=p["row_bg"], fg="#2563EB", cursor="hand2")
         toggle.pack(side="left", pady=(7, 2))
         head = tk.Label(line, anchor="w",
-                        font=self._app._scaled_font(self._app._font_row_head),
+                        font=self._app._scaled_font(self._f_head),
                         bg=p["row_bg"], fg=p["row_text"])
         head.pack(side="left", fill="x", expand=True,
                   padx=(self._sx(10), self._sx(10)), pady=(7, 2))
@@ -1085,8 +1090,7 @@ class VirtualClusterList:
         divider.pack(fill="x")
         # 修复缺陷R9：摘要单行不换行（wraplength=0），长摘要靠水平滚动查看
         summary = tk.Label(frame, anchor="w", justify="left",
-                           font=self._app._scaled_font(
-                               self._app._font_row_summary),
+                           font=self._app._scaled_font(self._f_sum),
                            wraplength=0,
                            bg=p["row_bg"], fg=p["row_text"])
         summary.pack(fill="x", padx=(0, self._sx(4)), pady=(2, 6))
@@ -2535,7 +2539,7 @@ class LogCompressorApp(_make_app_base()):
             except tk.TclError:
                 pass
 
-    def _live_draw_rows(self, canvas, pw, p) -> None:
+    def _live_draw_rows(self, canvas, pw, p, vl=None, panel=None) -> None:
         """左列可见行 items（标题+摘要完整文本，裁剪框自然延展）。
 
         行按【裁剪框坐标系】绘制（左画布 place 在裁剪框内，裁剪框
@@ -2543,15 +2547,17 @@ class LogCompressorApp(_make_app_base()):
         整体下移一个标题栏高度），y = 行在虚拟列表画布内的 y 减去
         滚动偏移（= 行在列表宿主内的屏幕 y）。文本完整绘制（含
         水平滚动偏移），裁剪框边界裁剪显示区域。
+        优化缺陷R42：vl/panel 可注入（全屏列表代理复用本绘制）。
         """
-        vl = self._virtual_list
+        vl = vl or self._virtual_list
+        panel = panel or self._result_panel
         if vl is None or not vl._data:
             return
         states = self._row_states()
         try:
             # x：裁剪框与面板左缘对齐（x=0）→ 用面板坐标系
             x_base = (vl._canvas.winfo_rootx()
-                      - self._result_panel.winfo_rootx())
+                      - panel.winfo_rootx())
             scroll_x = vl._canvas.canvasx(0)
             scroll_y = vl._canvas.canvasy(0)
         except tk.TclError:
@@ -3525,6 +3531,10 @@ class LogCompressorApp(_make_app_base()):
 
     def _refresh_row_colors(self) -> None:
         """主题切换后刷新列表行配色（原生 tk.Label 不随 CTk 主题）。"""
+        # 优化缺陷R42：全屏虚拟列表同步刷新（与主列表同组件）
+        fs_vl = getattr(self, "_fs_vl", None)
+        if fs_vl is not None:
+            fs_vl.apply_palette()
         # 修复缺陷R6：虚拟模式由虚拟列表自刷（池行原生控件配色）
         if self._virtual_list is not None:
             self._virtual_list.apply_palette()
@@ -3827,19 +3837,17 @@ class LogCompressorApp(_make_app_base()):
                           register: bool = True,
                           on_select=None, on_hover=None,
                           font_head=None, font_summary=None,
-                          on_toggle=None,
-                          native: bool = False) -> dict:
+                          on_toggle=None) -> dict:
         """构建单条错误行（主列表与全屏列表复用，修复缺陷#7）。
 
         修复缺陷R2：字体放大、行距加大、选中态蓝色高亮（palette
         row_selected）。修复缺陷R9：主列表头部 22 加粗 / 摘要 18、
         摘要单行不换行（水平滚动查看完整内容）。
-        修复缺陷R4：font_head/font_summary 覆盖字体（全屏 24/20）；
+        修复缺陷R4：font_head/font_summary 覆盖字体；
         on_toggle 提供时行首渲染「▶ ×N」可点击展开按钮（次数从
         行首元信息移入按钮）。
-        修复缺陷R6：native=True 全原生 tk 控件（全屏列表用）——
-        CTk 复合控件每行 4 个内部 Canvas 约 20ms/行，57 行全量
-        渲染卡 4.5s；原生行约 8ms/行且无内部 Canvas。
+        优化缺陷R42：native 分支随全屏列表改用 VirtualClusterList
+        删除（全屏与主窗口同一组件渲染，死代码清理）。
 
         参数：
             register: 登记进 self._cluster_rows（主列表选中态管理）
@@ -3854,90 +3862,6 @@ class LogCompressorApp(_make_app_base()):
         # 单条错误占多行、可视错误数骤减）。
         toggle = None
         toggle_icon = None
-        if native:
-            # 全原生行（全屏列表）：CTkFrame圆角 + 内部tk.Label（确保稳定）
-            # 修复缺陷R35：全屏簇行样式与主列表完全一致 —— 未选中
-            # 9px 圆角 + 1px 细边 + pady=4（选中态 paint_native_3d
-            # 升级 18px 药丸 + 4px 高光边 + 高光/阴影条 + pady=0）；
-            # 内边距同步主列表 22px（tk pack padx 不随 DPI 缩放，按
-            # _font_scale 换算物理px，高 DPI 下与 CTk 缩放后的主列表
-            # 逐像素一致）；头部/摘要间 1px 细分界线
-            f_head = self._scaled_font(f_head)
-            _sp = max(1.0, getattr(self, "_font_scale", 1.0))
-            _sx = lambda v: int(round(v * _sp))    # 逻辑px → 物理px
-            frame = ctk.CTkFrame(parent, corner_radius=_ROW_R_FLAT,
-                                 fg_color=p["row_bg"], border_width=1,
-                                 border_color=p["row_border"])
-            frame.pack(fill="x", padx=5, pady=4)
-            # 3D 立体高光/阴影条（选中态由 paint_native_3d place 显示）
-            _hi_bar = tk.Frame(frame, bg=p["sel_hi"], bd=0,
-                               highlightthickness=0, height=_sx(2))
-            _shadow_bar = tk.Frame(frame, bg=p["sel_shadow"], bd=0,
-                                   highlightthickness=0, height=_sx(2))
-            if on_toggle is not None:
-                link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
-                line = tk.Frame(frame, bg=p["row_bg"], bd=0,
-                                highlightthickness=0)
-                line.pack(fill="x", padx=(_sx(_ROW_PADX), _sx(_ROW_PADX)),
-                          pady=(_sx(7), _sx(2)))
-                # 修复缺陷R34：▶/▼ 拆进等宽盒（固定宽 Frame + place
-                # 居中）—— 两字形宽差 8~10px，合写单标签时展开/收起
-                # 切换推动后续头部文字左右位移（展开行与未展开行
-                # 头部不对齐）；盒宽固定后切换只换盒内字形
-                icon_box = tk.Frame(
-                    line, bg=p["row_bg"], bd=0, highlightthickness=0,
-                    width=self._toggle_icon_w(f_head, for_ctk=False))
-                icon_box.pack_propagate(False)
-                icon_box.pack(side="left", fill="y")
-                toggle_icon = tk.Label(
-                    icon_box, text="\u25b6", font=f_head,
-                    bg=p["row_bg"], fg=link, cursor="hand2")
-                toggle_icon.place(relx=0.5, rely=0.5, anchor="center")
-                toggle = tk.Label(
-                    line, text=f"\u00d7{cluster.count}",
-                    font=f_head, bg=p["row_bg"], fg=link,
-                    cursor="hand2")
-                toggle.pack(side="left", padx=(0, _sx(10)))
-                head = tk.Label(
-                    line, text=self._row_text(cluster, with_count=False),
-                    anchor="w", font=f_head, bg=p["row_bg"],
-                    fg=self._row_color(cluster) or p["row_text"])
-                head.pack(side="left", fill="x", expand=True)
-                self._bind_row_events((toggle_icon, toggle), on_toggle,
-                                      lambda hovered: None)
-            else:
-                head = tk.Label(
-                    frame, text=self._row_text(cluster), anchor="w",
-                    font=f_head, bg=p["row_bg"],
-                    fg=self._row_color(cluster) or p["row_text"])
-                head.pack(fill="x", padx=(_sx(_ROW_PADX), _sx(_ROW_PADX)),
-                          pady=(_sx(7), _sx(2)))
-            # 修复缺陷R35：头部/摘要间 1px 细分界线（与主列表一致；
-            # 选中态换 sel_border 亮色，两端内缩 22px 不碰圆角）
-            divider = tk.Frame(frame, bg=p["row_border"], bd=0,
-                               highlightthickness=0, height=_sx(1))
-            divider.pack(fill="x", padx=(_sx(_ROW_PADX), _sx(_ROW_PADX)))
-            summary = tk.Label(
-                frame, text=cluster.summary, anchor="w", justify="left",
-                wraplength=0, font=f_sum,
-                bg=p["row_bg"], fg=p["row_text"])
-            summary.pack(fill="x", padx=(_sx(_ROW_PADX), _sx(_ROW_PADX)),
-                         pady=(_sx(2), _sx(6)))
-            select_cb = on_select or (lambda: self._select_cluster(idx))
-            hover_cb = on_hover or (
-                lambda hovered: self._hover_row(idx, hovered))
-            self._bind_row_events((frame, head, summary), select_cb,
-                                  hover_cb)
-            row = {"frame": frame, "head": head, "summary": summary,
-                   "idx": idx, "native": True,
-                   "divider": divider,
-                   "_hi_bar": _hi_bar, "_shadow_bar": _shadow_bar}
-            if toggle is not None:
-                row["toggle"] = toggle
-                row["toggle_icon"] = toggle_icon
-            if register:
-                self._cluster_rows.append(row)
-            return row
         # 修复缺陷R2：行距/内边距加大（大字体下行高充足不拥挤）
         # 修复缺陷R31：未选中行也要可见圆角 —— 创建即带 1px 细边框
         # （原仅 _apply_row_bg 后才有，未选中行 border_width=0 且行
@@ -4322,6 +4246,54 @@ class LogCompressorApp(_make_app_base()):
         self._selected_inst = None      # R16：切簇清除实例选中态
         self._mark_selected_row(idx)
         self._show_cluster_detail(self._displayed[idx])
+        self._sync_fs_detail()          # 优化缺陷R42：全屏联动
+
+    def _sync_fs_detail(self) -> None:
+        """优化缺陷R42：全屏列表联动 —— 选中簇/实例时全屏详情
+        同步填充 + 全屏虚拟列表选中态重绘（与主列表共享应用态，
+        主窗口/全屏窗口点击互相联动）。"""
+        vl = getattr(self, "_fs_vl", None)
+        win = getattr(self, "_fs_list_win", None)
+        if vl is None or win is None:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            inst = getattr(self, "_selected_inst", None)
+            filled = False
+            if inst is not None and 0 <= inst[0] < len(self._displayed):
+                cluster = self._displayed[inst[0]]
+                if 0 <= inst[1] < len(cluster.instances):
+                    self._fill_instance_detail(
+                        self._fs_list_detail, cluster,
+                        cluster.instances[inst[1]])
+                    filled = True
+            if not filled and 0 <= self._selected_row < len(self._displayed):
+                self._fill_cluster_detail(
+                    self._fs_list_detail,
+                    self._displayed[self._selected_row])
+        finally:
+            vl._sync()      # 重绘可见槽位（选中态共享自应用层）
+
+    def _fs_view_rows(self) -> list:
+        """优化缺陷R42：全屏列表视图行（搜索过滤后的簇行 +
+        展开簇实例行；与主列表 _build_view_rows 同构 + 关键字过滤）。"""
+        kw = getattr(self, "_fs_search_kw", "")
+        rows = []
+        for idx, cluster in enumerate(self._displayed):
+            if kw:
+                hay = (f"{cluster.summary} {cluster.module} "
+                       f"{cluster.level} {cluster.priority_label}").lower()
+                if kw not in hay:
+                    continue
+            rows.append(("c", idx))
+            if idx in self._expanded_clusters:
+                for iidx in range(len(cluster.instances)):
+                    rows.append(("i", idx, iidx))
+        return rows
 
     # ------------------------------------------------------------------
     # 修复缺陷R16：主列表簇就地展开（展示全部 N 个错误位置）
@@ -4365,6 +4337,10 @@ class LogCompressorApp(_make_app_base()):
             self._virtual_list.update_rows(self._build_view_rows())
         else:
             self._toggle_expand_classic(idx)
+        # 优化缺陷R42：全屏虚拟列表同步刷新（共享 _expanded_clusters）
+        fs_vl = getattr(self, "_fs_vl", None)
+        if fs_vl is not None:
+            fs_vl.update_rows(self._fs_view_rows())
 
     def _select_instance(self, cidx: int, iidx: int) -> None:
         """点击实例行：右侧详情显示该实例自身的上下文/堆栈。
@@ -4381,6 +4357,7 @@ class LogCompressorApp(_make_app_base()):
         self._mark_selected_row(cidx)
         self._fill_instance_detail(self._detail_box, cluster,
                                    cluster.instances[iidx])
+        self._sync_fs_detail()          # 优化缺陷R42：全屏联动
 
     def _toggle_expand_classic(self, idx: int) -> None:
         """经典列表展开/收起簇实例（行内就地插入实例区）。
@@ -4991,13 +4968,15 @@ class LogCompressorApp(_make_app_base()):
         self._fs_list_col = fs_list_col
         self._fs_detail_col = fs_detail_col
 
-        list_area = ctk.CTkScrollableFrame(fs_list_col, width=520)
-        list_area.grid(row=0, column=0, sticky="nsew", padx=(6, 3))
-        self._fs_list_area = list_area
-        # 修复缺陷R9：全屏列表水平滚动条（摘要单行完整显示）
-        fs_hbar = self._make_hscroll(list_area)
-        fs_hbar.grid(row=1, column=0, sticky="ew", padx=(6, 3))
-        self._fs_hbar = fs_hbar
+        list_host = ctk.CTkFrame(fs_list_col, fg_color="transparent")
+        list_host.grid(row=0, column=0, sticky="nsew", padx=(6, 3))
+        # 优化缺陷R42：全屏列表直接复用虚拟列表组件 —— 与主窗口
+        # 左下角完全同一渲染（圆角药丸行/亮边框/选中 3D 蓝药丸+
+        # 阴影/就地展开实例行/底部水平滚动条）；字体传全屏档 28/24
+        self._fs_vl = VirtualClusterList(
+            list_host, self,
+            font_head=self._font_fs_head,
+            font_summary=self._font_fs_summary)
 
         # 右侧详情面板（修复缺陷R4：点击簇/实例即时联动）
         detail_head = ctk.CTkFrame(fs_detail_col, fg_color="transparent")
@@ -5021,329 +5000,20 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R10：全屏详情大字号标签（摘要 20 / 元信息 16 / 栈帧 18）
         self._apply_detail_tags(fs_detail, big=True)
 
-        fs_rows: List[dict] = []
-        render_jobs: List[str] = []        # 分批渲染的挂起任务（重过滤时取消）
-        expanded: Dict[int, dict] = {}     # idx -> 展开状态（实例标签等）
-        # 修复缺陷R17：行/展开状态实例化（分隔条拖动代理采集可见行
-        # 用；render/toggle_expand 原地 clear/update 同一对象，引用
-        # 天然同步）
-        self._fs_rows = fs_rows
-        self._fs_expanded = expanded
-        p = self._palette()
-        inst_bg = p["row_hover"]           # 实例行底色（与簇行区分）
-        selected_inst: Dict[str, object] = {"label": None}
-
-        def paint_row(idx: int, color) -> None:
-            resolved = self._resolve_row_color(color)
-            # 修复缺陷R26：全屏原生行选中态近似 3D —— 能带渐变
-            #（头部条 sel_top / 主体 sel_bot）+ 1px 亮边框 + 白字
-            #（pack 布局无画布，无法圆角遮罩，效果近似主列表）
-            sel = (resolved
-                   == self._resolve_row_color(p["row_selected"]))
-
-            def paint_native(widget) -> None:
-                # 原生行递归刷背景（frame/line/head/toggle/summary）
-                try:
-                    widget.configure(bg=resolved)
-                except (tk.TclError, ValueError):
-                    pass
-                for child in widget.winfo_children():
-                    paint_native(child)
-
-            def paint_native_flat(row) -> None:
-                paint_native(row["frame"])
-                # 修复缺陷R35：未选中行与主列表一致 —— 9px圆角 +
-                # 1px细边框 + pady=4；分界线低调色；隐藏3D高光/阴影
-                try:
-                    row["frame"].configure(
-                        fg_color=p["row_bg"], corner_radius=_ROW_R_FLAT,
-                        border_width=1, border_color=p["row_border"])
-                    row["frame"].pack_configure(pady=4)
-                except (tk.TclError, ValueError):
-                    pass
-                try:
-                    if row.get("divider") is not None:
-                        row["divider"].configure(bg=p["row_border"])
-                    row["_hi_bar"].place_forget()
-                    row["_shadow_bar"].place_forget()
-                except (tk.TclError, KeyError):
-                    pass
-                c = (self._displayed[idx]
-                     if 0 <= idx < len(self._displayed) else None)
-                link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
-                try:
-                    if c is not None:
-                        row["head"].configure(
-                            fg=self._row_color(c) or p["row_text"])
-                    for _k in ("toggle", "toggle_icon"):
-                        if row.get(_k) is not None:
-                            row[_k].configure(fg=link)
-                    row["summary"].configure(fg=p["row_text"])
-                except (tk.TclError, ValueError):
-                    pass
-
-            def paint_native_3d(row) -> None:
-                # 修复缺陷R35：选中行与主列表完全一致 —— 18px 药丸
-                # 圆角 + 4px 高光边框 + 统一 sel_bot 底 + pady=0 浮起
-                # + 顶部受光高光条 + 底部投影 + 分界线 sel_border 亮色
-                # 修复缺陷R34：头部条内含图标等宽盒（Frame 嵌套），
-                # 两层遍历会对 Frame 配置 fg 抛 TclError 中断着色 ——
-                # 改逐层递归（Frame 无 fg 选项，逐控件 try 跳过）
-                try:
-                    row["frame"].configure(
-                        fg_color=p["sel_bot"], corner_radius=_ROW_R_SEL,
-                        border_width=4, border_color=p["sel_hi"])
-                    # 选中行 pady 收紧 -> 比未选中行稍大，浮起感
-                    row["frame"].pack_configure(pady=0)
-
-                    def _paint(w, bg) -> None:
-                        try:
-                            w.configure(bg=bg)
-                        except (tk.TclError, ValueError):
-                            pass
-                        try:
-                            w.configure(fg=p["sel_text"])
-                        except (tk.TclError, ValueError):
-                            pass
-                        for c2 in w.winfo_children():
-                            _paint(c2, bg)
-
-                    # 统一底部深色（与主列表 _apply_row_bg 同色无缝）
-                    for ch in row["frame"].winfo_children():
-                        _paint(ch, p["sel_bot"])
-                    # 修复缺陷R40：选中行头部回调调亮级别色（_paint
-                    # 统一刷白后按级别覆盖，蓝底上仍可辨级别）
-                    _c = (self._displayed[row["idx"]]
-                          if 0 <= row["idx"] < len(self._displayed)
-                          else None)
-                    if _c is not None and row.get("head") is not None:
-                        try:
-                            row["head"].configure(
-                                fg=(self._row_color_sel(_c)
-                                    or p["sel_text"]))
-                        except (tk.TclError, ValueError):
-                            pass
-                    # 分界线换亮色；3D 高光/阴影条就位（两端内缩
-                    # 24px = 圆角半径 18 + 6 余量，不压切角区；tk
-                    # place 为物理px，按 DPI 缩放与主列表一致）
-                    if row.get("divider") is not None:
-                        row["divider"].configure(bg=p["sel_border"])
-                    _sx3 = max(1.0, getattr(self, "_font_scale", 1.0))
-                    _in = int(round(_ROW_BAR_INSET * _sx3))
-                    _bh = max(1, int(round(2 * _sx3)))
-                    row["_hi_bar"].configure(bg=p["sel_hi"])
-                    row["_hi_bar"].place(
-                        x=_in, y=0, relwidth=1, width=-2 * _in,
-                        height=_bh)
-                    row["_shadow_bar"].configure(bg=p["sel_shadow"])
-                    row["_shadow_bar"].place(
-                        x=_in, rely=1.0, relwidth=1, width=-2 * _in,
-                        height=_bh, anchor="sw")
-                except (tk.TclError, ValueError, KeyError):
-                    pass
-
-            for row in fs_rows:
-                if row["idx"] == idx:
-                    if row.get("native"):
-                        if sel:
-                            paint_native_3d(row)
-                        else:
-                            paint_native_flat(row)
-                    else:
-                        row["frame"].configure(fg_color=color)
-                        row["summary"].configure(bg=resolved)
-
-        def fs_select(idx: int) -> None:
-            # 联动主界面详情 + 全屏窗口内高亮（主题调色板配色）
-            self._select_cluster(idx)
-            states = self._row_states()
-            for row in fs_rows:
-                color = (states["selected"] if row["idx"] == idx
-                         else states["bg"])
-                paint_row(row["idx"], color)
-            _fill_fs_cluster(idx)
-
-        def _fill_fs_cluster(idx: int) -> None:
-            if 0 <= idx < len(self._displayed):
-                self._fill_cluster_detail(fs_detail, self._displayed[idx])
-
-        def _clear_inst_selection() -> None:
-            if selected_inst["label"] is not None:
-                try:
-                    selected_inst["label"].configure(bg=inst_bg)
-                except (tk.TclError, ValueError):
-                    pass
-                selected_inst["label"] = None
-
-        def select_instance(idx: int, inst: ClusterInstance,
-                            label) -> None:
-            """实例点击：高亮该行 + 右侧显示实例详情。"""
-            _clear_inst_selection()
-            selected_inst["label"] = label
-            try:
-                label.configure(bg=p["row_selected"])
-            except (tk.TclError, ValueError):
-                pass
-            self._fill_instance_detail(fs_detail, self._displayed[idx],
-                                       inst)
-
-        def _make_instance_label(parent, idx: int, inst: ClusterInstance):
-            """实例行：原生 tk.Label（控件复用，轻量批量创建）。"""
-            ts = format_timestamp(inst.timestamp)
-            text = f"{ts}  L{inst.line_no}  {inst.summary}"
-            # 修复缺陷R10：实例行放大到 20 号 + DPI 缩放 + 单行不换行
-            # （长实例文本靠列表底部水平滚动条左右滑动查看完整内容）
-            lbl = tk.Label(parent, text=text, anchor="w", justify="left",
-                           font=self._scaled_font(self._font_fs_inst),
-                           bg=inst_bg, fg=p["row_text"],
-                           cursor="hand2", wraplength=0)
-            # 修复缺陷R33：全屏实例行左内缩 34→28（随簇行内容
-            # padx 28→22 同步，保持与摘要左缘相对缩进不变）
-            # 修复缺陷R38：缩进按 DPI 换算（tk padx 不随缩放）
-            lbl.pack(fill="x", padx=(self._dpx(28), self._dpx(8)), pady=3)
-            lbl.bind("<Button-1>",
-                     lambda e, i=inst, l=lbl: select_instance(idx, i, l))
-            lbl.bind("<Enter>", lambda e, l=lbl: l.configure(
-                bg=p["row_selected"] if selected_inst["label"] is l
-                else p["row_hover"]))
-            lbl.bind("<Leave>", lambda e, l=lbl: l.configure(
-                bg=p["row_selected"] if selected_inst["label"] is l
-                else inst_bg))
-            return lbl
-
-        def toggle_expand(idx: int) -> None:
-            """展开 / 收起簇实例列表（▶ / ▼ 切换 + 批量渐进动画）。"""
-            cluster = self._displayed[idx]
-            row = next(r for r in fs_rows if r["idx"] == idx)
-            state = expanded.get(idx)
-            if state is not None:
-                # 收起：取消挂起的展开批次，逐批移除实例行
-                state["cancelled"] = True
-                if "job" in state:
-                    try:
-                        win.after_cancel(state["job"])
-                    except (tk.TclError, ValueError, KeyError):
-                        pass
-                expanded.pop(idx, None)
-                row["toggle_icon"].configure(text="\u25b6")
-                labels = state["labels"]
-
-                def remove_batch() -> None:
-                    if not labels:
-                        return
-                    for lbl in labels[-25:]:
-                        try:
-                            lbl.destroy()
-                        except tk.TclError:
-                            pass
-                    del labels[-25:]
-                    if labels:
-                        state["job"] = win.after(12, remove_batch)
-                    else:
-                        try:
-                            state["area"].destroy()
-                        except tk.TclError:
-                            pass
-                state["job"] = win.after(12, remove_batch)
-                return
-            # 展开：批量创建实例行（25 条/帧，大簇不冻结 UI）
-            area = tk.Frame(list_area, bg=inst_bg, bd=0,
-                            highlightthickness=0)
-            state = {"area": area, "labels": [], "cancelled": False,
-                     "pos": 0}
-            expanded[idx] = state
-            row["toggle_icon"].configure(text="\u25bc")
-            # 实例区插入到本簇行之后、下一簇行之前（pack before 定位）
-            row_pos = next(i for i, r in enumerate(fs_rows)
-                           if r["idx"] == idx)
-            if row_pos + 1 < len(fs_rows):
-                # 修复缺陷R38：实例区缩进按 DPI 换算（tk padx 不随缩放）
-                area.pack(fill="x", padx=(self._dpx(12), self._dpx(2)),
-                          before=fs_rows[row_pos + 1]["frame"])
-            else:
-                area.pack(fill="x", padx=(self._dpx(12), self._dpx(2)))
-            insts = cluster.instances
-
-            def add_batch() -> None:
-                if state["cancelled"] or idx not in expanded:
-                    return
-                batch = insts[state["pos"]:state["pos"] + 25]
-                for inst in batch:
-                    state["labels"].append(
-                        _make_instance_label(area, idx, inst))
-                state["pos"] += len(batch)
-                if state["pos"] < len(insts):
-                    state["job"] = win.after(12, add_batch)
-                else:
-                    # 截断提示（实例超出保留上限时）
-                    if len(insts) < cluster.count:
-                        tk.Label(
-                            area,
-                            text=f"…… 共 {cluster.count} 次，"
-                                 f"仅展示前 {len(insts)} 条实例",
-                            font=self._scaled_font(self._font_fs_inst),
-                            bg=inst_bg,
-                            fg=p["muted"], anchor="w"
-                        ).pack(fill="x", padx=(self._dpx(28),
-                                               self._dpx(8)),
-                               pady=(2, 4))
-            add_batch()
-
         def render(keyword: str = "") -> None:
-            """渲染匹配行（修复缺陷R6：分批渐进创建，打开即响应）。
+            """优化缺陷R42：搜索过滤 + 全屏虚拟列表刷新（即时计数）。
 
-            CTk 复合控件创建开销大（每行含 2 个 Canvas），57 行全量
-            一次性创建实测 4.5s 卡死窗口。改为每批 20 行、12ms 间隔
-            渐进创建：窗口即刻可用，剩余行后台补齐。
+            全屏列表与主窗口共用 VirtualClusterList（池化渲染，无
+            分批创建开销，R6 渐进批次退役）；行选中/展开/实例点击
+            全部经应用态共享 —— _select_cluster / _select_instance /
+            _toggle_cluster_expand 内部联动全屏详情与选中态。
             """
-            kw = keyword.strip().lower()
-            # 取消上一轮挂起的批次（重新过滤 / 窗口复用刷新）
-            for job in render_jobs:
-                try:
-                    win.after_cancel(job)
-                except (tk.TclError, ValueError):
-                    pass
-            render_jobs.clear()
-            for child in list_area.winfo_children():
-                child.destroy()
-            fs_rows.clear()
-            expanded.clear()
-            _clear_inst_selection()
-            matched = []
-            for idx, cluster in enumerate(self._displayed):
-                hay = (f"{cluster.summary} {cluster.module} "
-                       f"{cluster.level} {cluster.priority_label}").lower()
-                if kw and kw not in hay:
-                    continue
-                matched.append((idx, cluster))
-            total = len(matched)
-            states = self._row_states()
-            prog = {"pos": 0}
-            # 匹配计数同步更新（过滤即时反馈，不等异步批次）
+            self._fs_search_kw = keyword.strip().lower()
+            rows = self._fs_view_rows()
+            total = sum(1 for r in rows if r[0] == "c")
             count_label.configure(
                 text=f"显示 {total} / {len(self._displayed)} 条")
-
-            def add_batch() -> None:
-                batch = matched[prog["pos"]:prog["pos"] + 20]
-                for idx, cluster in batch:
-                    # 修复缺陷R6：全屏行用原生控件（8ms/行 vs CTk 20ms/行）
-                    fs_rows.append(
-                        self._make_cluster_row(
-                            list_area, idx, cluster, register=False,
-                            native=True,
-                            on_select=lambda i=idx: fs_select(i),
-                            on_hover=lambda hovered, i=idx: paint_row(
-                                i, states["hover"] if hovered
-                                else states["bg"]),
-                            font_head=self._font_fs_head,
-                            font_summary=self._font_fs_summary,
-                            on_toggle=lambda i=idx: toggle_expand(i)))
-                prog["pos"] += len(batch)
-                if prog["pos"] < total:
-                    render_jobs.append(win.after(12, add_batch))
-
-            # 首批也异步：窗口 deiconify 后即刻可见（点击响应 <300ms）
-            render_jobs.append(win.after(1, add_batch))
+            self._fs_vl.set_data(rows)
 
         # 文本变化即过滤（trace 不依赖键盘事件，无焦点也可靠触发）
         search_var.trace_add("write", lambda *a: render(search_var.get()))
@@ -5351,7 +5021,9 @@ class LogCompressorApp(_make_app_base()):
         self._fs_list_refresh = render
         self._fs_list_sig = (id(self._result), len(self._displayed),
                              self._current_top_n())
-        render()
+        # 首批异步渲染：回调即刻返回（<300ms 交互不卡，同 R6 语义），
+        # 窗口 deiconify 后 1ms 填充数据行
+        win.after(1, render)
         return win
 
     # ------------------------------------------------------------------
@@ -5615,7 +5287,8 @@ class LogCompressorApp(_make_app_base()):
                 except (tk.TclError, ValueError, AttributeError):
                     return fallback
         right_bg = actual_bg(self._fs_list_detail, p["card"])
-        left_bg = actual_bg(self._fs_list_area, p["window"])
+        # 优化缺陷R42：左列即虚拟列表画布（底色 = window）
+        left_bg = p["window"]
         # --- 右画布：全幅 + 视口滚动 ---
         right_c = tk.Canvas(body, bd=0, highlightthickness=0,
                             bg=right_bg, cursor="sb_h_double_arrow")
@@ -5768,99 +5441,20 @@ class LogCompressorApp(_make_app_base()):
             pass
 
     def _fs_live_draw_list(self, canvas, p) -> None:
-        """左列列表内容：可见 Label/行背景采集绘制（行结构无关保真）。
+        """左列列表内容：全屏虚拟列表矢量行绘制（优化缺陷R42）。
 
-        遍历 list_area 子树：行 frame / 实例区 frame 画背景矩形；
-        可见 Label 按（面板相对坐标, font, fg, text）画文本 items ——
-        toggle 蓝色/级别红色/选中蓝底/实例缩进全部与真实渲染一致。
-        文本垂直位置按 Label 高与字体行距居中换算（anchor=nw 对齐
-        真实 anchor=w 的渲染位置）。
+        全屏列表与主窗口共用 VirtualClusterList —— 直接复用主界面
+        代理绘制（同一套行结构/选中态/颜色），面板坐标系取全屏
+        body（vl 画布在其左上角原点）。
         """
-        list_area = getattr(self, "_fs_list_area", None)
-        panel = self._fs_body
-        if list_area is None:
+        vl = getattr(self, "_fs_vl", None)
+        if vl is None:
             return
         try:
-            px = panel.winfo_rootx()
-            py = panel.winfo_rooty()
-            vx0 = list_area.winfo_rootx()
-            vy0 = list_area.winfo_rooty()
-            vx1 = vx0 + list_area.winfo_width()
-            vy1 = vy0 + list_area.winfo_height()
+            pw = self._fs_body.winfo_width()
         except tk.TclError:
-            return
-        # --- 行背景矩形（簇行 frame + 展开实例区 area） ---
-        def draw_frame_bg(fr) -> None:
-            try:
-                if fr is None or not fr.winfo_ismapped():
-                    return
-                x0 = fr.winfo_rootx() - px
-                y0 = fr.winfo_rooty() - py
-                x1 = x0 + fr.winfo_width()
-                y1 = y0 + fr.winfo_height()
-                if y1 <= vy0 - py or y0 >= vy1 - py:
-                    return
-                try:
-                    fill = fr.cget("bg")
-                except (tk.TclError, ValueError):
-                    # 修复缺陷R28：R27 后全屏簇行 frame 为 CTkFrame
-                    # （cget("bg") 抛 ValueError）—— 回退 fg_color
-                    # （双色元组按当前主题解析为实际色值）
-                    fill = self._resolve_row_color(fr.cget("fg_color"))
-                canvas.create_rectangle(x0, y0, x1, y1,
-                                        fill=fill, width=0)
-            except (tk.TclError, ValueError):
-                return
-        for row in self._fs_rows:
-            draw_frame_bg(row.get("frame"))
-        for st in self._fs_expanded.values():
-            draw_frame_bg(st.get("area"))
-        # --- 可见 Label 文本（字体行距缓存，177+ 行只建常数个 Font） ---
-        import tkinter.font as _tkfont
-        lh_cache: dict = {}
-
-        def text_lh(font_str) -> int:
-            lh = lh_cache.get(font_str)
-            if lh is None:
-                try:
-                    lh = max(1, _tkfont.Font(font=font_str)
-                             .metrics("linespace"))
-                except tk.TclError:
-                    lh = 16
-                lh_cache[font_str] = lh
-            return lh
-
-        def walk(w) -> None:
-            try:
-                children = w.winfo_children()
-            except tk.TclError:
-                return
-            for c in children:
-                try:
-                    if c.winfo_class() == "Label":
-                        if not c.winfo_ismapped():
-                            continue
-                        cx0 = c.winfo_rootx()
-                        cy0 = c.winfo_rooty()
-                        cx1 = cx0 + c.winfo_width()
-                        cy1 = cy0 + c.winfo_height()
-                        if cx1 <= vx0 or cx0 >= vx1 or \
-                                cy1 <= vy0 or cy0 >= vy1:
-                            continue
-                        text = c.cget("text")
-                        if not text:
-                            continue
-                        font_str = c.cget("font")
-                        lh = text_lh(font_str)
-                        ty = cy0 + max(0, (cy1 - cy0 - lh) // 2)
-                        canvas.create_text(cx0 - px, ty - py,
-                                           anchor="nw", font=font_str,
-                                           fill=c.cget("fg"), text=text)
-                    else:
-                        walk(c)
-                except tk.TclError:
-                    continue
-        walk(list_area)
+            pw = 0
+        self._live_draw_rows(canvas, pw, p, vl=vl, panel=self._fs_body)
 
     def _fs_live_draw_detail(self, canvas, p, cvh) -> None:
         """右列详情文本行（全屏详情框当前可见行区间，逐行完整绘制）。"""
@@ -5892,16 +5486,18 @@ class LogCompressorApp(_make_app_base()):
         try:
             grip, slot = p["splitter_grip"], p["splitter"]
             panel = self._fs_body
-            # 左列垂直条（list_area 内部画布 yview；贴左列右缘，静态）
+            # 左列垂直条（虚拟列表画布 yview；贴左列右缘，静态）
+            # 优化缺陷R42：滚动位置取自全屏虚拟列表自身画布/滚动条
             canvas.create_rectangle(lw - B, 0, lw, ph, fill=slot, width=0)
-            pc = self._fs_list_area._parent_canvas
+            pc = self._fs_vl._canvas
             y0, y1 = self._vbar_thumb(pc)
             canvas.create_rectangle(lw - B + 2, ph * y0,
                                     lw - 2, ph * max(y1, y0 + 0.08),
                                     fill=grip, width=0)
-            # 左列水平条（fs_hbar 实测 y；屏幕左缘固定 → 每帧补偿）
-            hy = self._fs_hbar.winfo_rooty() - panel.winfo_rooty()
-            hh = max(B, self._fs_hbar.winfo_height())
+            # 左列水平条（虚拟列表自带 hbar 实测 y；屏幕左缘固定 → 每帧补偿）
+            fs_hbar = self._fs_vl._hbar
+            hy = fs_hbar.winfo_rooty() - panel.winfo_rooty()
+            hh = max(B, fs_hbar.winfo_height())
             hx0, hx1 = self._hbar_thumb(pc)
             bars["hslot"] = canvas.create_rectangle(
                 10, hy, lw - B, hy + hh, fill=slot, width=0)
