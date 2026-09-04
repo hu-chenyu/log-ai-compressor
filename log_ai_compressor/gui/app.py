@@ -1657,6 +1657,10 @@ class LogCompressorApp(_make_app_base()):
         """基准字号 -> 当前档位实际字号（修复缺陷R10：四档缩放）。"""
         return max(10, round(base * FONT_SIZE_SCALE.get(self._font_size, 1.0)))
 
+    def _dpx(self, v: int) -> int:
+        """逻辑px → 物理px（DPI 缩放；原生 tk padx/place 用，修复缺陷R38）。"""
+        return int(round(v * max(1.0, getattr(self, "_font_scale", 1.0))))
+
     def _toggle_icon_w(self, scaled_font, for_ctk: bool) -> int:
         """「▶/▼」展开图标固定盒宽（修复缺陷R34）。
 
@@ -4351,10 +4355,11 @@ class LogCompressorApp(_make_app_base()):
         pos = next(i for i, r in enumerate(self._cluster_rows)
                    if r.get("idx") == idx)
         if pos + 1 < len(self._cluster_rows):
-            area.pack(fill="x", padx=(12, 2),
+            # 修复缺陷R38：实例区缩进按 DPI 换算（tk padx 不随缩放）
+            area.pack(fill="x", padx=(self._dpx(12), self._dpx(2)),
                       before=self._cluster_rows[pos + 1]["frame"])
         else:
-            area.pack(fill="x", padx=(12, 2))
+            area.pack(fill="x", padx=(self._dpx(12), self._dpx(2)))
         insts = cluster.instances
 
         def add_batch() -> None:
@@ -4377,7 +4382,9 @@ class LogCompressorApp(_make_app_base()):
                     font=self._scaled_font(self._font_row_summary),
                     bg=inst_bg, fg=p["muted"], anchor="w")
                 # 修复缺陷R33：截断提示随实例容器 22 同步 34→28
-                lbl.pack(fill="x", padx=(28, 8), pady=(2, 4))
+                # 修复缺陷R38：缩进按 DPI 换算（tk padx 不随缩放）
+                lbl.pack(fill="x", padx=(self._dpx(28), self._dpx(8)),
+                         pady=(2, 4))
                 state["labels"].append(lbl)
         add_batch()
 
@@ -5111,7 +5118,8 @@ class LogCompressorApp(_make_app_base()):
                            cursor="hand2", wraplength=0)
             # 修复缺陷R33：全屏实例行左内缩 34→28（随簇行内容
             # padx 28→22 同步，保持与摘要左缘相对缩进不变）
-            lbl.pack(fill="x", padx=(28, 8), pady=3)
+            # 修复缺陷R38：缩进按 DPI 换算（tk padx 不随缩放）
+            lbl.pack(fill="x", padx=(self._dpx(28), self._dpx(8)), pady=3)
             lbl.bind("<Button-1>",
                      lambda e, i=inst, l=lbl: select_instance(idx, i, l))
             lbl.bind("<Enter>", lambda e, l=lbl: l.configure(
@@ -5168,10 +5176,11 @@ class LogCompressorApp(_make_app_base()):
             row_pos = next(i for i, r in enumerate(fs_rows)
                            if r["idx"] == idx)
             if row_pos + 1 < len(fs_rows):
-                area.pack(fill="x", padx=(12, 2),
+                # 修复缺陷R38：实例区缩进按 DPI 换算（tk padx 不随缩放）
+                area.pack(fill="x", padx=(self._dpx(12), self._dpx(2)),
                           before=fs_rows[row_pos + 1]["frame"])
             else:
-                area.pack(fill="x", padx=(12, 2))
+                area.pack(fill="x", padx=(self._dpx(12), self._dpx(2)))
             insts = cluster.instances
 
             def add_batch() -> None:
@@ -5194,7 +5203,9 @@ class LogCompressorApp(_make_app_base()):
                             font=self._scaled_font(self._font_fs_inst),
                             bg=inst_bg,
                             fg=p["muted"], anchor="w"
-                        ).pack(fill="x", padx=(28, 8), pady=(2, 4))
+                        ).pack(fill="x", padx=(self._dpx(28),
+                                               self._dpx(8)),
+                               pady=(2, 4))
             add_batch()
 
         def render(keyword: str = "") -> None:
