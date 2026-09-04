@@ -339,31 +339,36 @@ class TestClusterListWrap:
         assert str(states["selected"]) not in ("", "None")
 
     def test_selected_classic_row_unified_rounded(self, app):
-        """修复缺陷R29：经典选中行完整圆角矩形，内部无两个粘着矩形。
+        """修复缺陷R29/R30：经典选中行完整圆角矩形，内部无粘着矩形。
 
-        头部条 line 与 head/toggle/summary 控件必须全部透明（各自
-        带色会拼出两个方角矩形压外层圆角）；头部/摘要间有 1px
-        分界细线（选中态亮色、两端内缩不碰边框）。
+        R30 根因：CTk 透明控件内部画布底色是创建时静态探测值，
+        不随外层 frame 变色更新 —— 选中后 frame 变蓝，▶/摘要标签
+        画布停留深色形成方角块压圆角。修复：内部控件（line/head/
+        toggle/summary）背景显式与外层同色（真无缝）；头部/摘要
+        间 1px 分界细线（选中态亮色、两端内缩不碰边框）。
         """
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         app._select_cluster(1)
         app.update()
         p = app._palette()
         sel, normal = app._cluster_rows[1], app._cluster_rows[0]
-        # 头部条与内容控件全部透明（背景只由外层圆角 frame 提供）
+        # 内部控件背景与外层圆角 frame 同色（画布底色同步，无深色角块）
         if sel.get("line") is not None:
-            assert str(sel["line"].cget("fg_color")) == "transparent"
+            assert str(sel["line"].cget("fg_color")) == p["sel_bot"]
         for key in ("head", "summary"):
-            assert str(sel[key].cget("fg_color")) == "transparent", \
-                f"选中行 {key} 应透明（实际 {sel[key].cget('fg_color')}）"
+            assert str(sel[key].cget("fg_color")) == p["sel_bot"], \
+                f"选中行 {key} 应与外层同色（实际 {sel[key].cget('fg_color')}）"
         if sel.get("toggle") is not None:
-            assert str(sel["toggle"].cget("fg_color")) == "transparent"
+            assert str(sel["toggle"].cget("fg_color")) == p["sel_bot"]
         # 外层圆角矩形统一背景 + 分界细线亮色
         assert str(sel["frame"].cget("fg_color")) == p["sel_bot"]
         assert sel.get("divider") is not None, "选中行应有分界细线"
         assert str(sel["divider"].cget("bg")) == p["sel_border"], \
             "选中行分界线应为亮色"
-        # 未选中行：分界线低调色
+        # 未选中行：内部控件与行底色同色 + 分界线低调色
+        assert str(normal["frame"].cget("fg_color")) == p["row_bg"]
+        for key in ("head", "summary"):
+            assert str(normal[key].cget("fg_color")) == p["row_bg"]
         assert str(normal["divider"].cget("bg")) == p["row_border"]
 
     def test_hover_highlight(self, app):
