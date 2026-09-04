@@ -132,6 +132,12 @@ THEMES: Dict[str, Dict[str, str]] = {
         "accent": "#3B82F6", "accent_hover": "#2563EB", "accent_text": "#ffffff",
         "row_bg": "#ffffff", "row_hover": "#eff6ff", "row_selected": "#bfdbfe",
         "row_selected_edge": "#3b82f6",
+        # 修复缺陷R26：选中行 3D 凸起角色（渐变能带/描边/高光/投影/
+        # 选中文字/未选中细边框）—— 方案A 画布绘制风格
+        "sel_top": "#60a5fa", "sel_bot": "#3b82f6",
+        "sel_border": "#93c5fd", "sel_hi": "#dbeafe",
+        "sel_shadow": "#b9c0cb", "sel_text": "#ffffff",
+        "row_border": "#d5dce6",
         "row_text": "#2d333b", "is_dark": "0",
         "splitter": "#c3ccd9", "splitter_grip": "#8a97a8",
     },
@@ -142,6 +148,11 @@ THEMES: Dict[str, Dict[str, str]] = {
         "accent": "#3B82F6", "accent_hover": "#60a5fa", "accent_text": "#ffffff",
         "row_bg": "#1c2433", "row_hover": "#2a3547", "row_selected": "#1d4ed8",
         "row_selected_edge": "#60a5fa",
+        # 修复缺陷R26：选中行 3D 凸起角色（暗色：投影近黑）
+        "sel_top": "#3b82f6", "sel_bot": "#1d4ed8",
+        "sel_border": "#60a5fa", "sel_hi": "#93c5fd",
+        "sel_shadow": "#0a0f1a", "sel_text": "#ffffff",
+        "row_border": "#2e3a4f",
         "row_text": "#c8cdd4", "is_dark": "1",
         "splitter": "#3a485e", "splitter_grip": "#64758f",
     },
@@ -152,6 +163,11 @@ THEMES: Dict[str, Dict[str, str]] = {
         "accent": "#ffffff", "accent_hover": "#f4f9ff", "accent_text": "#1d4ed8",
         "row_bg": "#e8f1fd", "row_hover": "#cfe0f5", "row_selected": "#8cbaf0",
         "row_selected_edge": "#1d4ed8",
+        # 修复缺陷R26：选中行 3D 凸起角色（蓝调：投影深蓝灰）
+        "sel_top": "#60a5fa", "sel_bot": "#2563eb",
+        "sel_border": "#93c5fd", "sel_hi": "#dbeafe",
+        "sel_shadow": "#91a8d3", "sel_text": "#ffffff",
+        "row_border": "#b4cdec",
         "row_text": "#173a63", "is_dark": "0",
         "splitter": "#a9c4e4", "splitter_grip": "#6d95c2",
     },
@@ -162,6 +178,11 @@ THEMES: Dict[str, Dict[str, str]] = {
         "accent": "#ffffff", "accent_hover": "#f2fbf6", "accent_text": "#15803d",
         "row_bg": "#e6f7ec", "row_hover": "#cdecd9", "row_selected": "#8fdcab",
         "row_selected_edge": "#15803d",
+        # 修复缺陷R26：选中行 3D 凸起角色（绿调：顶部浅绿底部深绿）
+        "sel_top": "#4ade80", "sel_bot": "#16a34a",
+        "sel_border": "#86efac", "sel_hi": "#dcfce7",
+        "sel_shadow": "#8cb89d", "sel_text": "#ffffff",
+        "row_border": "#a3d6ba",
         "row_text": "#14432a", "is_dark": "0",
         "splitter": "#a6d2b9", "splitter_grip": "#5f9c7c",
     },
@@ -528,6 +549,13 @@ class VirtualClusterList:
     ROW_HEIGHT = 138       # 类默认（实际在 __init__ 按字体度量动态计算）
     BUFFER = 2             # 视口上下缓冲行数（快速滚动不露白）
     SUMMARY_CLIP = 100     # 虚拟模式摘要截断字符数
+    # 优化缺陷R26：行块外边距（逻辑px，随 DPI 缩放）—— 行块间真
+    # 间隙（上下各 4 → 块间距 8px 呼吸感；左右各 5px 边距对齐），
+    # 圆角/投影外侧统一为画布底色（window），圆角矩形有呼吸空间
+    ROW_MX = 5
+    ROW_MY = 4
+    ROW_R_SEL = 14         # 选中行圆角半径（逻辑px，行高~130 时协调）
+    ROW_R_FLAT = 7         # 未选中行轻微圆角（逻辑px，风格统一）
 
     def __init__(self, host, app):
         self._app = app
@@ -811,16 +839,19 @@ class VirtualClusterList:
                     bg = states["hover"]
                 else:
                     bg = states["bg"]
+                # 修复缺陷R26：快照矩形对齐行块边距（与真实行同位）
+                gx, gy = self._row_gaps()
                 items.append(self._canvas.create_rectangle(
-                    0, y, width, y + self.ROW_HEIGHT, fill=bg, width=0))
+                    gx, y + gy, width - gx, y + self.ROW_HEIGHT - gy,
+                    fill=bg, width=0))
                 items.append(self._canvas.create_text(
-                    10, y + 7, anchor="nw", font=self._m_head,
+                    gx + 10, y + gy + 7, anchor="nw", font=self._m_head,
                     fill=head_color, text=head_text))
                 # 摘要 y = 头部行距 + 头部上边距 7 + 间隙 2（与
                 # _make_slot 的 pack pady 一致）
-                sum_y = y + 7 + self._m_head.metrics("linespace") + 2
+                sum_y = y + gy + 7 + self._m_head.metrics("linespace") + 2
                 items.append(self._canvas.create_text(
-                    10, sum_y, anchor="nw", font=self._m_sum,
+                    gx + 10, sum_y, anchor="nw", font=self._m_sum,
                     fill=p["row_text"], text=sum_text))
             for slot in self._slots:
                 try:
@@ -886,9 +917,11 @@ class VirtualClusterList:
                 # itemconfigure，<1ms）；松开时 set_splitter_drag(False)
                 # 触发一次全量 _sync 补齐。行文本/颜色本就正确（数据
                 # 没变），无视觉差异。
+                gx, _gy = self._row_gaps()
                 for slot in self._slots:
                     try:
-                        self._canvas.itemconfigure(slot["win"], width=width)
+                        self._canvas.itemconfigure(
+                            slot["win"], width=max(10, width - 2 * gx))
                     except tk.TclError:
                         pass
                 return
@@ -990,22 +1023,28 @@ class VirtualClusterList:
                 cidx = row[1]
                 cluster = app._displayed[cidx]
                 if cidx == app._selected_row:
-                    bg = states["selected"]
                     selected = True
                 expanded = cidx in app._expanded_clusters
                 head_color = app._row_color(cluster) or p["row_text"]
                 link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
                 slot["idx"] = idx
-                slot["frame"].configure(bg=bg)
+                # 修复缺陷R26（方案A）：选中行渐变能带 —— 头部条
+                # 用顶部亮色 sel_top、主体用底部深色 sel_bot（上下
+                # 亮→暗模拟光照渐变），文字统一 sel_text 白保可读；
+                # 未选中行平面（hover/bg 同色，无渐变无立体）
+                top_c = p["sel_top"] if selected else bg
+                bot_c = p["sel_bot"] if selected else bg
+                fg = p["sel_text"] if selected else None
+                slot["frame"].configure(bg=bot_c)
                 slot["toggle"].configure(
-                    bg=bg, fg=link,
+                    bg=top_c, fg=fg or link,
                     text=(f"\u25bc \u00d7{cluster.count}" if expanded
                           else f"\u25b6 \u00d7{cluster.count}"))
                 slot["head"].configure(
-                    bg=bg, fg=head_color,
+                    bg=top_c, fg=fg or head_color,
                     text=app._row_text(cluster, with_count=False))
                 slot["summary"].configure(
-                    bg=bg, fg=p["row_text"],
+                    bg=bot_c, fg=fg or p["row_text"],
                     text=app._clip(cluster.summary, self.SUMMARY_CLIP))
                 for w in (slot["frame"], slot["head"], slot["summary"],
                           slot["toggle"]):
@@ -1029,16 +1068,19 @@ class VirtualClusterList:
                 cidx, iidx = row[1], row[2]
                 inst = app._displayed[cidx].instances[iidx]
                 if (cidx, iidx) == getattr(app, "_selected_inst", None):
-                    bg = states["selected"]
                     selected = True
                 slot["idx"] = idx
-                slot["frame"].configure(bg=bg)
-                slot["toggle"].configure(bg=bg, text="")
+                # 修复缺陷R26：实例行同款渐变能带
+                top_c = p["sel_top"] if selected else bg
+                bot_c = p["sel_bot"] if selected else bg
+                fg = p["sel_text"] if selected else None
+                slot["frame"].configure(bg=bot_c)
+                slot["toggle"].configure(bg=top_c, text="")
                 slot["head"].configure(
-                    bg=bg, fg=p["muted"],
+                    bg=top_c, fg=fg or p["muted"],
                     text="      " + app._inst_head_text(inst))
                 slot["summary"].configure(
-                    bg=bg, fg=p["row_text"],
+                    bg=bot_c, fg=fg or p["row_text"],
                     text="        " + app._clip(inst.summary,
                                                 self.SUMMARY_CLIP))
                 for w in (slot["frame"], slot["head"], slot["summary"],
@@ -1055,30 +1097,27 @@ class VirtualClusterList:
                     w.bind("<Leave>",
                            lambda e, i=idx: self._hover(i, False))
             # 修复缺陷R22：头部条 line 同步着色（消除选中蓝块被
-            # line 暗色底切成三段：toggle/head 的 padx/pady 区域
-            # 均透出 line 底色）；选中行加 1px 亮色描边营造凸起
-            # 立体感（highlightcolor 同步，避免聚焦时变黑框）
-            slot["line"].configure(bg=bg)
+            # line 暗色底切成三段）
+            # 修复缺陷R26：line 跟随顶部能带色；选中行 1px 亮描边
+            # 改由画布圆角轮廓呈现（_round_masks），原生方形描边
+            # 仅未选中行保留（row_border 细边框，角部被遮罩切圆）
+            slot["line"].configure(bg=top_c)
             slot["frame"].configure(
-                highlightthickness=1 if selected else 0,
-                highlightbackground=p["row_selected_edge"],
-                highlightcolor=p["row_selected_edge"])
-            # 优化缺陷R24：选中行四角圆角遮罩（椭圆角常驻形态，
-            # 未选中行恢复直角）；行外色分上/下（首末行邻画布底色）
-            if selected:
-                top_out = p["window"] if idx == 0 else states["bg"]
-                bot_out = (p["window"] if idx == len(self._data) - 1
-                           else states["bg"])
-                self._round_masks(slot, top_out, bot_out)
-            else:
-                self._unround(slot)
-            self._canvas.itemconfigure(slot["win"], state="normal",
-                                       width=width,
-                                       height=self.ROW_HEIGHT)
+                highlightthickness=0 if selected else 1,
+                highlightbackground=p["row_border"],
+                highlightcolor=p["row_border"])
+            # 优化缺陷R24/R26：全部行圆角遮罩（选中 14px/未选中 7px），
+            # 选中行另加画布亮描边+顶部高光+底部/右侧投影（3D 凸起）
+            self._round_masks(slot, selected)
+            gx, gy = self._row_gaps()
+            self._canvas.itemconfigure(
+                slot["win"], state="normal",
+                width=max(10, width - 2 * gx),
+                height=self.ROW_HEIGHT - 2 * gy)
             # 优化缺陷R23：弹起动画进行中坐标由动画持有（同 idx
             # 填充刷新不打断位移，避免悬停着色刷新造成 1 帧回跳）
             if slot.get("_pop") is None:
-                self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
+                self._canvas.coords(slot["win"], gx, self._row_y0(idx))
         except (tk.TclError, ValueError, IndexError):
             pass
 
@@ -1088,6 +1127,15 @@ class VirtualClusterList:
     def _pop_scale(self) -> float:
         """弹起位移的 DPI 缩放因子（不同设备视觉幅度一致）。"""
         return max(1.0, getattr(self._app, "_font_scale", 1.0))
+
+    def _row_gaps(self):
+        """行块外边距（gx 左右, gy 上下，物理px，随 DPI 缩放）。"""
+        s = self._pop_scale()
+        return (int(round(self.ROW_MX * s)), int(round(self.ROW_MY * s)))
+
+    def _row_y0(self, idx: int) -> int:
+        """行块窗口顶缘 y（含上间隙；弹起动画的位移基准）。"""
+        return idx * self.ROW_HEIGHT + self._row_gaps()[1]
 
     def _blend(self, hex1: str, hex2: str, t: float) -> str:
         """两色预混合（t=hex2 权重；Tk 无透明度，阴影/高光预混近似）。"""
@@ -1113,11 +1161,13 @@ class VirtualClusterList:
             return
         self._pop_cancel(slot)                 # 清理上一次残留动画
         dy = int(round(3 * self._pop_scale()))
+        gx, _gy = self._row_gaps()
+        base = self._row_y0(idx)
         try:
-            self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT + dy)
+            self._canvas.coords(slot["win"], gx, base + dy)
         except tk.TclError:
             return
-        slot["_pop"] = {"base": idx * self.ROW_HEIGHT, "dy": dy,
+        slot["_pop"] = {"base": base, "dy": dy,
                         "job": None}
         self._round_move(slot)                 # R24：圆角随下沉
 
@@ -1162,7 +1212,8 @@ class VirtualClusterList:
         dy = int(round(dy))
         pop["dy"] = dy
         try:
-            self._canvas.coords(slot["win"], 0, base + dy)
+            gx, _gy = self._row_gaps()
+            self._canvas.coords(slot["win"], gx, base + dy)
             self._round_move(slot)             # 圆角+投影逐帧跟随
         except tk.TclError:
             slot["_pop"] = None
@@ -1190,18 +1241,19 @@ class VirtualClusterList:
         idx = slot.get("idx", -1)
         if idx >= 0:
             try:
-                self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
+                gx, _gy = self._row_gaps()
+                self._canvas.coords(slot["win"], gx, self._row_y0(idx))
             except tk.TclError:
                 pass
             self._round_move(slot)              # 圆角组随复位
 
     # ------------------------------------------------------------------
-    # 优化（R24/R25）：选中行圆角（椭圆角）+ 常驻立体（高光+投影）
+    # 优化（R24/R26）：行圆角遮罩 + 选中行 3D 凸起（渐变/描边/高光/投影）
     # ------------------------------------------------------------------
     @staticmethod
     def _arc_pts(cx: float, cy: float, r: float,
-                 a0: float, a1: float, n: int = 8) -> list:
-        """圆弧采样点（圆心+半径，角度 a0→a1 度，n 段）。"""
+                 a0: float, a1: float, n: int = 12) -> list:
+        """圆弧采样点（圆心+半径，角度 a0→a1 度；12 段抗锯齿平滑）。"""
         import math
         return [(cx + r * math.cos(math.radians(a0 + (a1 - a0) * i / n)),
                  cy + r * math.sin(math.radians(a0 + (a1 - a0) * i / n)))
@@ -1226,47 +1278,64 @@ class VirtualClusterList:
             flat.extend((px, py))
         return flat
 
-    def _round_r(self) -> int:
-        """圆角半径（修复缺陷R25：22 逻辑px 明显弯曲，随 DPI 缩放，
-        上限半行高-4 防小字体下半径吃掉行内容）。"""
-        return min(int(round(22 * self._pop_scale())),
-                   self.ROW_HEIGHT // 2 - 4)
+    def _rrect_pts(self, x0, y0, x1, y1, r):
+        """闭合圆角矩形轮廓顶点（4 直线 + 4 圆弧，画布描边用）。"""
+        pts = [(x0 + r, y0), (x1 - r, y0)]
+        pts += self._arc_pts(x1 - r, y0 + r, r, -90, 0)[1:]
+        pts += [(x1, y0 + r), (x1, y1 - r)]
+        pts += self._arc_pts(x1 - r, y1 - r, r, 0, 90)[1:]
+        pts += [(x1 - r, y1), (x0 + r, y1)]
+        pts += self._arc_pts(x0 + r, y1 - r, r, 90, 180)[1:]
+        pts += [(x0, y1 - r), (x0, y0 + r)]
+        pts += self._arc_pts(x0 + r, y0 + r, r, 180, 270)[1:]
+        flat = []
+        for px, py in pts:
+            flat.extend((px, py))
+        return flat
 
-    def _round_masks(self, slot: dict, out_top: str, out_bot: str) -> None:
-        """为选中行创建圆角组：四角遮罩 + 顶部高光 + 底部常驻投影。
+    def _round_masks(self, slot: dict, selected: bool) -> None:
+        """创建行圆角组：全行四角遮罩；选中行加描边/高光/投影。
 
         优化缺陷R24：tk 原生控件无透明圆角 —— 四角覆盖「角方块减
-        四分之一圆」多边形（填充行外背景色），蓝块视觉切成圆角；
-        首行上缘/末行下缘外侧是画布底色（window），行间外侧是邻
-        行底色（row_bg），分色处理保证任何位置无缝。
-        修复缺陷R25：圆角半径加大到 22 逻辑px（四角明显弯曲）；
-        新增常驻立体感 —— 顶部 2px 受光高光条（预混白）+ 底部
-        投影条（下方背景预混黑，两端按半径内缩贴合圆角），营造
-        凸起卡片观感；弹起动画中 _round_move 逐帧跟随并随 dy
-        伸缩投影（浮起加深、按下收缩）。
+        四分之一圆」多边形（填充画布底色 window；R26 行块间有真
+        间隙，外侧统一画布底色），视觉切成圆角。
+        修复缺陷R26（方案A）：全部行圆角（选中 14px/未选中 7px，
+        风格统一选中更明显）；选中行另加 3D 凸起三件套 ——
+        1px 圆角亮描边（sel_border 轮廓线）、顶部 2px 受光高光条
+        （sel_hi）、底部+右侧常驻投影（sel_shadow，两端按半径内缩
+        贴合圆角）；未选中行仅 1px row_border 细边框（原生），无
+        渐变无阴影保持平面。弹起动画中 _round_move 逐帧跟随。
         """
         self._unround(slot)
         idx = slot.get("idx", -1)
         if idx < 0:
             return
         p = self._app._palette()
-        r = self._round_r()
-        grp = {"r": r,
-               "hi_fill": self._blend(p["row_selected"], "#ffffff", 0.30),
-               "sh_fill": self._blend(out_bot, "#000000", 0.45)}
+        s = self._pop_scale()
+        r = min(int(round((self.ROW_R_SEL if selected
+                           else self.ROW_R_FLAT) * s)),
+                self.ROW_HEIGHT // 2 - 4)
+        grp = {"r": r, "sel": selected}
         try:
             grp["masks"] = [self._canvas.create_polygon(
                 self._corner_pts(0, 0, 1, 1, r, corner),
-                fill=fill, outline="")
-                for corner, fill in (("tl", out_top), ("tr", out_top),
-                                     ("bl", out_bot), ("br", out_bot))]
-            grp["hi"] = self._canvas.create_rectangle(
-                0, 0, 1, 1, fill=grp["hi_fill"], width=0)
-            grp["shadow"] = self._canvas.create_rectangle(
-                0, 0, 1, 1, fill=grp["sh_fill"], width=0)
+                fill=p["window"], outline="")
+                for corner in ("tl", "tr", "bl", "br")]
+            if selected:
+                grp["border"] = self._canvas.create_polygon(
+                    self._rrect_pts(0, 0, 1, 1, max(2, r - 1)),
+                    fill="", outline=p["sel_border"],
+                    width=max(1, int(round(1.2 * s))))
+                grp["hi"] = self._canvas.create_rectangle(
+                    0, 0, 1, 1, fill=p["sel_hi"], width=0)
+                grp["shadow"] = self._canvas.create_rectangle(
+                    0, 0, 1, 1, fill=p["sel_shadow"], width=0)
+                grp["rshadow"] = self._canvas.create_rectangle(
+                    0, 0, 1, 1, fill=p["sel_shadow"], width=0)
         except tk.TclError:
-            for it in (grp.get("masks") or []) + [
-                    grp[k] for k in ("hi", "shadow") if grp.get(k)]:
+            for it in list(grp.get("masks") or []) + [
+                    grp[k] for k in ("border", "hi", "shadow", "rshadow")
+                    if grp.get(k)]:
                 try:
                     self._canvas.delete(it)
                 except tk.TclError:
@@ -1278,8 +1347,8 @@ class VirtualClusterList:
     def _round_move(self, slot: dict) -> None:
         """圆角组跟随行窗口当前位置（弹起逐帧/复位/创建时调用）。
 
-        投影深度随 dy 变化：浮起（dy<0）投影拉长加深=升高；下沉
-        （dy>0）投影收缩=按压；静止时保持基础深度=常驻凸起感。
+        底部投影深度随 dy 变化：浮起（dy<0）拉长=升高；下沉
+        （dy>0）收缩=按压；静止保持基础深度=常驻凸起感。
         """
         grp = slot.get("_round")
         if not grp:
@@ -1289,31 +1358,46 @@ class VirtualClusterList:
             return
         pop = slot.get("_pop")
         dy = pop["dy"] if pop else 0
-        y0 = idx * self.ROW_HEIGHT + dy
-        y1 = y0 + self.ROW_HEIGHT
-        w = self._region_w()
+        gx, gy = self._row_gaps()
+        y0 = self._row_y0(idx) + dy
+        y1 = y0 + self.ROW_HEIGHT - 2 * gy
+        x0 = gx
+        x1 = max(x0 + 12, self._region_w() - gx)
         r = grp["r"]
-        base_d = int(round(4 * self._pop_scale()))
-        depth = max(2, base_d - dy)            # dy<0 加深 / dy>0 收缩
-        hi_h = int(round(2 * self._pop_scale()))
         try:
             for it, corner in zip(grp["masks"], ("tl", "tr", "bl", "br")):
                 self._canvas.coords(
-                    it, *self._corner_pts(0, y0, w, y1, r, corner))
-            # 顶部受光高光条（两端内缩 r 贴合圆角）
-            self._canvas.coords(grp["hi"], r, y0 + 2, w - r, y0 + 2 + hi_h)
-            # 底部常驻投影（落在下一行/画布上，两端内缩 r）
-            self._canvas.coords(grp["shadow"], r, y1, w - r, y1 + depth)
+                    it, *self._corner_pts(x0, y0, x1, y1, r, corner))
+            if grp.get("sel"):
+                s = self._pop_scale()
+                base_d = int(round(4 * s))
+                depth = max(2, base_d - dy)    # dy<0 加深 / dy>0 收缩
+                hi_h = int(round(2 * s))
+                rs_w = max(2, int(round(2.5 * s)))
+                # 1px 圆角亮描边（内缩 1px 避免与角遮罩互切）
+                self._canvas.coords(
+                    grp["border"],
+                    *self._rrect_pts(x0 + 1, y0 + 1, x1 - 1, y1 - 1,
+                                     max(2, r - 1)))
+                # 顶部受光高光条（两端内缩 r 贴合圆角）
+                self._canvas.coords(grp["hi"], x0 + r, y0 + 2,
+                                    x1 - r, y0 + 2 + hi_h)
+                # 底部常驻投影（落在行间间隙画布上，两端内缩 r）
+                self._canvas.coords(grp["shadow"], x0 + r, y1,
+                                    x1 - r, y1 + depth)
+                # 右侧常驻投影（落在右间隙画布上，两端内缩 r）
+                self._canvas.coords(grp["rshadow"], x1, y0 + r,
+                                    x1 + rs_w, y1 - r)
         except tk.TclError:
             pass
 
     def _unround(self, slot: dict) -> None:
-        """删除圆角组全部图元（取消选中/槽位回收时调用）。"""
+        """删除圆角组全部图元（槽位回收时调用）。"""
         grp = slot.pop("_round", None)
         if not grp:
             return
         items = list(grp.get("masks") or ())
-        for key in ("hi", "shadow"):
+        for key in ("border", "hi", "shadow", "rshadow"):
             if grp.get(key):
                 items.append(grp[key])
         for it in items:
@@ -2332,15 +2416,22 @@ class LogCompressorApp(_make_app_base()):
                 bg = states["hover"]
             else:
                 bg = states["bg"]
-            canvas.create_rectangle(0, y, pw, y + rh, fill=bg, width=0)
-            tx = x_base + 10 - scroll_x
+            # 修复缺陷R26：代理矩形/文本对齐行块边距（sy 已含上
+            # 间隙 gy；宽度收 2gx、高度收 2gy，与真实行块同位，
+            # 拖动结束回真实行时无跳变）
+            gx, gy = vl._row_gaps()
+            rw = vl._region_w()
+            canvas.create_rectangle(x_base + gx - scroll_x, y,
+                                    x_base + rw - gx - scroll_x,
+                                    y + rh - 2 * gy, fill=bg, width=0)
+            tx = x_base + gx + 10 - scroll_x
             if tgl:
                 canvas.create_text(tx, y + 7, anchor="nw",
                                    font=vl._m_head, fill=link, text=tgl)
                 tx += vl._m_head.measure(tgl) + 10
             canvas.create_text(tx, y + 7, anchor="nw", font=vl._m_head,
                                fill=head_color, text=head_text)
-            canvas.create_text(x_base + 10 - scroll_x,
+            canvas.create_text(x_base + gx + 10 - scroll_x,
                                y + 7 + head_lh + 2, anchor="nw",
                                font=vl._m_sum, fill=sum_fill,
                                text=sum_text)
@@ -3237,17 +3328,16 @@ class LogCompressorApp(_make_app_base()):
         if not rows:
             return
         p = self._palette()
-        fg = p["row_text"]
         selected = getattr(self, "_selected_row", -1)
         for i, row in enumerate(rows):
             # 选中行保持选中色（主列表模式）
-            bg = p["row_selected"] if i == selected and "idx" in row \
-                else p["row_bg"]
-            try:
-                row["summary"].configure(fg=fg, bg=bg)
-                row["frame"].configure(fg_color=bg)
-            except (tk.TclError, ValueError, KeyError):
+            # 修复缺陷R26：统一走 _apply_row_bg（选中 3D 能带 /
+            # 非选中平面恢复，含摘要文字色刷新）
+            if "idx" not in row:
                 continue
+            self._apply_row_bg(
+                row["idx"],
+                p["row_selected"] if i == selected else p["row_bg"])
         # 修复缺陷R16：经典模式刷新「▶ ×N」按钮与展开实例区配色
         link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
         for row in rows:
@@ -3629,7 +3719,10 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
         self._bind_row_events((frame, head, summary), select_cb, hover_cb)
         row = {"frame": frame, "head": head, "summary": summary,
-               "idx": idx}
+               "idx": idx,
+               # 修复缺陷R26：line 入字典 —— 选中态能带渐变需给
+               # 头部条单独着顶部亮色（无展开按钮时无 line 容器）
+               "line": line if on_toggle is not None else None}
         if toggle is not None:
             row["toggle"] = toggle
         if register:
@@ -3693,6 +3786,9 @@ class LogCompressorApp(_make_app_base()):
         修复缺陷R6：虚拟模式下行池控件为原生 tk 控件（bg 而非
         fg_color），且池位置与数据索引不再一一对应——按 idx 字段
         查找目标行。
+        修复缺陷R26：经典行选中态 3D 风格 —— 能带渐变（头部条
+        sel_top / 主体 sel_bot）+ 圆角 14 + 2px 亮边框 + 白字；
+        非选中恢复平面（6px 圆角 + 1px row_border 细边框）。
         """
         resolved = self._resolve_row_color(color)
         for row in self._cluster_rows:
@@ -3704,8 +3800,41 @@ class LogCompressorApp(_make_app_base()):
                     row["head"].configure(bg=resolved)
                     row["summary"].configure(bg=resolved)
                 else:
-                    row["frame"].configure(fg_color=color)
-                    row["summary"].configure(bg=resolved)
+                    p = self._palette()
+                    sel_c = self._resolve_row_color(p["row_selected"])
+                    if resolved == sel_c:
+                        row["frame"].configure(
+                            fg_color=p["sel_bot"], corner_radius=14,
+                            border_width=2,
+                            border_color=p["sel_border"])
+                        if row.get("line") is not None:
+                            row["line"].configure(fg_color=p["sel_top"])
+                        row["summary"].configure(bg=p["sel_bot"],
+                                                 fg=p["sel_text"])
+                        row["head"].configure(text_color=p["sel_text"])
+                        if row.get("toggle") is not None:
+                            row["toggle"].configure(
+                                text_color=p["sel_text"])
+                    else:
+                        row["frame"].configure(
+                            fg_color=color, corner_radius=6,
+                            border_width=1,
+                            border_color=p["row_border"])
+                        if row.get("line") is not None:
+                            row["line"].configure(fg_color="transparent")
+                        row["summary"].configure(bg=resolved,
+                                                 fg=p["row_text"])
+                        # 头部/展开按钮恢复原色（级别色/链接色）
+                        c = (self._displayed[idx] if 0 <= idx
+                             < len(self._displayed) else None)
+                        if c is not None:
+                            row["head"].configure(
+                                text_color=(self._row_color(c)
+                                            or p["row_text"]))
+                        if row.get("toggle") is not None:
+                            link = ("#60a5fa" if p["is_dark"] == "1"
+                                    else "#2563EB")
+                            row["toggle"].configure(text_color=link)
             except (tk.TclError, ValueError):
                 continue
             return
@@ -4468,6 +4597,11 @@ class LogCompressorApp(_make_app_base()):
 
         def paint_row(idx: int, color) -> None:
             resolved = self._resolve_row_color(color)
+            # 修复缺陷R26：全屏原生行选中态近似 3D —— 能带渐变
+            #（头部条 sel_top / 主体 sel_bot）+ 1px 亮边框 + 白字
+            #（pack 布局无画布，无法圆角遮罩，效果近似主列表）
+            sel = (resolved
+                   == self._resolve_row_color(p["row_selected"]))
 
             def paint_native(widget) -> None:
                 # 原生行递归刷背景（frame/line/head/toggle/summary）
@@ -4478,10 +4612,50 @@ class LogCompressorApp(_make_app_base()):
                 for child in widget.winfo_children():
                     paint_native(child)
 
+            def paint_native_flat(row) -> None:
+                paint_native(row["frame"])
+                try:
+                    row["frame"].configure(highlightthickness=0)
+                except (tk.TclError, ValueError):
+                    pass
+                c = (self._displayed[idx]
+                     if 0 <= idx < len(self._displayed) else None)
+                link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
+                try:
+                    if c is not None:
+                        row["head"].configure(
+                            fg=self._row_color(c) or p["row_text"])
+                    if row.get("toggle") is not None:
+                        row["toggle"].configure(fg=link)
+                    row["summary"].configure(fg=p["row_text"])
+                except (tk.TclError, ValueError):
+                    pass
+
+            def paint_native_3d(row) -> None:
+                try:
+                    row["frame"].configure(
+                        bg=p["sel_bot"], highlightthickness=1,
+                        highlightbackground=p["sel_border"],
+                        highlightcolor=p["sel_border"])
+                    for ch in row["frame"].winfo_children():
+                        if isinstance(ch, tk.Frame):       # 头部条
+                            ch.configure(bg=p["sel_top"])
+                            for lb in ch.winfo_children():
+                                lb.configure(bg=p["sel_top"],
+                                             fg=p["sel_text"])
+                        else:                              # 摘要 Label
+                            ch.configure(bg=p["sel_bot"],
+                                         fg=p["sel_text"])
+                except (tk.TclError, ValueError):
+                    pass
+
             for row in fs_rows:
                 if row["idx"] == idx:
                     if row.get("native"):
-                        paint_native(row["frame"])
+                        if sel:
+                            paint_native_3d(row)
+                        else:
+                            paint_native_flat(row)
                     else:
                         row["frame"].configure(fg_color=color)
                         row["summary"].configure(bg=resolved)
