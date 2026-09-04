@@ -2779,6 +2779,42 @@ class TestFullscreenReuse:
             win.destroy()
             app.update()
 
+    def test_fs_selected_row_style_matches_main(self, app):
+        """修复缺陷R35：全屏簇行样式与主列表完全一致。
+
+        选中态：18px 药丸圆角 + 4px 高光边 + 高光/阴影条就位 +
+        分界线 sel_border 亮色 + 统一 sel_bot 底 + 白字；
+        未选中：9px 圆角 + 1px 细边 + 分界线 + 高光/阴影条隐藏。
+        """
+        _run_paste_analysis(app, REPEAT_LOG)
+        win = self._open_fs(app)
+        try:
+            p = app._palette()
+            row = app._fs_rows[0]
+            # 未选中态：9px 圆角 + 1px 细边 + 分界线 + 条隐藏
+            assert int(row["frame"].cget("corner_radius")) == 9
+            assert int(row["frame"].cget("border_width")) == 1
+            assert row.get("divider") is not None, "全屏行应有分界细线"
+            assert not row["_hi_bar"].winfo_ismapped(), "未选中隐藏高光条"
+            # 点击头部选中 -> 与主列表一致的 3D 药丸选中态
+            _click_ctk_label(row["head"])
+            app.update()
+            assert int(row["frame"].cget("corner_radius")) == 18, \
+                "选中行应为 18px 药丸圆角（与主列表一致）"
+            assert int(row["frame"].cget("border_width")) == 4, \
+                "选中行应为 4px 高光边框（与主列表一致）"
+            assert row["_hi_bar"].winfo_ismapped(), "选中应显示顶部高光条"
+            assert row["_shadow_bar"].winfo_ismapped(), "选中应显示底部阴影条"
+            assert str(row["divider"].cget("bg")) == p["sel_border"], \
+                "选中行分界线应为亮色"
+            assert str(row["head"].cget("bg")) == p["sel_bot"], \
+                "选中行头部应与外层同色"
+            assert str(row["head"].cget("fg")) == p["sel_text"], \
+                "选中行文字应为选中白"
+        finally:
+            win.destroy()
+            app.update()
+
     def test_open_fullscreen_callback_fast(self, app):
         """修复R6：全屏按钮回调 <300ms（首批渲染异步，窗口先显示）。"""
         _run_many_clusters(app)

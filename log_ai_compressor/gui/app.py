@@ -3733,18 +3733,30 @@ class LogCompressorApp(_make_app_base()):
         toggle_icon = None
         if native:
             # 全原生行（全屏列表）：CTkFrame圆角 + 内部tk.Label（确保稳定）
-            # 修复缺陷R27：选中行圆角；corner_radius=8小于padx=10，
-            # 内部tk.Label直角背景不覆盖圆角区域
+            # 修复缺陷R35：全屏簇行样式与主列表完全一致 —— 未选中
+            # 9px 圆角 + 1px 细边 + pady=4（选中态 paint_native_3d
+            # 升级 18px 药丸 + 4px 高光边 + 高光/阴影条 + pady=0）；
+            # 内边距同步主列表 22px（tk pack padx 不随 DPI 缩放，按
+            # _font_scale 换算物理px，高 DPI 下与 CTk 缩放后的主列表
+            # 逐像素一致）；头部/摘要间 1px 细分界线
             f_head = self._scaled_font(f_head)
-            frame = ctk.CTkFrame(parent, corner_radius=8,
+            _sp = max(1.0, getattr(self, "_font_scale", 1.0))
+            _sx = lambda v: int(round(v * _sp))    # 逻辑px → 物理px
+            frame = ctk.CTkFrame(parent, corner_radius=9,
                                  fg_color=p["row_bg"], border_width=1,
                                  border_color=p["row_border"])
-            frame.pack(fill="x", padx=5, pady=3)
+            frame.pack(fill="x", padx=5, pady=4)
+            # 3D 立体高光/阴影条（选中态由 paint_native_3d place 显示）
+            _hi_bar = tk.Frame(frame, bg=p["sel_hi"], bd=0,
+                               highlightthickness=0, height=_sx(2))
+            _shadow_bar = tk.Frame(frame, bg=p["sel_shadow"], bd=0,
+                                   highlightthickness=0, height=_sx(2))
             if on_toggle is not None:
                 link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
                 line = tk.Frame(frame, bg=p["row_bg"], bd=0,
                                 highlightthickness=0)
-                line.pack(fill="x", padx=(10, 10), pady=(7, 2))
+                line.pack(fill="x", padx=(_sx(22), _sx(22)),
+                          pady=(_sx(7), _sx(2)))
                 # 修复缺陷R34：▶/▼ 拆进等宽盒（固定宽 Frame + place
                 # 居中）—— 两字形宽差 8~10px，合写单标签时展开/收起
                 # 切换推动后续头部文字左右位移（展开行与未展开行
@@ -3762,7 +3774,7 @@ class LogCompressorApp(_make_app_base()):
                     line, text=f"\u00d7{cluster.count}",
                     font=f_head, bg=p["row_bg"], fg=link,
                     cursor="hand2")
-                toggle.pack(side="left", padx=(0, 10))
+                toggle.pack(side="left", padx=(0, _sx(10)))
                 head = tk.Label(
                     line, text=self._row_text(cluster, with_count=False),
                     anchor="w", font=f_head, bg=p["row_bg"],
@@ -3775,19 +3787,28 @@ class LogCompressorApp(_make_app_base()):
                     frame, text=self._row_text(cluster), anchor="w",
                     font=f_head, bg=p["row_bg"],
                     fg=self._row_color(cluster) or p["row_text"])
-                head.pack(fill="x", padx=(10, 10), pady=(7, 2))
+                head.pack(fill="x", padx=(_sx(22), _sx(22)),
+                          pady=(_sx(7), _sx(2)))
+            # 修复缺陷R35：头部/摘要间 1px 细分界线（与主列表一致；
+            # 选中态换 sel_border 亮色，两端内缩 22px 不碰圆角）
+            divider = tk.Frame(frame, bg=p["row_border"], bd=0,
+                               highlightthickness=0, height=_sx(1))
+            divider.pack(fill="x", padx=(_sx(22), _sx(22)))
             summary = tk.Label(
                 frame, text=cluster.summary, anchor="w", justify="left",
                 wraplength=0, font=f_sum,
                 bg=p["row_bg"], fg=p["row_text"])
-            summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
+            summary.pack(fill="x", padx=(_sx(22), _sx(22)),
+                         pady=(_sx(2), _sx(6)))
             select_cb = on_select or (lambda: self._select_cluster(idx))
             hover_cb = on_hover or (
                 lambda hovered: self._hover_row(idx, hovered))
             self._bind_row_events((frame, head, summary), select_cb,
                                   hover_cb)
             row = {"frame": frame, "head": head, "summary": summary,
-                   "idx": idx, "native": True}
+                   "idx": idx, "native": True,
+                   "divider": divider,
+                   "_hi_bar": _hi_bar, "_shadow_bar": _shadow_bar}
             if toggle is not None:
                 row["toggle"] = toggle
                 row["toggle_icon"] = toggle_icon
@@ -4880,12 +4901,21 @@ class LogCompressorApp(_make_app_base()):
 
             def paint_native_flat(row) -> None:
                 paint_native(row["frame"])
-                # 修复缺陷R27：未选中行 CTkFrame 8px圆角 + 1px细边框
+                # 修复缺陷R35：未选中行与主列表一致 —— 9px圆角 +
+                # 1px细边框 + pady=4；分界线低调色；隐藏3D高光/阴影
                 try:
                     row["frame"].configure(
-                        fg_color=p["row_bg"], corner_radius=8,
+                        fg_color=p["row_bg"], corner_radius=9,
                         border_width=1, border_color=p["row_border"])
+                    row["frame"].pack_configure(pady=4)
                 except (tk.TclError, ValueError):
+                    pass
+                try:
+                    if row.get("divider") is not None:
+                        row["divider"].configure(bg=p["row_border"])
+                    row["_hi_bar"].place_forget()
+                    row["_shadow_bar"].place_forget()
+                except (tk.TclError, KeyError):
                     pass
                 c = (self._displayed[idx]
                      if 0 <= idx < len(self._displayed) else None)
@@ -4894,21 +4924,26 @@ class LogCompressorApp(_make_app_base()):
                     if c is not None:
                         row["head"].configure(
                             fg=self._row_color(c) or p["row_text"])
-                    if row.get("toggle") is not None:
-                        row["toggle"].configure(fg=link)
+                    for _k in ("toggle", "toggle_icon"):
+                        if row.get(_k) is not None:
+                            row[_k].configure(fg=link)
                     row["summary"].configure(fg=p["row_text"])
                 except (tk.TclError, ValueError):
                     pass
 
             def paint_native_3d(row) -> None:
-                # 修复缺陷R27：选中行 CTkFrame 16px圆角 + 3px高光边框
+                # 修复缺陷R35：选中行与主列表完全一致 —— 18px 药丸
+                # 圆角 + 4px 高光边框 + 统一 sel_bot 底 + pady=0 浮起
+                # + 顶部受光高光条 + 底部投影 + 分界线 sel_border 亮色
                 # 修复缺陷R34：头部条内含图标等宽盒（Frame 嵌套），
                 # 两层遍历会对 Frame 配置 fg 抛 TclError 中断着色 ——
                 # 改逐层递归（Frame 无 fg 选项，逐控件 try 跳过）
                 try:
                     row["frame"].configure(
-                        fg_color=p["sel_bot"], corner_radius=16,
-                        border_width=3, border_color=p["sel_hi"])
+                        fg_color=p["sel_bot"], corner_radius=18,
+                        border_width=4, border_color=p["sel_hi"])
+                    # 选中行 pady 收紧 -> 比未选中行稍大，浮起感
+                    row["frame"].pack_configure(pady=0)
 
                     def _paint(w, bg) -> None:
                         try:
@@ -4922,11 +4957,26 @@ class LogCompressorApp(_make_app_base()):
                         for c2 in w.winfo_children():
                             _paint(c2, bg)
 
+                    # 统一底部深色（与主列表 _apply_row_bg 同色无缝）
                     for ch in row["frame"].winfo_children():
-                        # 头部条（Frame 子树）顶亮色 / 摘要 Label 底深色
-                        _paint(ch, p["sel_top"] if isinstance(ch, tk.Frame)
-                               else p["sel_bot"])
-                except (tk.TclError, ValueError):
+                        _paint(ch, p["sel_bot"])
+                    # 分界线换亮色；3D 高光/阴影条就位（两端内缩
+                    # 24px = 圆角半径 18 + 6 余量，不压切角区；tk
+                    # place 为物理px，按 DPI 缩放与主列表一致）
+                    if row.get("divider") is not None:
+                        row["divider"].configure(bg=p["sel_border"])
+                    _sx3 = max(1.0, getattr(self, "_font_scale", 1.0))
+                    _in = int(round(24 * _sx3))
+                    _bh = max(1, int(round(2 * _sx3)))
+                    row["_hi_bar"].configure(bg=p["sel_hi"])
+                    row["_hi_bar"].place(
+                        x=_in, y=0, relwidth=1, width=-2 * _in,
+                        height=_bh)
+                    row["_shadow_bar"].configure(bg=p["sel_shadow"])
+                    row["_shadow_bar"].place(
+                        x=_in, rely=1.0, relwidth=1, width=-2 * _in,
+                        height=_bh, anchor="sw")
+                except (tk.TclError, ValueError, KeyError):
                     pass
 
             for row in fs_rows:
