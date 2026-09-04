@@ -114,6 +114,40 @@ class TestAnalyzeText:
         assert c.sample.before == ["INFO ctx-1", "INFO ctx-2"]
         assert c.sample.after == ["INFO ctx-3", "INFO ctx-4", "INFO ctx-5"]
 
+    def test_instance_after_context_collected(self):
+        """修复缺陷R44：详情实例与典型样例一样收集后上下文。
+
+        此前后上下文待补队列仅对典型样例开启，实例只有前上下文，
+        展开簇点击实例时详情面板无后上下文可显示。
+        """
+        log = "\n".join([
+            "INFO ctx-1",
+            "2024-01-01 09:00:00 ERROR [db] boom 1",
+            "INFO post-1",
+            "INFO post-2",
+            "2024-01-01 09:00:01 ERROR [db] boom 2",
+            "INFO post-3",
+        ])
+        r = analyze_text(log, context_lines=2)
+        c = r.clusters[0]
+        assert len(c.instances) == 2
+        inst0, inst1 = c.instances
+        # 实例 1：后上下文收满 2 行即关闭（不含下一个错误行）
+        assert inst0.after == ["INFO post-1", "INFO post-2"]
+        # 实例 2：其后仅 1 行物理行
+        assert inst1.after == ["INFO post-3"]
+        # 典型样例后上下文行为不变
+        assert c.sample.after == ["INFO post-1", "INFO post-2"]
+
+    def test_instance_after_context_empty_when_ctx_zero(self):
+        """修复缺陷R44：context_lines=0 时实例不收集后上下文。"""
+        log = "\n".join([
+            "2024-01-01 09:00:00 ERROR [db] boom 1",
+            "INFO post-1",
+        ])
+        r = analyze_text(log, context_lines=0)
+        assert r.clusters[0].instances[0].after == []
+
     def test_default_context_lines_50(self):
         """修复缺陷#5：不传 context_lines 时默认前后各 50 行。"""
         before = [f"INFO pre-{i:02d}" for i in range(60)]

@@ -4530,7 +4530,7 @@ class LogCompressorApp(_make_app_base()):
                               instance: "ClusterInstance") -> None:
         """单个错误实例详情（修复缺陷R4：全屏展开实例点击查看）。
 
-        展示该实例自身的前上下文、原始日志与堆栈（区别于簇的
+        展示该实例自身的前后上下文、原始日志与堆栈（区别于簇的
         典型样例）；超岀详情保留上限的实例仅有元数据（提示降级）。
         """
         header, meta, plain = self._detail_writer(box)
@@ -4567,6 +4567,13 @@ class LogCompressorApp(_make_app_base()):
                     box.insert("end", line + "\n", "fold")
                 else:
                     box.insert("end", line + "\n", "bstack")
+        # 修复缺陷R44：实例后上下文渲染（此前实例无 after 数据，
+        # 点击实例后详情面板缺失后上下文）
+        if instance.after:
+            plain()
+            header("──── 后上下文 ────")
+            for line in instance.after:
+                plain(line)
         box.configure(state="disabled")
         self._highlight_keywords(box)
 

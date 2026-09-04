@@ -169,7 +169,7 @@ class ClusterInstance:
 
     内存有界设计：
     - 前 MAX_CLUSTER_INSTANCES_DETAILED 个实例保留完整条目与
-      前上下文（可查看原始日志、堆栈与上下文）；
+      前后上下文（可查看原始日志、堆栈与上下文）；
     - 后续实例仅记录时间戳/行号/摘要（元数据）；
     - 超出全局上限后不再记录（instances_truncated 标记）。
     """
@@ -179,6 +179,9 @@ class ClusterInstance:
     summary: str = ""                        # 展示用摘要（截断 160）
     entry: Optional[LogEntry] = None         # 完整条目（详情用，可为 None）
     before: List[str] = field(default_factory=list)   # 前上下文（详情用）
+    # 修复缺陷R44：实例后上下文（此前仅典型样例收集，点击实例
+    # 时详情面板无后上下文可显示）
+    after: List[str] = field(default_factory=list)    # 后上下文（详情用）
 
 
 @dataclass

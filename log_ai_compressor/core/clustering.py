@@ -113,7 +113,7 @@ class ErrorClusterer:
     # ------------------------------------------------------------------
     def add(self, entry: LogEntry,
             before_lines: Optional[List[str]] = None
-            ) -> Tuple[ErrorCluster, bool]:
+            ) -> Tuple[ErrorCluster, bool, Optional[ClusterInstance]]:
         """错误条目入簇。
 
         参数：
@@ -121,8 +121,10 @@ class ErrorClusterer:
             before_lines: 该条目出现时刻的前上下文快照（管线维护，用于样例）
 
         返回：
-            (簇, 是否新建簇或更换了样例) —— 更换样例时管线需要重新
-            捕获后上下文。
+            (簇, 是否新建簇或更换了样例, 本次记录的实例) —— 更换样例时
+            管线需要重新捕获后上下文；实例非 None 且含完整条目时管线
+            为其捕获后上下文（修复缺陷R44）；实例未记录（超上限）时为
+            None。
 
         三级匹配策略：
         1. 完整指纹（级别+消息+堆栈前3行）精确命中；
@@ -133,25 +135,25 @@ class ErrorClusterer:
         fp = fingerprint(entry)
         cluster = self._exact.get(fp)
         if cluster is not None:
-            replaced = self._update(cluster, entry, before_lines)
-            return cluster, replaced
+            replaced, inst = self._update(cluster, entry, before_lines)
+            return cluster, replaced, inst
 
         msg_tp = message_template(entry)
         cluster = self._msg_index.get((entry.level, msg_tp))
         if cluster is not None:
             self._exact[fp] = cluster
-            replaced = self._update(cluster, entry, before_lines)
-            return cluster, replaced
+            replaced, inst = self._update(cluster, entry, before_lines)
+            return cluster, replaced, inst
 
         cluster = self._find_similar(msg_tp, entry.level)
         if cluster is not None:
             self._exact[fp] = cluster           # 变体注册进精确表，后续 O(1)
             self._msg_index[(entry.level, msg_tp)] = cluster
-            replaced = self._update(cluster, entry, before_lines)
-            return cluster, replaced
+            replaced, inst = self._update(cluster, entry, before_lines)
+            return cluster, replaced, inst
 
-        cluster = self._create(fp, msg_tp, entry, before_lines)
-        return cluster, True
+        cluster, inst = self._create(fp, msg_tp, entry, before_lines)
+        return cluster, True, inst
 
     @property
     def clusters(self) -> List[ErrorCluster]:
@@ -182,7 +184,8 @@ class ErrorClusterer:
         return best
 
     def _create(self, fp: str, msg_tp: str, entry: LogEntry,
-                before_lines: Optional[List[str]]) -> ErrorCluster:
+                before_lines: Optional[List[str]]
+                ) -> Tuple[ErrorCluster, Optional[ClusterInstance]]:
         cluster = ErrorCluster(
             cluster_id=self._next_id,
             template=fp,
@@ -202,19 +205,20 @@ class ErrorClusterer:
         self._exact[fp] = cluster
         self._msg_index[(entry.level, msg_tp)] = cluster
         self._by_level.setdefault(entry.level, []).append(cluster)
-        self._update(cluster, entry, before_lines)
-        return cluster
+        _, inst = self._update(cluster, entry, before_lines)
+        return cluster, inst
 
     def _update(self, cluster: ErrorCluster, entry: LogEntry,
-                before_lines: Optional[List[str]]) -> bool:
-        """更新簇计数/时间/样例；返回是否更换了样例。"""
+                before_lines: Optional[List[str]]
+                ) -> Tuple[bool, Optional[ClusterInstance]]:
+        """更新簇计数/时间/样例；返回 (是否更换了样例, 本次记录的实例)。"""
         cluster.count += 1
         cluster.last_line = entry.last_line_no or entry.line_no
         cluster.last_seen = entry.timestamp
         if entry.timestamp is not None:
             cluster.hist.add(entry.timestamp)
         # 修复缺陷R4：记录实例（前 N 个含完整条目+上下文，其余仅元数据）
-        self._record_instance(cluster, entry, before_lines)
+        inst = self._record_instance(cluster, entry, before_lines)
         replaced = False
         # 样例升级：已存样例无堆栈而新条目带堆栈 -> 替换（更利于根因定位）
         if entry.has_stack and not (cluster.sample and cluster.sample.entry.has_stack):
@@ -223,11 +227,15 @@ class ErrorClusterer:
             replaced = True
         if not cluster.module and entry.module:
             cluster.module = entry.module
-        return replaced
+        return replaced, inst
 
     def _record_instance(self, cluster: ErrorCluster, entry: LogEntry,
-                         before_lines: Optional[List[str]]) -> None:
+                         before_lines: Optional[List[str]]
+                         ) -> Optional[ClusterInstance]:
         """记录簇内单个实例（修复缺陷R4，全屏簇展开数据源）。
+
+        返回新建的实例（未记录时返回 None，供管线决定是否为其
+        捕获后上下文 —— 修复缺陷R44）。
 
         三层上限（内存有界）：
         1. 全局总数超限 -> 不再记录（instances_truncated 标记）；
@@ -237,21 +245,23 @@ class ErrorClusterer:
         """
         if self._instance_total >= MAX_TOTAL_INSTANCES:
             cluster.instances_truncated = True
-            return
+            return None
         insts = cluster.instances
         if len(insts) >= MAX_CLUSTER_INSTANCES_META:
             cluster.instances_truncated = True
-            return
+            return None
         self._instance_total += 1
         detailed = len(insts) < MAX_CLUSTER_INSTANCES_DETAILED
-        insts.append(ClusterInstance(
+        inst = ClusterInstance(
             timestamp=entry.timestamp,
             line_no=entry.line_no,
             last_line_no=entry.last_line_no or entry.line_no,
             summary=self._summarize(entry),
             entry=entry if detailed else None,
             before=list(before_lines or []) if detailed else [],
-        ))
+        )
+        insts.append(inst)
+        return inst
 
     @staticmethod
     def _summarize(entry: LogEntry) -> str:

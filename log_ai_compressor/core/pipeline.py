@@ -8,8 +8,9 @@
 2. **典型样例上下文捕获**：
    - 前上下文：滚动窗口（带行号的 deque，容量 context+64）按行号
      区间截取，条目自身堆栈行不会混入前上下文；
-   - 后上下文：仅对「新建簇 / 更换样例」开启待补队列，收集其后
-     context 行物理原始行，收满即关闭 —— 内存严格有界；
+   - 后上下文：对「新建簇 / 更换样例」的典型样例与每个含完整
+     详情的实例开启待补队列，收集其后 context 行物理原始行，
+     收满即关闭 —— 内存严格有界；
 3. **进度与取消**：进度回调按行数间隔触发；取消事件按独立间隔轮询，
    取消后返回已完成的增量结果（truncated 标记）。
 """
@@ -32,7 +33,7 @@ from log_ai_compressor.core.analysis import analyze_clusters
 from log_ai_compressor.core.clustering import ErrorClusterer
 from log_ai_compressor.core.encoding import detect_encoding, open_text_stream
 from log_ai_compressor.core.filters import EntryFilter, FilterConfig
-from log_ai_compressor.core.models import AnalysisResult, ErrorCluster, RunStats
+from log_ai_compressor.core.models import AnalysisResult, RunStats
 from log_ai_compressor.core.parser import LogParser
 from log_ai_compressor.rules.engine import RuleSet, load_ruleset
 
@@ -104,7 +105,7 @@ class LogPipeline:
         # 常规堆栈长度下仍能取到条目之前的上下文
         window = self._ctx + 64
         recent: deque = deque(maxlen=window)
-        # 后上下文待补队列：cluster_id -> {"cluster", "start_line", "lines"}
+        # 后上下文待补队列：id(样例/实例) -> {"target", "start_line", "lines"}
         pending: Dict[int, dict] = {}
 
         line_no = 0
@@ -217,11 +218,21 @@ class LogPipeline:
             before = [text for (no, text) in recent
                       if entry.line_no - self._ctx <= no < entry.line_no]
 
-        cluster, replaced = clusterer.add(entry, before)
+        cluster, replaced, instance = clusterer.add(entry, before)
         if replaced and self._ctx > 0:
-            # 新建簇或样例升级 -> 开启后上下文待补
-            pending[cluster.cluster_id] = {
-                "cluster": cluster,
+            # 新建簇或样例升级 -> 开启样例后上下文待补
+            pending[id(cluster.sample)] = {
+                "target": cluster.sample,
+                "start_line": entry.last_line_no or entry.line_no,
+                "lines": [],
+            }
+        # 修复缺陷R44：详情实例同样开启后上下文待补（此前仅典型
+        # 样例收集，点击实例时详情面板无后上下文可显示）；
+        # 元数据实例（entry=None，超详情上限）不收集，内存有界
+        if (instance is not None and instance.entry is not None
+                and self._ctx > 0):
+            pending[id(instance)] = {
+                "target": instance,
                 "start_line": entry.last_line_no or entry.line_no,
                 "lines": [],
             }
@@ -231,11 +242,15 @@ class LogPipeline:
             global_hist.add(entry.timestamp)
 
     def _close_pending(self, item: dict, pending: Dict[int, dict]) -> None:
-        """收束待补样例：写入样例的 after 上下文并移除队列。"""
-        cluster: ErrorCluster = item["cluster"]
-        if cluster.sample is not None:
-            cluster.sample.after = list(item["lines"])
-        pending.pop(cluster.cluster_id, None)
+        """收束待补目标：写入 after 上下文并移除队列。
+
+        修复缺陷R44：目标泛化为典型样例或详情实例（两者均有
+        after 字段），键为 id(target) —— 同簇的样例与多个实例
+        可同时待补，互不覆盖。
+        """
+        target = item["target"]
+        target.after = list(item["lines"])
+        pending.pop(id(target), None)
 
 
 # ---------------------------------------------------------------------------

@@ -2803,6 +2803,30 @@ class TestClusterExpandMain:
         assert not state["area"].winfo_exists(), "收起后实例区应销毁"
         assert row["toggle_icon"].cget("text") == "\u25b6"
 
+    def test_classic_instance_detail_shows_after_context(self, app):
+        """修复缺陷R44：点击实例 → 详情面板显示后上下文。
+
+        后上下文待补队列此前仅对典型样例开启，实例 after 永远为空，
+        展开簇点击实例时详情面板缺失「后上下文」区域（前上下文正常）。
+        """
+        log = "".join(
+            f"2024-01-01 09:00:{i:02d} ERROR [db] same failure here\n"
+            f"INFO post-{i}\n"
+            for i in range(4))
+        _run_paste_analysis(app, log)
+        app.update()
+        assert app._virtual_list is None, "小数据应走经典列表"
+        app._toggle_cluster_expand(0)
+        app.update()
+        state = app._classic_expanded[0]
+        first_d = state["labels"][0]
+        first_d["label"]._label.event_generate("<Button-1>", x=3, y=2)
+        app.update()
+        detail = app._detail_box.get("1.0", "end")
+        assert "【实例详情】" in detail
+        assert "后上下文" in detail, "实例详情应显示后上下文区域"
+        assert "INFO post-0" in detail, "实例详情应含实例之后的原始行"
+
     def test_expand_classic_head_alignment_stable(self, app):
         """修复缺陷R34：展开/收起 ▶/▼ 切换，头部内容起始 x 不变。
 
