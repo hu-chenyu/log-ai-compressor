@@ -2427,6 +2427,35 @@ class TestVirtualList:
         assert int(sel["frame"].cget("highlightthickness")) == 0, \
             "选中行原生描边应关闭（画布圆角描边替代）"
 
+    def test_selected_virtual_row_window_inside_round_bg(self, app):
+        """修复缺陷R41b：行窗口不溢出圆角背景（底部亮描边/阴影可见）。
+
+        行窗口垂直内缩/行高内边距未随 DPI 缩放时，高 DPI 下行窗口
+        底部溢出圆角背景，盖住底部亮描边与阴影条（选中行底部
+        「边框开口」）。回归断言：窗口底缘与圆角背景底缘之间
+        始终保留 ≥4px 间隙（亮描边线宽 3px 放得下）。
+        """
+        _run_many_clusters(app)
+        app.update()
+        app._select_cluster(1)
+        app.update()
+        vl = app._virtual_list
+        slots = {s["idx"]: s for s in vl.slots}
+        assert 1 in slots
+        sel = slots[1]
+        grp = sel.get("_round")
+        assert grp and grp.get("border") and grp.get("shadow"), \
+            "选中行应有画布圆角组（亮描边+阴影）"
+        canvas = vl._canvas
+        wx, wy = canvas.coords(sel["win"])
+        wh = int(canvas.itemcget(sel["win"], "height"))
+        bb = canvas.bbox(grp["bg"])
+        assert bb is not None, "圆角背景应有包围盒"
+        bottom_room = bb[3] - (wy + wh)
+        assert bottom_room >= 4, \
+            f"窗口底缘应至少留 4px 给底部亮描边/阴影（实际 {bottom_room:.0f}px）"
+        assert wy - bb[1] >= 4, "窗口顶缘应留间隙（顶部高光条可见）"
+
     def test_row_press_pop_animation(self, app):
         """优化缺陷R23/R25：点击行立体弹起（下沉→上弹→回落 240ms）。
 
@@ -2442,7 +2471,7 @@ class TestVirtualList:
         slots = {s["idx"]: s for s in vl.slots}
         assert 1 in slots
         s1 = slots[1]
-        base = vl._row_y0(1) + 12       # R27：行窗口静止位含 +12 垂直偏移
+        base = vl._row_y0(1) + vl._sx(12)  # R27/R41b：静止位含缩放垂直偏移
         vl._pop_press(s1)
         assert vl._canvas.coords(s1["win"])[1] > base, "按下应下沉"
         vl._pop_release(s1)
@@ -2493,7 +2522,8 @@ class TestVirtualList:
         vl._fill_slot(s1, 5, vl._region_w())      # 回收到未选中索引
         assert s1.get("_pop") is None, "回收应取消动画"
         assert not s1["_round"].get("sel"), "回收为未选中行应无 3D 件"
-        assert vl._canvas.coords(s1["win"])[1] == vl._row_y0(5) + 12
+        assert vl._canvas.coords(s1["win"])[1] == \
+            vl._row_y0(5) + vl._sx(12)             # R41b：缩放垂直偏移
 
     def test_selected_row_rounded_corners(self, app):
         """优化缺陷R24/R27：选中行画布圆角背景组（底+描边+高光+双投影）。
@@ -2548,7 +2578,8 @@ class TestVirtualList:
         assert old["bg"] not in alive, "回收应清除旧圆角背景"
         # 回收为未选中行：重建圆角背景（无 3D 件）
         assert s1.get("_round") and not s1["_round"].get("sel")
-        assert vl._canvas.coords(s1["win"])[1] == vl._row_y0(5) + 12
+        assert vl._canvas.coords(s1["win"])[1] == \
+            vl._row_y0(5) + vl._sx(12)             # R41b：缩放垂直偏移
 
     def test_virtual_list_survives_theme_switch(self, app):
         """修复R6：虚拟模式下主题切换刷新配色不崩溃。"""
