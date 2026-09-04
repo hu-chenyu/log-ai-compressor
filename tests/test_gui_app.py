@@ -535,7 +535,7 @@ class TestClusterListFontAndWidth:
         app.update()
 
     def test_fullscreen_instance_row_font_and_nowrap(self, app):
-        """修复R10：全屏展开实例行 20 号 + DPI 缩放 + 单行不换行。"""
+        """修复R10/R42：全屏实例行 = 全屏摘要档渲染 + 单行不换行。"""
         # 同簇多实例日志（×2 实例，展开后可见实例行）
         multi = (SAMPLE_PASTE + "2024-01-01 09:02:00 FATAL [core] "
                  "out of memory in worker 4\n")
@@ -547,31 +547,34 @@ class TestClusterListFontAndWidth:
             time.sleep(0.005)
         win = app._fs_list_win
         assert win is not None and win.winfo_exists()
-        # 点击「▶ ×2」展开按钮（FATAL→ERROR 归一簇 ×2；文本形如 "▶ ×2"）
-        toggles = [w for w in _all_widgets(win)
-                   if isinstance(w, tk.Label)
-                   and "\u00d72" in str(w.cget("text"))]
+        vl = app._fs_vl
+        # 点击「▶ ×2」展开按钮（FATAL→ERROR 归一簇 ×2）
+        toggles = [s for s in vl.slots
+                   if 0 <= s.get("idx", -1) < len(vl._data)
+                   and str(s["toggle"].cget("text")) == "×2"]
         assert toggles, "全屏窗口应有 ×2 展开按钮"
-        toggles[0].event_generate("<Button-1>")
+        toggles[0]["toggle"].event_generate("<Button-1>")
         for _ in range(25):
             app.update()
             time.sleep(0.005)
-        # 实例行：时间戳开头（2024-01-01 …）的原生 Label
-        insts = [w for w in _all_widgets(win)
-                 if isinstance(w, tk.Label)
-                 and "out of memory" in str(w.cget("text"))
-                 and str(w.cget("text")).startswith("2024-")]
-        assert insts, "展开后应有实例行"
-        lbl = insts[0]
+        # 优化缺陷R42：实例作为视图行注入全屏虚拟列表
+        inst_rows = [r for r in vl._data if r[0] == "i"]
+        assert len(inst_rows) == 2, "展开后应有 2 个实例视图行"
+        inst_slot = next(
+            s for s in vl.slots
+            if 0 <= s.get("idx", -1) < len(vl._data)
+            and vl._data[s["idx"]][0] == "i")
+        lbl = inst_slot["summary"]
         assert int(lbl.cget("wraplength")) == 0, "实例行应单行不换行"
+        assert "out of memory" in str(lbl.cget("text"))
         size = int(tkfont.Font(font=lbl.cget("font")).cget("size"))
-        # 实例行渲染字号 ≈ 20 号（相对经典 22 号基准同缩放系数）
+        # 实例行渲染字号 = 全屏摘要档（经典头部 22 号基准 × 24/22）
         classic = app._cluster_rows[0]["head"]
         inner = [c for c in classic.winfo_children()
                  if c.winfo_class() == "Label"][0]
         base = int(tkfont.Font(font=inner.cget("font")).cget("size"))
-        assert abs(size - base * 20 / 22) <= 2, \
-            f"实例行渲染 {size} 应 ≈ 经典 {base}×20/22"
+        assert abs(size - base * 24 / 22) <= 2, \
+            f"实例行渲染 {size} 应 ≈ 经典 {base}×24/22（全屏摘要档）"
         win.event_generate("<Escape>")
         app.update()
 
@@ -2048,27 +2051,16 @@ class TestFullscreenView:
         win = [w for w in app.winfo_children()
                if isinstance(w, tk.Toplevel)
                and "错误分类列表" in w.title()][0]
-        # 触发行 1 的点击（通过事件绑定）——直接调用绑定回调
-        # 行 frame 的第一个可点击子控件。修复缺陷R17：查找限定
-        # 【列表区子树】—— 新增的分隔条握点同样是带 Button-1 绑定的
-        # tk.Frame 且在逆序遍历中更先命中（点到它会启动分隔条拖动
-        # 而非选中行），必须从候选中排除
-        clickables = []
-        for sub in _all_widgets(app._fs_list_area):
-            if sub.winfo_class() in ("CTkLabel", "Label", "Frame"):
-                clickables.append(sub)
-        target = None
-        for w in clickables:
-            binds = w.bind("<Button-1>")
-            if binds:
-                target = w
-                break
-        assert target is not None, "行控件应有点击绑定"
-        target.event_generate("<Button-1>")
+        # 优化缺陷R42：全屏列表 = 虚拟列表组件 —— 直接点击目标簇
+        # 槽位头部（槽内绑定 app._select_cluster，与真实点击同链路）
+        assert len(app._displayed) > 1, "需要 ≥2 簇以验证详情切换"
+        slots = {s.get("idx"): s for s in app._fs_vl.slots
+                 if s.get("idx", -1) >= 0}
+        assert 1 in slots, "全屏列表应有簇 1 槽位"
+        slots[1]["head"].event_generate("<Button-1>")
         app.update()
         after = app._detail_box.get("1.0", "end")
-        assert after != before or len(app._displayed) == 1, \
-            "点击全屏行应联动主界面详情（或仅 1 行无法切换）"
+        assert after != before, "点击全屏行应联动主界面详情"
 
     def test_fullscreen_without_analysis_is_safe(self, app):
         """未分析时点击全屏按钮不崩溃（提示后返回）。"""
@@ -2163,7 +2155,7 @@ class TestFullscreenExpand:
             app.update()
 
     def test_expand_shows_all_instances(self, app):
-        """点击展开：显示全部 12 个实例（时间戳 + 摘要）。"""
+        """点击展开：显示全部 12 个实例（视图数据注入实例行）。"""
         win = self._open_fs(app)
         try:
             toggle = self._find_toggles(win)[0]
@@ -2173,14 +2165,11 @@ class TestFullscreenExpand:
                 time.sleep(0.005)
             assert "▼" in str(
                 self._toggle_icon(toggle).cget("text")), "展开后为 ▼"
-            # 实例行：含「  L行号  」模式的原生 label
-            inst_labels = [
-                w for w in _all_widgets(win)
-                if isinstance(w, tk.Label)
-                and "  L" in str(w.cget("text"))
-                and "connection refused" in str(w.cget("text"))]
-            assert len(inst_labels) == 12, \
-                f"应展开 12 个实例，实际 {len(inst_labels)}"
+            # 优化缺陷R42：全屏列表 = 虚拟列表 —— 实例作视图行注入
+            inst_rows = [r for r in app._fs_vl._data
+                         if r[0] == "i" and r[1] == 0]
+            assert len(inst_rows) == 12, \
+                f"应展开 12 个实例，实际 {len(inst_rows)}"
         finally:
             win.destroy()
             app.update()
@@ -2194,12 +2183,13 @@ class TestFullscreenExpand:
             for _ in range(40):
                 app.update()
                 time.sleep(0.005)
-            inst_labels = [
-                w for w in _all_widgets(win)
-                if isinstance(w, tk.Label)
-                and "  L" in str(w.cget("text"))]
-            assert inst_labels
-            inst_labels[0].event_generate("<Button-1>")
+            # 优化缺陷R42：实例行 = 虚拟列表槽位（点击触发
+            # app._select_instance → 全屏详情联动）
+            inst_slot = next(
+                s for s in app._fs_vl.slots
+                if 0 <= s.get("idx", -1) < len(app._fs_vl._data)
+                and app._fs_vl._data[s["idx"]][0] == "i")
+            inst_slot["summary"].event_generate("<Button-1>")
             app.update()
             boxes = [w for w in _all_widgets(win)
                      if isinstance(w, ctk.CTkTextbox)]
@@ -2237,18 +2227,26 @@ class TestFullscreenExpand:
         win = self._open_fs(app)
         try:
             toggle = self._find_toggles(win)[0]
+
             # 修复缺陷R34：展开/收起头部文字起始 x 不变（图标等宽盒）
-            head_lbl = [w for w in _all_widgets(win)
-                        if w.winfo_class() == "Label"
-                        and "ERROR" in str(w.cget("text"))
-                        and "×" not in str(w.cget("text"))][0]
+            # 优化缺陷R42：虚拟列表槽位按视图行复用（控件引用随刷新
+            # 重指）—— 每次按数据行 ("c",0) 重新取簇头标签
+            def cluster_head():
+                for s in app._fs_vl.slots:
+                    if 0 <= s.get("idx", -1) < len(app._fs_vl._data) \
+                            and app._fs_vl._data[s["idx"]] == ("c", 0):
+                        return s["head"]
+                return None
+
+            head_lbl = cluster_head()
+            assert head_lbl is not None
             head_x0 = head_lbl.winfo_x()
             _click_ctk_label(toggle)
             for _ in range(40):
                 app.update()
                 time.sleep(0.005)
             assert "▼" in str(self._toggle_icon(toggle).cget("text"))
-            assert head_lbl.winfo_x() == head_x0, \
+            assert cluster_head().winfo_x() == head_x0, \
                 "展开后头部文字起始 x 不变"
             _click_ctk_label(toggle)
             for _ in range(60):
@@ -2256,7 +2254,7 @@ class TestFullscreenExpand:
                 time.sleep(0.005)
             assert "▶" in str(self._toggle_icon(toggle).cget("text")), \
                 "收起后为 ▶"
-            assert head_lbl.winfo_x() == head_x0, \
+            assert cluster_head().winfo_x() == head_x0, \
                 "收起后头部文字起始 x 复原"
         finally:
             win.destroy()
@@ -2269,11 +2267,10 @@ class TestFullscreenExpand:
             boxes = [w for w in _all_widgets(win)
                      if isinstance(w, ctk.CTkTextbox)]
             assert boxes, "右侧应有详情面板"
-            # 左侧滚动列表存在
-            from customtkinter import CTkScrollableFrame
-            scrollables = [w for w in _all_widgets(win)
-                           if isinstance(w, CTkScrollableFrame)]
-            assert scrollables, "左侧应有簇列表"
+            # 左侧簇列表（优化缺陷R42：虚拟列表画布 + 自带滚动条）
+            assert app._fs_vl is not None, "左侧应有虚拟列表组件"
+            assert app._fs_vl._canvas.winfo_exists(), \
+                "左侧应有虚拟列表画布"
         finally:
             win.destroy()
             app.update()
@@ -2899,41 +2896,46 @@ class TestFullscreenReuse:
             app.update()
 
     def test_fs_selected_row_style_matches_main(self, app):
-        """修复缺陷R35：全屏簇行样式与主列表完全一致。
+        """优化缺陷R42：全屏选中行与主窗口虚拟列表完全一致。
 
-        选中态：18px 药丸圆角 + 4px 高光边 + 高光/阴影条就位 +
-        分界线 sel_border 亮色 + 统一 sel_bot 底 + 白字；
-        未选中：9px 圆角 + 1px 细边 + 分界线 + 高光/阴影条隐藏。
+        选中态：统一 sel_bot 底 + 画布圆角组（亮描边/顶部高光/底部
+        +右侧阴影）+ 分界线 sel_border 亮色 + 头部调亮级别色 +
+        摘要选中白；未选中：平面圆角背景。
         """
         _run_paste_analysis(app, REPEAT_LOG)
         win = self._open_fs(app)
         try:
             p = app._palette()
-            row = app._fs_rows[0]
-            # 未选中态：9px 圆角 + 1px 细边 + 分界线 + 条隐藏
-            assert int(row["frame"].cget("corner_radius")) == 9
-            assert int(row["frame"].cget("border_width")) == 1
-            assert row.get("divider") is not None, "全屏行应有分界细线"
-            assert not row["_hi_bar"].winfo_ismapped(), "未选中隐藏高光条"
-            # 点击头部选中 -> 与主列表一致的 3D 药丸选中态
-            _click_ctk_label(row["head"])
-            app.update()
-            assert int(row["frame"].cget("corner_radius")) == 18, \
-                "选中行应为 18px 药丸圆角（与主列表一致）"
-            assert int(row["frame"].cget("border_width")) == 4, \
-                "选中行应为 4px 高光边框（与主列表一致）"
-            assert row["_hi_bar"].winfo_ismapped(), "选中应显示顶部高光条"
-            assert row["_shadow_bar"].winfo_ismapped(), "选中应显示底部阴影条"
-            assert str(row["divider"].cget("bg")) == p["sel_border"], \
+            vl = app._fs_vl
+            assert vl is not None, "全屏列表应为虚拟列表组件"
+            # 全屏档字体注入生效（头部用 _font_fs_head）
+            assert vl._f_head is app._font_fs_head
+            assert vl._f_sum is app._font_fs_summary
+            app._select_cluster(0)
+            for _ in range(8):
+                app.update()
+                time.sleep(0.005)
+            slot = next(
+                s for s in vl.slots
+                if 0 <= s.get("idx", -1) < len(vl._data)
+                and vl._data[s["idx"]] == ("c", 0))
+            # 选中行：统一蓝底 + 画布 3D 圆角组五件套
+            grp = slot.get("_round")
+            assert grp and grp.get("sel"), "选中行应有 3D 圆角组"
+            for key in ("bg", "border", "hi", "shadow", "rshadow"):
+                assert grp.get(key), f"选中行圆角组缺 {key}"
+            for key in ("frame", "head", "summary"):
+                assert str(slot[key].cget("bg")) == p["sel_bot"], \
+                    f"选中行 {key} 应为统一行体色"
+            assert str(slot["divider"].cget("bg")) == p["sel_border"], \
                 "选中行分界线应为亮色"
-            assert str(row["head"].cget("bg")) == p["sel_bot"], \
-                "选中行头部应与外层同色"
-            # 修复缺陷R40：选中行头部用调亮级别色（非统一白）
-            cluster = app._displayed[row["idx"]]
+            # 头部调亮级别色（非统一白）；摘要选中白
+            cluster = app._displayed[0]
             expect_head = app._row_color_sel(cluster) or p["sel_text"]
-            assert str(row["head"].cget("fg")).lower() == \
-                expect_head.lower(), \
-                f"选中行头部应为调亮级别色（实际 {row['head'].cget('fg')}）"
+            assert str(slot["head"].cget("fg")).lower() == \
+                expect_head.lower(), "选中行头部应为调亮级别色"
+            assert str(slot["summary"].cget("fg")) == p["sel_text"], \
+                "选中行摘要应为选中白"
         finally:
             win.destroy()
             app.update()
