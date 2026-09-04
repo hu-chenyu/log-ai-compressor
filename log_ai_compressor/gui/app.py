@@ -1645,6 +1645,9 @@ class LogCompressorApp(_make_app_base()):
         self._fs_list_sig: Optional[tuple] = None    # 已渲染数据签名
         self._fs_detail_win: Optional[ctk.CTkToplevel] = None
         self._fs_detail_box: Optional[ctk.CTkTextbox] = None
+        # 优化缺陷R45：主窗口结果搜索（显示层过滤，不触发重新分析）
+        self._search_kw = ""
+        self._search_job = None                 # 输入防抖 after 句柄
 
         # 修复缺陷R1：主题调色板登记表（切换时按角色批量刷新）
         self._bg_widgets: List[tuple] = []       # (控件, "window"/"card"/"header")
@@ -1933,7 +1936,8 @@ class LogCompressorApp(_make_app_base()):
         self._level_vars: Dict[str, tk.BooleanVar] = {}
         self._level_tooltips: Dict[str, Tooltip] = {}
         level_box = ctk.CTkFrame(panel, fg_color="transparent")
-        level_box.grid(row=0, column=1, columnspan=4, sticky="w")
+        # 优化缺陷R45：复选框容器缩至列 1~2，列 3~4 让给结果搜索框
+        level_box.grid(row=0, column=1, columnspan=2, sticky="w")
         col = 0
         for level in LEVEL_CHECKS:
             # 默认勾选 ERROR/FAIL（DEFAULT_SELECTED_LEVELS）
@@ -1956,6 +1960,27 @@ class LogCompressorApp(_make_app_base()):
             col += 1
             self._level_tooltips[level] = Tooltip(
                 info, lambda lv=level: _LEVEL_HELP[lv])
+
+        # 优化缺陷R45：结果搜索框 —— 置于级别过滤与上下文行数之间的
+        # 空白区（列 3~4 拉伸填充）；即时过滤左侧错误分类列表的
+        # 【显示】（摘要/模块/级别/优先级档匹配，不触发重新分析），
+        # 与已删除的「包含/排除关键字」（分析前过滤输入）职责不同
+        search_box = ctk.CTkFrame(panel, fg_color="transparent")
+        search_box.grid(row=0, column=3, columnspan=2, sticky="ew",
+                        padx=(8, 2))
+        search_box.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(search_box, text="搜索").grid(row=0, column=0,
+                                                   padx=(0, 4))
+        self._search_var = tk.StringVar()
+        self._search_entry = ctk.CTkEntry(
+            search_box, textvariable=self._search_var,
+            placeholder_text="按摘要 / 模块 / 级别过滤列表…")
+        self._search_entry.grid(row=0, column=1, sticky="ew")
+        self._search_count = ctk.CTkLabel(search_box, text="",
+                                          text_color="#8fa4b8")
+        self._search_count.grid(row=0, column=2, padx=(6, 2))
+        # trace 不依赖键盘事件（粘贴/清空/程序赋值均可靠触发）
+        self._search_var.trace_add("write", self._on_search_changed)
 
         # 优化缺陷R43：包含/排除关键字、Top N 输入区删除（用户决策）
         # 优化缺陷R44：上下文行数输入框回归 —— 置于级别过滤与解析
@@ -3707,7 +3732,12 @@ class LogCompressorApp(_make_app_base()):
         self._render_cluster_list()
         self._save_config()
         if self._displayed:
-            self._select_cluster(0)
+            # 优化缺陷R45：搜索框有残留关键字时选中首个【可见】簇
+            # （原固定选 0，簇 0 被过滤时会选中不可见行）
+            first = next((i for i, c in enumerate(self._displayed)
+                          if self._cluster_matches(c)), None)
+            if first is not None:
+                self._select_cluster(first)
 
     def _clear_list(self) -> None:
         """清空左侧列表（销毁虚拟模式 / 经典行，恢复经典滚动容器）。"""
@@ -3724,7 +3754,64 @@ class LogCompressorApp(_make_app_base()):
                 child.destroy()
         self._cluster_rows = []
 
-    def _render_cluster_list(self) -> None:
+    # ------------------------------------------------------------------
+    # 优化缺陷R45：结果搜索（显示层过滤，不触发重新分析）
+    # ------------------------------------------------------------------
+    def _on_search_changed(self, *args) -> None:
+        """搜索输入防抖（200ms）：连续输入合并为一次列表刷新。"""
+        if self._search_job is not None:
+            try:
+                self.after_cancel(self._search_job)
+            except (tk.TclError, ValueError):
+                pass
+        self._search_job = self.after(200, self._apply_search_filter)
+
+    def _cluster_matches(self, cluster: ErrorCluster) -> bool:
+        """搜索关键字匹配（摘要/模块/级别/优先级档，小写子串；
+        与全屏 _fs_view_rows 同口径；空关键字全部命中）。"""
+        kw = self._search_kw
+        if not kw:
+            return True
+        hay = (f"{cluster.summary} {cluster.module} "
+               f"{cluster.level} {cluster.priority_label}").lower()
+        return kw in hay
+
+    def _apply_search_filter(self) -> None:
+        """应用搜索过滤（防抖后执行）。
+
+        虚拟模式仅刷新视图行（展开/选中天然保留 —— 视图行索引即
+        _displayed 索引）；经典模式保留展开/选中重建可见行。
+        """
+        # 直接调用（测试/程序化）时取消挂起的防抖任务，避免重复刷新
+        if self._search_job is not None:
+            try:
+                self.after_cancel(self._search_job)
+            except (tk.TclError, ValueError):
+                pass
+        self._search_job = None
+        self._search_kw = self._search_var.get().strip().lower()
+        if self._result is None:
+            self._update_search_count()
+            return
+        if self._virtual_list is not None:
+            self._virtual_list.set_data(self._build_view_rows())
+        elif self._displayed:
+            self._render_cluster_list(preserve_state=True)
+        self._update_search_count()
+
+    def _update_search_count(self) -> None:
+        """搜索结果计数（过滤时显示「X / Y 条」，与全屏搜索同款）。"""
+        label = getattr(self, "_search_count", None)
+        if label is None:
+            return
+        if not self._search_kw or self._result is None:
+            label.configure(text="")
+            return
+        total = len(self._displayed)
+        shown = sum(1 for c in self._displayed if self._cluster_matches(c))
+        label.configure(text=f"{shown} / {total} 条")
+
+    def _render_cluster_list(self, preserve_state: bool = False) -> None:
         """左侧错误列表：全部错误行（图标/优先级/次数行 + 单行摘要）。
 
         修复缺陷：原单行 CTkButton 长文本溢出右侧且无横向滚动能力，
@@ -3732,9 +3819,18 @@ class LogCompressorApp(_make_app_base()):
         修复缺陷R6：行数超过 VIRTUAL_LIST_THRESHOLD 切换虚拟滚动
         （池化复用可见区行控件，列表长度不再影响渲染耗时）。
         优化缺陷R43：Top N 截断删除（全量簇显示，不再「其余 N 种」提示）。
+        优化缺陷R45：preserve_state=True（搜索过滤重建）时保留簇
+        展开与行选中状态；搜索关键字在经典/虚拟两路同口径过滤
+        （仅作用于显示，_displayed 索引语义不变）。
         """
         assert self._result is not None
+        # 优化缺陷R45：同步搜索关键字（重新分析后框内文本仍然生效）
+        self._search_kw = self._search_var.get().strip().lower()
+        # 优化缺陷R45：搜索重建前捕获展开/选中状态（事后恢复）
+        expanded = set(self._expanded_clusters) if preserve_state else set()
+        selected = self._selected_row if preserve_state else -1
         self._displayed = list(self._result.clusters)
+        self._update_search_count()
         self._clear_list()
         # 清理随列表销毁的动态 muted 标签（防登记表无限累积）
         self._muted_labels = [
@@ -3771,11 +3867,33 @@ class LogCompressorApp(_make_app_base()):
             # 修复缺陷R16：虚拟列表数据为视图行（簇行+展开实例行）
             self._virtual_list.set_data(self._build_view_rows())
             return
+        visible = 0
         for idx, cluster in enumerate(self._displayed):
+            # 优化缺陷R45：搜索过滤仅作用于显示（行 idx 仍为
+            # _displayed 索引，选中/展开状态语义不受影响）
+            if not self._cluster_matches(cluster):
+                continue
+            visible += 1
             # 修复缺陷R16：经典行带「▶ ×N」就地展开按钮
             self._make_cluster_row(self._cluster_list, idx, cluster,
                                    on_toggle=lambda i=idx:
                                    self._toggle_cluster_expand(i))
+        if visible == 0:
+            # 优化缺陷R45：关键字过滤后无匹配簇的空态提示
+            empty = ctk.CTkLabel(self._cluster_list,
+                                 text="无匹配的错误簇（调整搜索关键字）")
+            empty.pack(pady=20)
+            self._muted_labels.append(empty)
+        if not preserve_state:
+            return
+        # 优化缺陷R45：恢复搜索前的展开/选中状态（仍可见的才恢复）
+        for idx in sorted(expanded):
+            if (0 <= idx < len(self._displayed)
+                    and self._cluster_matches(self._displayed[idx])):
+                self._toggle_cluster_expand(idx)
+        if (0 <= selected < len(self._displayed)
+                and self._cluster_matches(self._displayed[selected])):
+            self._select_cluster(selected)
 
     def _make_cluster_row(self, parent, idx: int, cluster: ErrorCluster,
                           register: bool = True,
@@ -4127,6 +4245,8 @@ class LogCompressorApp(_make_app_base()):
         修复缺陷R16：虚拟模式池行着色统一走 _fill_slot（按
         _selected_row/_selected_inst/_hovered 计算），避免视图索引
         与簇索引不匹配导致的错位着色。
+        优化缺陷R45：经典模式守卫改为按 idx 字段判定（搜索过滤后
+        行数少于簇数，原位置索引 guard 会漏判导致选中不高亮）。
         """
         if self._virtual_list is not None:
             self._selected_row = idx
@@ -4134,9 +4254,10 @@ class LogCompressorApp(_make_app_base()):
             return
         previous = getattr(self, "_selected_row", -1)
         states = self._row_states()
-        if 0 <= previous < len(self._cluster_rows):
+        rows = self._cluster_rows
+        if any(r.get("idx") == previous for r in rows):
             self._apply_row_bg(previous, states["bg"])
-        if 0 <= idx < len(self._cluster_rows):
+        if any(r.get("idx") == idx for r in rows):
             self._apply_row_bg(idx, states["selected"])
         self._selected_row = idx
 
@@ -4253,9 +4374,13 @@ class LogCompressorApp(_make_app_base()):
 
         视图行 = ("c", 簇索引) | ("i", 簇索引, 实例索引)；虚拟列表
         以此为数据（池化渲染两种行）。
+        优化缺陷R45：搜索关键字过滤（与全屏 _fs_view_rows 同口径，
+        行索引保持 _displayed 语义，展开/选中状态不受影响）。
         """
         rows = []
         for idx, cluster in enumerate(self._displayed):
+            if not self._cluster_matches(cluster):
+                continue
             rows.append(("c", idx))
             if idx in self._expanded_clusters:
                 for iidx in range(len(cluster.instances)):
