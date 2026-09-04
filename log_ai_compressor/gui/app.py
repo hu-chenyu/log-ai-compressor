@@ -691,6 +691,20 @@ class VirtualClusterList:
         self._update_region()
         self._sync()
 
+    def see_cluster(self, cidx: int) -> None:
+        """滚动视口使指定簇行可见（搜索 Enter 跳转定位，优化缺陷R46）。"""
+        for vidx, row in enumerate(self._data):
+            if row[0] != "c" or row[1] != cidx:
+                continue
+            total = max(1, len(self._data) * self.ROW_HEIGHT)
+            y = vidx * self.ROW_HEIGHT
+            vh = self._canvas.winfo_height()
+            top = self._canvas.canvasy(0)
+            if y < top or y + self.ROW_HEIGHT > top + vh:
+                self._canvas.yview_moveto(max(0.0, min(1.0, y / total)))
+            self._sync()
+            return
+
     def _tgl_icon_w(self) -> int:
         """「▶/▼」展开图标固定盒宽（物理px，修复缺陷R34）。
 
@@ -1981,6 +1995,12 @@ class LogCompressorApp(_make_app_base()):
         self._search_count.grid(row=0, column=2, padx=(6, 2))
         # trace 不依赖键盘事件（粘贴/清空/程序赋值均可靠触发）
         self._search_var.trace_add("write", self._on_search_changed)
+        # 优化缺陷R46：Enter 跳下一个匹配 / Shift+Enter 跳上一个
+        # （CTkEntry.bind 转发到内部 tk.Entry，键盘事件可可靠触发）
+        self._search_entry.bind(
+            "<Return>", lambda e: self._on_search_enter(True))
+        self._search_entry.bind(
+            "<Shift-Return>", lambda e: self._on_search_enter(False))
 
         # 优化缺陷R43：包含/排除关键字、Top N 输入区删除（用户决策）
         # 优化缺陷R44：上下文行数输入框回归 —— 置于级别过滤与解析
@@ -3056,6 +3076,14 @@ class LogCompressorApp(_make_app_base()):
         try:
             for tag, color in _DETAIL_TAG_COLORS.items():
                 box.tag_config(tag, foreground=color)
+            # 优化缺陷R46：结果搜索关键字照亮标签（醒目黄底黑字，
+            # 全主题可读；优先级抬到最高，压过内置错误词高亮）
+            box.tag_config("searchkw", background="#fbbf24",
+                           foreground="#1f2937")
+            try:
+                box.tag_raise("searchkw")
+            except tk.TclError:
+                pass
             # 业务栈帧加粗（内部 tk.Text 支持 tag font）
             inner = getattr(box, "_textbox", None)
             if inner is not None:
@@ -3795,9 +3823,82 @@ class LogCompressorApp(_make_app_base()):
             return
         if self._virtual_list is not None:
             self._virtual_list.set_data(self._build_view_rows())
+            # 优化缺陷R46：关键字变化即时刷新详情面板高亮（虚拟
+            # 模式 set_data 不重填详情，选中态保持不变）
+            self._refresh_current_detail()
         elif self._displayed:
             self._render_cluster_list(preserve_state=True)
         self._update_search_count()
+        # 优化缺陷R46：当前选中簇被过滤掉（或无选中）时自动选中
+        # 首个匹配簇 —— 否则详情面板停留陈旧内容、无关键字高亮
+        matches = [i for i, c in enumerate(self._displayed)
+                   if self._cluster_matches(c)]
+        if matches and self._selected_row not in matches:
+            self._select_cluster(matches[0])
+
+    def _on_search_enter(self, forward: bool = True):
+        """搜索框 Enter（Shift+Enter 反向）：选中下/上一个匹配簇。
+
+        优化缺陷R46：先冲刷挂起的防抖过滤（关键字立即生效），再在
+        匹配簇序列中循环定位（越过当前选中，到尾/首后回绕），并把
+        目标行滚动进视口。
+        """
+        if self._search_job is not None:
+            self._apply_search_filter()
+        if self._result is None or not self._search_kw:
+            return "break"
+        matches = [i for i, c in enumerate(self._displayed)
+                   if self._cluster_matches(c)]
+        if not matches:
+            return "break"
+        cur = self._selected_row
+        if cur in matches:
+            step = 1 if forward else -1
+            pos = (matches.index(cur) + step) % len(matches)
+        else:
+            pos = 0 if forward else len(matches) - 1
+        target = matches[pos]
+        self._select_cluster(target)
+        self._see_cluster_row(target)
+        return "break"
+
+    def _see_cluster_row(self, idx: int) -> None:
+        """滚动左侧列表使簇行可见（Enter 跳转定位；虚拟/经典两路）。"""
+        if self._virtual_list is not None:
+            self._virtual_list.see_cluster(idx)
+            return
+        row = next((r for r in self._cluster_rows if r.get("idx") == idx),
+                   None)
+        if row is None:
+            return
+        try:
+            frame = row["frame"]
+            canvas = self._cluster_list._parent_canvas
+            self.update_idletasks()
+            region = canvas.cget("scrollregion")
+            total = float(str(region).split()[3]) if region else 0.0
+            if total <= 0:
+                return
+            y = float(frame.winfo_y())
+            vh = float(canvas.winfo_height())
+            top = canvas.canvasy(0)
+            if y < top or y + frame.winfo_height() > top + vh:
+                canvas.yview_moveto(max(0.0, min(1.0, y / total)))
+        except (tk.TclError, ValueError, IndexError, AttributeError):
+            pass
+
+    def _refresh_current_detail(self) -> None:
+        """按当前选中态重填详情面板（优化缺陷R46：搜索关键字变化
+        后即时更新「searchkw」高亮；实例选中优先于簇选中）。"""
+        if self._selected_inst is not None:
+            ci, ii = self._selected_inst
+            if 0 <= ci < len(self._displayed):
+                cluster = self._displayed[ci]
+                if 0 <= ii < len(cluster.instances):
+                    self._select_instance(ci, ii)
+                    return
+        if 0 <= self._selected_row < len(self._displayed):
+            self._select_cluster(self._selected_row)
 
     def _update_search_count(self) -> None:
         """搜索结果计数（过滤时显示「X / Y 条」，与全屏搜索同款）。"""
@@ -4728,6 +4829,21 @@ class LogCompressorApp(_make_app_base()):
                     if line:
                         box.tag_add("kw", f"{line}.{col}",
                                     f"{line}.{col + len(kw)}")
+                start = pos + len(kw)
+        # 优化缺陷R46：结果搜索关键字照亮 —— 子串匹配（不做词边界
+        # 检查，用户输入什么就找什么），醒目黄底「searchkw」标签；
+        # 主/全屏详情面板共用本函数，两路同步生效
+        kw = self._search_kw
+        if kw:
+            start = 0
+            while True:
+                pos = lowered.find(kw, start)
+                if pos < 0:
+                    break
+                line, col = self._index_of_offset(box, pos)
+                if line:
+                    box.tag_add("searchkw", f"{line}.{col}",
+                                f"{line}.{col + len(kw)}")
                 start = pos + len(kw)
 
     @staticmethod

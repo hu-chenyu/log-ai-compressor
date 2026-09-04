@@ -2979,6 +2979,113 @@ class TestMainWindowSearch:
         app._apply_search_filter()
         assert app._search_job is None
 
+    # ------------------------------------------------------------------
+    # 优化缺陷R46：Enter 跳下一个匹配 + 详情关键字照亮
+    # ------------------------------------------------------------------
+    def test_enter_jumps_to_next_match(self, app):
+        """Enter 在匹配簇间循环跳转（到尾回绕到首）。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("error")     # 级别 ERROR，两簇均命中
+        app._apply_search_filter()
+        app.update()
+        assert app._selected_row == 0    # 分析后自动选中首个可见簇
+        app._on_search_enter(True)
+        app.update()
+        assert app._selected_row == 1, "Enter 应跳到下一个匹配簇"
+        app._on_search_enter(True)
+        app.update()
+        assert app._selected_row == 0, "到尾后应回绕到首个匹配"
+
+    def test_shift_enter_jumps_back(self, app):
+        """Shift+Enter 反向跳转（从首个回绕到末尾）。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("error")
+        app._apply_search_filter()
+        app.update()
+        assert app._selected_row == 0
+        app._on_search_enter(False)
+        app.update()
+        assert app._selected_row == 1, "Shift+Enter 应反向回绕到末尾匹配"
+
+    def test_enter_flushes_pending_debounce(self, app):
+        """Enter 先冲刷挂起的防抖过滤再跳转（关键字立即生效）。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("kernel")    # trace 调度防抖任务
+        assert app._search_job is not None
+        app._on_search_enter(True)
+        app.update()
+        assert app._search_job is None, "Enter 应冲刷防抖任务"
+        kidx = next(i for i, c in enumerate(app._displayed)
+                    if "kernel" in c.summary)
+        assert app._selected_row == kidx, "应选中唯一匹配簇"
+
+    def test_enter_binding_wired_to_entry(self, app):
+        """搜索框键盘 Enter 事件真实触发跳转（绑定挂接正确）。
+
+        注：Tk 合成键盘事件走焦点分发（目标控件必须持有焦点），
+        且 focus_set 与 event_generate 之间不能跑 update —— 应用
+        的 after 任务会把焦点抢回去（实测规律）。
+        """
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("error")
+        app._apply_search_filter()
+        app.update()
+        entry = app._search_entry._entry
+        entry.focus_set()
+        entry.event_generate("<Return>")
+        app.update()
+        assert app._selected_row == 1, "键盘 Enter 应跳到下一个匹配"
+
+    def test_search_keyword_highlighted_in_detail(self, app):
+        """详情面板日志内容中的搜索关键字被照亮（searchkw 标签）。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        box = app._detail_box
+        ranges = box.tag_ranges("searchkw")
+        assert ranges, "详情面板应照亮搜索关键字"
+        first = box.get(ranges[0], ranges[1])
+        assert first.lower() == "kernel", "照亮文本应为关键字本身"
+
+    def test_enter_jumps_in_virtual_mode(self, app):
+        """虚拟模式：Enter 在匹配簇间跳转并滚入视口。"""
+        _run_many_clusters(app)
+        app.update()
+        assert app._virtual_list is not None
+        app._search_var.set("signal lost")
+        app._apply_search_filter()
+        app.update()
+        matches = [i for i, c in enumerate(app._displayed)
+                   if "signal lost" in c.summary]
+        assert len(matches) >= 2
+        app._select_cluster(matches[0])
+        app.update()
+        app._on_search_enter(True)
+        app.update()
+        assert app._selected_row == matches[1]
+
+    def test_filtered_out_selection_auto_moves_to_first_match(self, app):
+        """当前选中簇被过滤掉时自动选中首个匹配簇（详情不滞留陈旧内容）。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        fidx = next(i for i, c in enumerate(app._displayed)
+                    if "filesystem" in c.summary)
+        app._select_cluster(fidx)
+        app.update()
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        kidx = next(i for i, c in enumerate(app._displayed)
+                    if "kernel" in c.summary)
+        assert app._selected_row == kidx, "选中应自动移到首个匹配簇"
+        assert "kernel" in app._detail_box.get("1.0", "1.end")
+
 
 class TestFullscreenReuse:
     def _open_fs(self, app):
