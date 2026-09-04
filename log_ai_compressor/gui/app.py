@@ -1089,15 +1089,16 @@ class VirtualClusterList:
         """弹起位移的 DPI 缩放因子（不同设备视觉幅度一致）。"""
         return max(1.0, getattr(self._app, "_font_scale", 1.0))
 
-    def _shadow_color(self) -> str:
-        """行下阴影色：画布底色向黑混合 45%（Tk 无透明度，预混合近似）。"""
+    def _blend(self, hex1: str, hex2: str, t: float) -> str:
+        """两色预混合（t=hex2 权重；Tk 无透明度，阴影/高光预混近似）。"""
         try:
-            base = self._canvas.cget("bg")
-            r, g, b = (int(base[i:i + 2], 16) for i in (1, 3, 5))
-            k = 0.55
-            return f"#{int(r * k):02x}{int(g * k):02x}{int(b * k):02x}"
-        except (ValueError, IndexError, tk.TclError):
-            return "#000000"
+            r1, g1, b1 = (int(hex1[i:i + 2], 16) for i in (1, 3, 5))
+            r2, g2, b2 = (int(hex2[i:i + 2], 16) for i in (1, 3, 5))
+            k = 1.0 - t
+            return (f"#{int(r1 * k + r2 * t):02x}"
+                    f"{int(g1 * k + g2 * t):02x}{int(b1 * k + b2 * t):02x}")
+        except (ValueError, IndexError):
+            return hex1
 
     def _pop_press(self, slot: dict) -> None:
         """按下：行整体下沉 3px（物理按压感，即时无动画）。
@@ -1117,41 +1118,32 @@ class VirtualClusterList:
         except tk.TclError:
             return
         slot["_pop"] = {"base": idx * self.ROW_HEIGHT, "dy": dy,
-                        "job": None, "shadow": None}
+                        "job": None}
         self._round_move(slot)                 # R24：圆角随下沉
 
     def _pop_release(self, slot: dict) -> None:
-        """释放：上弹 5px（阴影展开）→ 回落原位，总时长 240ms。
+        """释放：上弹 5px → 回落原位，总时长 240ms。
 
         两段缓动（ease-out 上弹 120ms + ease-in-out 回落 120ms），
-        16ms 步进 ≈15 帧；每帧仅 coords 行窗口 + 阴影矩形（<0.5ms），
-        零重排零卡顿。阴影随浮起高度伸缩，回落结束删除。
+        16ms 步进 ≈15 帧；每帧仅 coords 行窗口 + 圆角组跟随
+        （<0.5ms），零重排零卡顿。修复缺陷R25：阴影改为圆角组
+        常驻投影（_round_move 按 dy 伸缩：浮起加深、按下收缩），
+        动画结束立体感保留，不再一次性删除。
         """
         pop = slot.get("_pop")
         if pop is None:
             return
         import time as _time
-        try:
-            width = max(20, self._region_w())
-            shadow = self._canvas.create_rectangle(
-                0, 0, 0, 0, fill=self._shadow_color(), width=0)
-            # 阴影贴行窗口下缘（仅低于本行，可能覆盖下一行顶部 2px
-            # = 投影落在下一行上的视觉效果）
-            self._canvas.tag_lower(shadow, slot["win"])
-        except tk.TclError:
-            return
-        pop.update(t0=_time.monotonic(),
-                   start=pop["dy"],
-                   lift=int(round(5 * self._pop_scale())),
-                   shadow=shadow, width=width)
+        pop.update(t0=_time.monotonic(), start=pop["dy"],
+                   lift=int(round(5 * self._pop_scale())))
         self._pop_step(slot)
 
     def _pop_step(self, slot: dict) -> None:
-        """动画步进：按分段缓动应用位移/阴影，结束自动清理。"""
+        """动画步进：按分段缓动应用位移，结束自动复位。"""
         import math
         import time as _time
         pop = slot.get("_pop")
-        if pop is None or pop.get("shadow") is None:
+        if pop is None or pop.get("t0") is None:
             return
         DUR1, DUR2 = 0.12, 0.12                # 上弹 / 回落（合计 240ms）
         el = _time.monotonic() - pop["t0"]
@@ -1164,21 +1156,14 @@ class VirtualClusterList:
             x = (el - DUR1) / DUR2
             e = 0.5 * (1.0 - math.cos(math.pi * x))
             dy = -pop["lift"] * (1.0 - e)
-        else:                                  # 结束：复位 + 删阴影
+        else:                                  # 结束：复位
             self._pop_cancel(slot)
             return
         dy = int(round(dy))
         pop["dy"] = dy
         try:
             self._canvas.coords(slot["win"], 0, base + dy)
-            self._round_move(slot)             # R24：圆角随浮起逐帧跟随
-            if dy < 0:                         # 浮起：阴影铺满行底缝隙
-                y0 = base + self.ROW_HEIGHT + dy
-                self._canvas.coords(pop["shadow"], 6, y0,
-                                    pop["width"] - 4,
-                                    base + self.ROW_HEIGHT + 2)
-            else:                              # 下沉/回落中：阴影收起
-                self._canvas.coords(pop["shadow"], 0, 0, 0, 0)
+            self._round_move(slot)             # 圆角+投影逐帧跟随
         except tk.TclError:
             slot["_pop"] = None
             return
@@ -1188,7 +1173,11 @@ class VirtualClusterList:
             slot["_pop"] = None
 
     def _pop_cancel(self, slot: dict) -> None:
-        """取消动画：停表/删阴影/坐标复位（槽位回收、快照滚动前调用）。"""
+        """取消动画：停表/坐标复位（槽位回收、快照滚动前调用）。
+
+        修复缺陷R25：圆角组（遮罩/高光/常驻投影）不在此删除 ——
+        行仍选中时立体感保留，由 _fill_slot 按选中态统一管理。
+        """
         pop = slot.pop("_pop", None)
         if not pop:
             return
@@ -1198,22 +1187,16 @@ class VirtualClusterList:
                 self._canvas.after_cancel(job)
             except tk.TclError:
                 pass
-        shadow = pop.get("shadow")
-        if shadow:
-            try:
-                self._canvas.delete(shadow)
-            except tk.TclError:
-                pass
         idx = slot.get("idx", -1)
         if idx >= 0:
             try:
                 self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
             except tk.TclError:
                 pass
-            self._round_move(slot)              # R24：圆角遮罩随复位
+            self._round_move(slot)              # 圆角组随复位
 
     # ------------------------------------------------------------------
-    # 优化（R24）：选中行圆角（椭圆角）—— 四角多边形遮罩把直角切成圆角
+    # 优化（R24/R25）：选中行圆角（椭圆角）+ 常驻立体（高光+投影）
     # ------------------------------------------------------------------
     @staticmethod
     def _arc_pts(cx: float, cy: float, r: float,
@@ -1243,45 +1226,63 @@ class VirtualClusterList:
             flat.extend((px, py))
         return flat
 
-    def _round_masks(self, slot: dict, out_top: str, out_bot: str) -> None:
-        """为选中行创建四角圆角遮罩（颜色=行外背景，视觉切角）。
+    def _round_r(self) -> int:
+        """圆角半径（修复缺陷R25：22 逻辑px 明显弯曲，随 DPI 缩放，
+        上限半行高-4 防小字体下半径吃掉行内容）。"""
+        return min(int(round(22 * self._pop_scale())),
+                   self.ROW_HEIGHT // 2 - 4)
 
-        优化缺陷R24：tk 原生控件无透明圆角 —— 在四角画布上覆盖
-        「角方块减四分之一圆」多边形（填充行外背景色），蓝色块
-        视觉上呈现圆角（椭圆角）矩形；首行上缘/末行下缘外侧是
-        画布底色（window），行间外侧是邻行底色（row_bg），分色
-        处理保证任何位置都无缝。弹起动画中随 _round_move 逐帧跟随。
+    def _round_masks(self, slot: dict, out_top: str, out_bot: str) -> None:
+        """为选中行创建圆角组：四角遮罩 + 顶部高光 + 底部常驻投影。
+
+        优化缺陷R24：tk 原生控件无透明圆角 —— 四角覆盖「角方块减
+        四分之一圆」多边形（填充行外背景色），蓝块视觉切成圆角；
+        首行上缘/末行下缘外侧是画布底色（window），行间外侧是邻
+        行底色（row_bg），分色处理保证任何位置无缝。
+        修复缺陷R25：圆角半径加大到 22 逻辑px（四角明显弯曲）；
+        新增常驻立体感 —— 顶部 2px 受光高光条（预混白）+ 底部
+        投影条（下方背景预混黑，两端按半径内缩贴合圆角），营造
+        凸起卡片观感；弹起动画中 _round_move 逐帧跟随并随 dy
+        伸缩投影（浮起加深、按下收缩）。
         """
         self._unround(slot)
         idx = slot.get("idx", -1)
         if idx < 0:
             return
-        pop = slot.get("_pop")
-        dy = pop["dy"] if pop else 0
-        y0 = idx * self.ROW_HEIGHT + dy
-        y1 = y0 + self.ROW_HEIGHT
-        w = self._region_w()
-        r = int(round(10 * self._pop_scale()))
-        ids = []
+        p = self._app._palette()
+        r = self._round_r()
+        grp = {"r": r,
+               "hi_fill": self._blend(p["row_selected"], "#ffffff", 0.30),
+               "sh_fill": self._blend(out_bot, "#000000", 0.45)}
         try:
-            for corner, fill in (("tl", out_top), ("tr", out_top),
-                                 ("bl", out_bot), ("br", out_bot)):
-                ids.append(self._canvas.create_polygon(
-                    self._corner_pts(0, y0, w, y1, r, corner),
-                    fill=fill, outline=""))
+            grp["masks"] = [self._canvas.create_polygon(
+                self._corner_pts(0, 0, 1, 1, r, corner),
+                fill=fill, outline="")
+                for corner, fill in (("tl", out_top), ("tr", out_top),
+                                     ("bl", out_bot), ("br", out_bot))]
+            grp["hi"] = self._canvas.create_rectangle(
+                0, 0, 1, 1, fill=grp["hi_fill"], width=0)
+            grp["shadow"] = self._canvas.create_rectangle(
+                0, 0, 1, 1, fill=grp["sh_fill"], width=0)
         except tk.TclError:
-            for it in ids:
+            for it in (grp.get("masks") or []) + [
+                    grp[k] for k in ("hi", "shadow") if grp.get(k)]:
                 try:
                     self._canvas.delete(it)
                 except tk.TclError:
                     pass
             return
-        slot["_round"] = ids
+        slot["_round"] = grp
+        self._round_move(slot)
 
     def _round_move(self, slot: dict) -> None:
-        """弹起/复位时圆角遮罩跟随行窗口当前 y 坐标（逐帧重算）。"""
-        ids = slot.get("_round")
-        if not ids:
+        """圆角组跟随行窗口当前位置（弹起逐帧/复位/创建时调用）。
+
+        投影深度随 dy 变化：浮起（dy<0）投影拉长加深=升高；下沉
+        （dy>0）投影收缩=按压；静止时保持基础深度=常驻凸起感。
+        """
+        grp = slot.get("_round")
+        if not grp:
             return
         idx = slot.get("idx", -1)
         if idx < 0:
@@ -1291,20 +1292,31 @@ class VirtualClusterList:
         y0 = idx * self.ROW_HEIGHT + dy
         y1 = y0 + self.ROW_HEIGHT
         w = self._region_w()
-        r = int(round(10 * self._pop_scale()))
+        r = grp["r"]
+        base_d = int(round(4 * self._pop_scale()))
+        depth = max(2, base_d - dy)            # dy<0 加深 / dy>0 收缩
+        hi_h = int(round(2 * self._pop_scale()))
         try:
-            for it, corner in zip(ids, ("tl", "tr", "bl", "br")):
+            for it, corner in zip(grp["masks"], ("tl", "tr", "bl", "br")):
                 self._canvas.coords(
                     it, *self._corner_pts(0, y0, w, y1, r, corner))
+            # 顶部受光高光条（两端内缩 r 贴合圆角）
+            self._canvas.coords(grp["hi"], r, y0 + 2, w - r, y0 + 2 + hi_h)
+            # 底部常驻投影（落在下一行/画布上，两端内缩 r）
+            self._canvas.coords(grp["shadow"], r, y1, w - r, y1 + depth)
         except tk.TclError:
             pass
 
     def _unround(self, slot: dict) -> None:
-        """删除圆角遮罩（取消选中/槽位回收时调用）。"""
-        ids = slot.pop("_round", None)
-        if not ids:
+        """删除圆角组全部图元（取消选中/槽位回收时调用）。"""
+        grp = slot.pop("_round", None)
+        if not grp:
             return
-        for it in ids:
+        items = list(grp.get("masks") or ())
+        for key in ("hi", "shadow"):
+            if grp.get(key):
+                items.append(grp[key])
+        for it in items:
             try:
                 self._canvas.delete(it)
             except tk.TclError:
