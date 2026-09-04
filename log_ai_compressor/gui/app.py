@@ -3721,7 +3721,9 @@ class LogCompressorApp(_make_app_base()):
             # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
             link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
             line = ctk.CTkFrame(frame, fg_color="transparent")
-            line.pack(fill="x", padx=(10, 10), pady=(7, 2))
+            # 修复缺陷R32：头部条左右 padx 28 > 选中圆角半径 24 ——
+            # 内部控件完全收进圆角区域，左/右缘不与圆角描边重合
+            line.pack(fill="x", padx=(28, 28), pady=(7, 2))
             # 修复缺陷R29：头部控件一律透明 —— 背景只由外层圆角
             # frame 统一提供（各自带色会拼出两个方角矩形压圆角）
             toggle = ctk.CTkLabel(
@@ -3743,12 +3745,15 @@ class LogCompressorApp(_make_app_base()):
                 frame, text=self._row_text(cluster), anchor="w",
                 text_color=self._row_color(cluster) or None,
                 font=f_head, fg_color="transparent")
-            head.pack(fill="x", padx=(10, 10), pady=(7, 2))
-        # 修复缺陷R29：头部/摘要间 1px 细分界线（两端内缩 14px 不碰
-        # 左右边框；颜色随选中态在 _apply_row_bg 切换）
-        divider = tk.Frame(frame, height=1, bd=0, highlightthickness=0,
-                           bg=p["row_border"])
-        divider.pack(fill="x", padx=(14, 14))
+            # 修复缺陷R32：padx 28 > 圆角半径 24
+            head.pack(fill="x", padx=(28, 28), pady=(7, 2))
+        # 修复缺陷R29：头部/摘要间 1px 细分界线（R32：两端内缩 28px
+        # > 圆角半径 24，不碰左右边框；颜色随选中态在 _apply_row_bg
+        # 切换）。CTkFrame 版 —— 原生 tk.Frame 的 pack padx 不随
+        # DPI 缩放（28 物理px 在 200% 下只有 14 逻辑px 内缩不足）
+        divider = ctk.CTkFrame(frame, height=1, corner_radius=0,
+                               fg_color=p["row_border"])
+        divider.pack(fill="x", padx=(28, 28))
         # 修复缺陷R9：摘要单行不换行（wraplength=0）
         # CTkLabel 传 CTkFont 对象（自动 DPI 缩放+档位跟随），
         # 不能传 create_scaled_tuple 的 tuple（CTk 内部解析 'normal roman' 失败）
@@ -3758,7 +3763,9 @@ class LogCompressorApp(_make_app_base()):
             font=self._font_row_summary,
             fg_color="transparent",
             text_color=p["row_text"])
-        summary.pack(fill="x", padx=(10, 16), pady=(2, 6))
+        # 修复缺陷R32：摘要左右 padx 28 > 圆角半径 24（左下/右下角
+        # 区域不留控件，不与圆角描边重合）
+        summary.pack(fill="x", padx=(28, 28), pady=(2, 6))
         select_cb = on_select or (lambda: self._select_cluster(idx))
         hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
         # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
@@ -3882,15 +3889,17 @@ class LogCompressorApp(_make_app_base()):
                             if row.get(key) is not None:
                                 row[key].configure(fg_color=p["sel_bot"])
                         if row.get("divider") is not None:
-                            row["divider"].configure(bg=p["sel_border"])
+                            row["divider"].configure(
+                                fg_color=p["sel_border"])
                         # 3D 立体：顶部高光条 + 底部阴影条（place 定位不占布局空间）
-                        # 修复缺陷R29：高光/阴影条两端内缩 26px（圆角
-                        # 半径 24 + 2 余量），方角端头不再压圆角切角区
+                        # 修复缺陷R29/R32：高光/阴影条两端内缩 30px
+                        # （圆角半径 24 + 6 余量），方角端头不压圆角
+                        # 切角区、不与圆角描边重合
                         try:
                             row["_hi_bar"].place(
-                                x=26, y=0, relwidth=1, width=-52, height=2)
+                                x=30, y=0, relwidth=1, width=-60, height=2)
                             row["_shadow_bar"].place(
-                                x=26, rely=1.0, relwidth=1, width=-52,
+                                x=30, rely=1.0, relwidth=1, width=-60,
                                 height=2, anchor="sw")
                         except (tk.TclError, KeyError):
                             pass
@@ -3920,7 +3929,8 @@ class LogCompressorApp(_make_app_base()):
                                 row[key].configure(fg_color=color)
                         # 修复缺陷R29：未选中分界细线恢复低调色
                         if row.get("divider") is not None:
-                            row["divider"].configure(bg=p["row_border"])
+                            row["divider"].configure(
+                                fg_color=p["row_border"])
                         # 未选中隐藏 3D 高光/阴影
                         try:
                             row["_hi_bar"].place_forget()

@@ -363,13 +363,13 @@ class TestClusterListWrap:
         # 外层圆角矩形统一背景 + 分界细线亮色
         assert str(sel["frame"].cget("fg_color")) == p["sel_bot"]
         assert sel.get("divider") is not None, "选中行应有分界细线"
-        assert str(sel["divider"].cget("bg")) == p["sel_border"], \
+        assert str(sel["divider"].cget("fg_color")) == p["sel_border"], \
             "选中行分界线应为亮色"
         # 未选中行：内部控件与行底色同色 + 分界线低调色
         assert str(normal["frame"].cget("fg_color")) == p["row_bg"]
         for key in ("head", "summary"):
             assert str(normal[key].cget("fg_color")) == p["row_bg"]
-        assert str(normal["divider"].cget("bg")) == p["row_border"]
+        assert str(normal["divider"].cget("fg_color")) == p["row_border"]
         # 修复缺陷R31：未选中行创建即带可见圆角 —— 圆角 12px +
         # 1px 细边框（原创建时 border_width=0 且底色对比极低，
         # 圆角存在但肉眼不可见）
