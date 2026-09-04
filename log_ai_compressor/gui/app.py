@@ -3865,12 +3865,16 @@ class LogCompressorApp(_make_app_base()):
                             row["frame"].pack_configure(pady=0)
                         except tk.TclError:
                             pass
-                        # 修复缺陷R29：头部条/控件一律透明 —— 背景只由
-                        # 外层圆角 frame 统一提供（原 sel_top 色块方角
-                        # 压圆角，拼出两个粘着的矩形）；分界细线换亮
-                        # 色区分头部/摘要
+                        # 修复缺陷R30：内部控件背景显式与外层同色
+                        # —— CTk 透明控件的内部画布底色是创建时静态
+                        # 探测值，不随 frame 变色更新（选中后 frame
+                        # 变蓝，▶/摘要标签画布仍停留深色 → 左上/左下
+                        # 方角块压圆角）；同色绘制才是真无缝
                         if row.get("line") is not None:
-                            row["line"].configure(fg_color="transparent")
+                            row["line"].configure(fg_color=p["sel_bot"])
+                        for key in ("head", "summary", "toggle"):
+                            if row.get(key) is not None:
+                                row[key].configure(fg_color=p["sel_bot"])
                         if row.get("divider") is not None:
                             row["divider"].configure(bg=p["sel_border"])
                         # 3D 立体：顶部高光条 + 底部阴影条（place 定位不占布局空间）
@@ -3901,7 +3905,12 @@ class LogCompressorApp(_make_app_base()):
                         except tk.TclError:
                             pass
                         if row.get("line") is not None:
-                            row["line"].configure(fg_color="transparent")
+                            row["line"].configure(fg_color=color)
+                        # 修复缺陷R30：未选中内部控件背景同样与外层
+                        # 同色（悬停色变化时画布不同步问题一致）
+                        for key in ("head", "summary", "toggle"):
+                            if row.get(key) is not None:
+                                row[key].configure(fg_color=color)
                         # 修复缺陷R29：未选中分界细线恢复低调色
                         if row.get("divider") is not None:
                             row["divider"].configure(bg=p["row_border"])
