@@ -703,7 +703,7 @@ class VirtualClusterList:
                             inst.summary, self.SUMMARY_CLIP)))
             except (IndexError, AttributeError, tk.TclError):
                 continue
-        return need + 44          # 行内左右边距
+        return need + 2 * self._sx(_ROW_PADX)  # 行内左右边距（R37）
 
     def _region_w(self) -> int:
         """水平滚动区域宽：内容自然宽与视口宽取大（整行高亮需占满视口）。"""
@@ -842,17 +842,23 @@ class VirtualClusterList:
                     cidx = row[1]
                     cluster = app._displayed[cidx]
                     selected = cidx == app._selected_row
+                    expanded = cidx in app._expanded_clusters
                     head_color = app._row_color(cluster) or p["row_text"]
-                    head_text = (f"\u25b6 \u00d7{cluster.count}  "
-                                 + app._row_text(cluster,
-                                                 with_count=False))
+                    # 修复缺陷R37：快照与真实行同构 —— ▶/▼ 画在
+                    # 等宽盒中心（展开/收起不位移），次数/元信息分列
+                    tgl_icon = "\u25bc" if expanded else "\u25b6"
+                    tgl_cnt = f"\u00d7{cluster.count}"
+                    head_text = app._row_text(cluster, with_count=False)
                     sum_text = app._clip(cluster.summary,
                                          self.SUMMARY_CLIP)
+                    link = ("#60a5fa" if p["is_dark"] == "1"
+                            else "#2563EB")
                 else:
                     inst = app._displayed[row[1]].instances[row[2]]
                     selected = ((row[1], row[2]) ==
                                 getattr(app, "_selected_inst", None))
                     head_color = p["muted"]
+                    tgl_icon = None
                     head_text = "      " + app._inst_head_text(inst)
                     sum_text = "        " + app._clip(
                         inst.summary, self.SUMMARY_CLIP)
@@ -867,15 +873,36 @@ class VirtualClusterList:
                 items.append(self._canvas.create_rectangle(
                     gx, y + gy, width - gx, y + self.ROW_HEIGHT - gy,
                     fill=bg, width=0))
+                # 修复缺陷R37：内容 x = 行窗口内缩 _sx(_ROW_PADX)
+                # （与真实行同位）；头部行 = 图标等宽盒+次数+元信息
+                tx = gx + self._sx(_ROW_PADX)
+                if tgl_icon is not None:
+                    _iw = self._tgl_icon_w()
+                    items.append(self._canvas.create_text(
+                        tx + _iw // 2, y + gy + 7, anchor="n",
+                        font=self._m_head, fill=link, text=tgl_icon))
+                    items.append(self._canvas.create_text(
+                        tx + _iw, y + gy + 7, anchor="nw",
+                        font=self._m_head, fill=link, text=tgl_cnt))
+                    tx += (_iw + self._m_head.measure(tgl_cnt)
+                           + self._sx(10))
                 items.append(self._canvas.create_text(
-                    gx + 10, y + gy + 7, anchor="nw", font=self._m_head,
+                    tx, y + gy + 7, anchor="nw", font=self._m_head,
                     fill=head_color, text=head_text))
-                # 摘要 y = 头部行距 + 头部上边距 7 + 间隙 2（与
-                # _make_slot 的 pack pady 一致）
-                sum_y = y + gy + 7 + self._m_head.metrics("linespace") + 2
+                # 分界细线 y = 头部行底；摘要 y = 分界+线高+上边距2
+                _ls = self._m_head.metrics("linespace")
+                _dy = y + gy + 7 + _ls + 2
+                if tgl_icon is not None:
+                    items.append(self._canvas.create_rectangle(
+                        gx + self._sx(_ROW_PADX), _dy,
+                        width - gx - self._sx(_ROW_PADX),
+                        _dy + self._sx(1),
+                        fill=(p["sel_border"] if selected
+                              else p["row_border"]), width=0))
+                sum_y = _dy + self._sx(1) + 2
                 items.append(self._canvas.create_text(
-                    gx + 10, sum_y, anchor="nw", font=self._m_sum,
-                    fill=p["row_text"], text=sum_text))
+                    gx + self._sx(_ROW_PADX), sum_y, anchor="nw",
+                    font=self._m_sum, fill=p["row_text"], text=sum_text))
             for slot in self._slots:
                 try:
                     self._canvas.itemconfigure(slot["win"], state="hidden")
@@ -1004,7 +1031,9 @@ class VirtualClusterList:
                             highlightthickness=0,
                             width=self._tgl_icon_w())
         icon_box.pack_propagate(False)
-        icon_box.pack(side="left", fill="y", padx=(10, 0), pady=(7, 2))
+        # 修复缺陷R37：行窗口已内缩 _sx(_ROW_PADX)（=主列表内容起点），
+        # 槽内控件不再额外左 padx —— 三模式内容起始 x 逐像素一致
+        icon_box.pack(side="left", fill="y", pady=(7, 2))
         toggle_icon = tk.Label(
             icon_box, anchor="center",
             font=self._app._scaled_font(self._app._font_row_head),
@@ -1019,26 +1048,36 @@ class VirtualClusterList:
                         font=self._app._scaled_font(self._app._font_row_head),
                         bg=p["row_bg"], fg=p["row_text"])
         head.pack(side="left", fill="x", expand=True,
-                  padx=(10, 10), pady=(7, 2))
+                  padx=(self._sx(10), self._sx(10)), pady=(7, 2))
+        # 修复缺陷R37：头部/摘要间 1px 细分界线（与经典/全屏一致；
+        # 簇行选中态 sel_border 亮色、未选中 row_border、实例行隐形）
+        divider = tk.Frame(frame, bg=p["row_border"], bd=0,
+                           highlightthickness=0,
+                           height=self._sx(1))
+        divider.pack(fill="x")
         # 修复缺陷R9：摘要单行不换行（wraplength=0），长摘要靠水平滚动查看
         summary = tk.Label(frame, anchor="w", justify="left",
                            font=self._app._scaled_font(
                                self._app._font_row_summary),
                            wraplength=0,
                            bg=p["row_bg"], fg=p["row_text"])
-        summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
-        # 修复缺陷R27：行窗口尺寸缩小，留出圆角空间（左右各留24px，
-        # 上下各留12px），避免行窗口覆盖Canvas上绘制的圆角背景
-        win = self._canvas.create_window(0, 0, window=frame,
-                                         anchor="nw", width=width - 48,
-                                         height=self.ROW_HEIGHT - 24)
+        summary.pack(fill="x", padx=(0, self._sx(4)), pady=(2, 6))
+        # 修复缺陷R37：行窗口内缩 = _sx(_ROW_PADX)（与主列表内容起点
+        # 22 逻辑px 一致，随 DPI 缩放；原固定 24 物理px 高 DPI 下
+        # 内容偏右且与主列表错位）；上下各留12px避免覆盖圆角背景
+        _inset = self._sx(_ROW_PADX)
+        win = self._canvas.create_window(
+            0, 0, window=frame, anchor="nw",
+            width=max(10, width - 2 * _inset),
+            height=self.ROW_HEIGHT - 24)
         self._bind_row_wheel(frame, toggle_icon, icon_box, toggle,
-                             head, summary)
+                             head, divider, summary)
         # 修复缺陷R22：line 入字典 —— 选中/悬停着色需覆盖头部条
         # （原未保存引用，line 底色停留 row_bg，选中蓝块被头部
         # 内边距区域的暗色横竖条切割成三段）
         return {"frame": frame, "line": line, "toggle": toggle,
                 "toggle_icon": toggle_icon, "icon_box": icon_box,
+                "divider": divider,
                 "head": head, "summary": summary, "win": win, "idx": -1,
                 "virtual": True}
 
@@ -1067,11 +1106,10 @@ class VirtualClusterList:
                 head_color = app._row_color(cluster) or p["row_text"]
                 link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
                 slot["idx"] = idx
-                # 修复缺陷R26（方案A）：选中行渐变能带 —— 头部条
-                # 用顶部亮色 sel_top、主体用底部深色 sel_bot（上下
-                # 亮→暗模拟光照渐变），文字统一 sel_text 白保可读；
-                # 未选中行平面（hover/bg 同色，无渐变无立体）
-                top_c = p["sel_top"] if selected else bg
+                # 修复缺陷R37：选中行统一 sel_bot 底（与经典/全屏
+                # _apply_row_bg 同色无缝一致，弃用 R26 渐变能带），
+                # 文字统一 sel_text 白保可读；未选中行平面
+                top_c = p["sel_bot"] if selected else bg
                 bot_c = p["sel_bot"] if selected else bg
                 fg = p["sel_text"] if selected else None
                 slot["frame"].configure(bg=bot_c)
@@ -1090,14 +1128,18 @@ class VirtualClusterList:
                 slot["summary"].configure(
                     bg=bot_c, fg=fg or p["row_text"],
                     text=app._clip(cluster.summary, self.SUMMARY_CLIP))
+                # 修复缺陷R37：分界线（选中 sel_border 亮色/未选中低调）
+                slot["divider"].configure(
+                    bg=(p["sel_border"] if selected else p["row_border"]))
                 for w in (slot["frame"], slot["head"], slot["summary"],
                           slot["toggle"], slot["toggle_icon"],
-                          slot["icon_box"]):
+                          slot["icon_box"], slot["divider"]):
                     w.bind("<Enter>",
                            lambda e, i=idx: self._hover(i, True))
                     w.bind("<Leave>",
                            lambda e, i=idx: self._hover(i, False))
-                for w in (slot["frame"], slot["head"], slot["summary"]):
+                for w in (slot["frame"], slot["head"], slot["summary"],
+                          slot["divider"]):
                     # 优化缺陷R23：点击触发立体弹起（先选中着色，
                     # 再下沉按压；释放时上弹+阴影回落）
                     w.bind("<Button-1>",
@@ -1117,14 +1159,16 @@ class VirtualClusterList:
                 if (cidx, iidx) == getattr(app, "_selected_inst", None):
                     selected = True
                 slot["idx"] = idx
-                # 修复缺陷R26：实例行同款渐变能带
-                top_c = p["sel_top"] if selected else bg
+                # 修复缺陷R37：实例行同款统一底（与簇行一致）
+                top_c = p["sel_bot"] if selected else bg
                 bot_c = p["sel_bot"] if selected else bg
                 fg = p["sel_text"] if selected else None
                 slot["frame"].configure(bg=bot_c)
                 slot["toggle_icon"].configure(bg=top_c, text="")
                 slot["toggle"].configure(bg=top_c, text="")
                 slot["icon_box"].configure(bg=top_c)
+                # 修复缺陷R37：实例行分界线隐形（与行体同色）
+                slot["divider"].configure(bg=top_c)
                 slot["head"].configure(
                     bg=top_c, fg=fg or p["muted"],
                     text="      " + app._inst_head_text(inst))
@@ -1134,7 +1178,7 @@ class VirtualClusterList:
                                                 self.SUMMARY_CLIP))
                 for w in (slot["frame"], slot["head"], slot["summary"],
                           slot["toggle"], slot["toggle_icon"],
-                          slot["icon_box"]):
+                          slot["icon_box"], slot["divider"]):
                     # 优化缺陷R23：实例行同款立体弹起
                     w.bind("<Button-1>",
                            lambda e, ci=cidx, ii=iidx, s=slot:
@@ -1148,7 +1192,7 @@ class VirtualClusterList:
                            lambda e, i=idx: self._hover(i, False))
             # 修复缺陷R22：头部条 line 同步着色（消除选中蓝块被
             # line 暗色底切成三段）
-            # 修复缺陷R26：line 跟随顶部能带色；选中行 1px 亮描边
+            # 修复缺陷R37：line 随行体统一底；选中行亮描边
             # 改由画布圆角轮廓呈现（_round_masks），原生方形描边
             # 仅未选中行保留（row_border 细边框，角部被遮罩切圆）
             slot["line"].configure(bg=top_c)
@@ -1156,20 +1200,21 @@ class VirtualClusterList:
                 highlightthickness=0 if selected else 1,
                 highlightbackground=p["row_border"],
                 highlightcolor=p["row_border"])
-            # 优化缺陷R24/R26：全部行圆角遮罩（选中 14px/未选中 7px），
-            # 选中行另加画布亮描边+顶部高光+底部/右侧投影（3D 凸起）
+            # 优化缺陷R24/R26：全部行圆角遮罩（选中 18px/未选中 9px，
+            # R36 模块常量），选中行另加画布亮描边+顶部高光+底部/
+            # 右侧投影（3D 凸起）
             self._round_masks(slot, selected)
             gx, gy = self._row_gaps()
-            # 修复缺陷R27：行窗口尺寸缩小，留出圆角空间（左右各24px，
-            # 上下各12px），位置偏移居中在圆角背景内
+            # 修复缺陷R37：行窗口内缩 = _sx(_ROW_PADX)（与主列表内容
+            # 起点一致，随 DPI 缩放；上下各12px），居中在圆角背景内
             self._canvas.itemconfigure(
                 slot["win"], state="normal",
-                width=max(10, width - 48),
+                width=max(10, width - 2 * self._sx(_ROW_PADX)),
                 height=self.ROW_HEIGHT - 24)
             # 优化缺陷R23：弹起动画进行中坐标由动画持有（同 idx
             # 填充刷新不打断位移，避免悬停着色刷新造成 1 帧回跳）
             if slot.get("_pop") is None:
-                self._canvas.coords(slot["win"], gx + 24,
+                self._canvas.coords(slot["win"], gx + self._sx(_ROW_PADX),
                                     self._row_y0(idx) + 12)
         except (tk.TclError, ValueError, IndexError):
             pass
@@ -1180,6 +1225,10 @@ class VirtualClusterList:
     def _pop_scale(self) -> float:
         """弹起位移的 DPI 缩放因子（不同设备视觉幅度一致）。"""
         return max(1.0, getattr(self._app, "_font_scale", 1.0))
+
+    def _sx(self, v: int) -> int:
+        """逻辑px → 物理px（DPI 缩放，与主列表 CTk 缩放一致）。"""
+        return int(round(v * self._pop_scale()))
 
     def _row_gaps(self):
         """行块外边距（gx 左右, gy 上下，物理px，随 DPI 缩放）。"""
@@ -1377,10 +1426,12 @@ class VirtualClusterList:
                 self._rrect_pts(0, 0, 1, 1, r),
                 fill=bg_color, outline="")
             if selected:
+                # 修复缺陷R37：亮描边 sel_hi + 3s 宽（近似经典 CTk
+                # border_width=4 高光边的视觉分量）
                 grp["border"] = self._canvas.create_polygon(
                     self._rrect_pts(0, 0, 1, 1, max(2, r - 1)),
-                    fill="", outline=p["sel_border"],
-                    width=max(1, int(round(1.2 * s))))
+                    fill="", outline=p["sel_hi"],
+                    width=max(2, int(round(3 * s))))
                 grp["hi"] = self._canvas.create_rectangle(
                     0, 0, 1, 1, fill=p["sel_hi"], width=0)
                 grp["shadow"] = self._canvas.create_rectangle(
@@ -1429,11 +1480,12 @@ class VirtualClusterList:
                 depth = max(2, base_d - dy)    # dy<0 加深 / dy>0 收缩
                 hi_h = int(round(2 * s))
                 rs_w = max(2, int(round(2.5 * s)))
-                # 1px 圆角亮描边（内缩 1px 避免与角遮罩互切）
+                # 圆角亮描边（内缩半线宽，外缘与圆角背景齐平）
+                _bi = max(1, int(round(1.5 * s)))
                 self._canvas.coords(
                     grp["border"],
-                    *self._rrect_pts(x0 + 1, y0 + 1, x1 - 1, y1 - 1,
-                                     max(2, r - 1)))
+                    *self._rrect_pts(x0 + _bi, y0 + _bi, x1 - _bi,
+                                     y1 - _bi, max(2, r - _bi)))
                 # 顶部受光高光条（两端内缩 r 贴合圆角）
                 self._canvas.coords(grp["hi"], x0 + r, y0 + 2,
                                     x1 - r, y0 + 2 + hi_h)
@@ -2508,7 +2560,7 @@ class LogCompressorApp(_make_app_base()):
             canvas.create_rectangle(x_base + gx - scroll_x, y,
                                     x_base + rw - gx - scroll_x,
                                     y + rh - 2 * gy, fill=bg, width=0)
-            tx = x_base + gx + 10 - scroll_x
+            tx = x_base + gx + vl._sx(_ROW_PADX) - scroll_x
             if tgl:
                 # 修复缺陷R34：图标画在等宽盒中心（与真实行
                 # _make_slot 布局一致），盒宽固定，「×N」与头部
@@ -2521,11 +2573,21 @@ class LogCompressorApp(_make_app_base()):
                                    font=vl._m_head, fill=link, text=_ic)
                 canvas.create_text(tx + _iw, y + 7, anchor="nw",
                                    font=vl._m_head, fill=link, text=_cnt)
-                tx += _iw + vl._m_head.measure(_cnt) + 10
+                tx += _iw + vl._m_head.measure(_cnt) + vl._sx(10)
             canvas.create_text(tx, y + 7, anchor="nw", font=vl._m_head,
                                fill=head_color, text=head_text)
-            canvas.create_text(x_base + gx + 10 - scroll_x,
-                               y + 7 + head_lh + 2, anchor="nw",
+            # 修复缺陷R37：分界细线（与真实行同位：头部行底与摘要
+            # 之间；选中 sel_border 亮色/未选中 row_border 低调色）
+            _dy = y + 7 + head_lh + 2
+            if tgl:
+                canvas.create_rectangle(
+                    x_base + gx + vl._sx(_ROW_PADX) - scroll_x, _dy,
+                    x_base + rw - gx - vl._sx(_ROW_PADX) - scroll_x,
+                    _dy + vl._sx(1),
+                    fill=(p["sel_border"] if selected else p["row_border"]),
+                    width=0)
+            canvas.create_text(x_base + gx + vl._sx(_ROW_PADX) - scroll_x,
+                               _dy + vl._sx(1) + 2, anchor="nw",
                                font=vl._m_sum, fill=sum_fill,
                                text=sum_text)
 
