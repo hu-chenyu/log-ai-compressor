@@ -3680,11 +3680,16 @@ class LogCompressorApp(_make_app_base()):
                 self._cluster_rows.append(row)
             return row
         # 修复缺陷R2：行距/内边距加大（大字体下行高充足不拥挤）
-        frame = ctk.CTkFrame(parent, corner_radius=6,
+        frame = ctk.CTkFrame(parent, corner_radius=10,
                              fg_color=p["row_bg"])
-        # 修复缺陷R27：未选中 pady=3，选中态由 _apply_row_bg 收紧为
-        # pady=1 制造「浮起凸起」视觉差（选中行比未选中行稍大）。
-        frame.pack(fill="x", padx=5, pady=3)
+        # 修复缺陷R27：未选中 pady=4，选中态由 _apply_row_bg 收紧为
+        # pady=0 制造「浮起凸起」视觉差（选中行比未选中行稍大）。
+        frame.pack(fill="x", padx=5, pady=4)
+        # 3D 立体效果：顶部受光高光条 + 底部投影（选中态显示，未选中隐藏）
+        _hi_bar = ctk.CTkFrame(frame, height=2, fg_color=p["sel_hi"],
+                                corner_radius=0)
+        _shadow_bar = ctk.CTkFrame(frame, height=2, fg_color=p["sel_shadow"],
+                                    corner_radius=0)
         if on_toggle is not None:
             # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
             link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
@@ -3727,7 +3732,9 @@ class LogCompressorApp(_make_app_base()):
                "idx": idx,
                # 修复缺陷R26：line 入字典 —— 选中态能带渐变需给
                # 头部条单独着顶部亮色（无展开按钮时无 line 容器）
-               "line": line if on_toggle is not None else None}
+               "line": line if on_toggle is not None else None,
+               # 修复缺陷R27：3D 立体高光/阴影条
+               "_hi_bar": _hi_bar, "_shadow_bar": _shadow_bar}
         if toggle is not None:
             row["toggle"] = toggle
         if register:
@@ -3816,17 +3823,28 @@ class LogCompressorApp(_make_app_base()):
                         # （sel_hi 受光色）+ 选中行 pack 收紧 pady 制造
                         # 「浮起」感；渐变背景（line sel_top / frame sel_bot）
                         # 模拟光照，圆角 14 保持药丸形。
+                        # 修复缺陷R27：药丸形圆角(24px)+4px高光边框
+                        # + 顶部受光高光条 + 底部投影，制造明显3D凸起感
                         row["frame"].configure(
-                            fg_color=p["sel_bot"], corner_radius=14,
-                            border_width=3,
+                            fg_color=p["sel_bot"], corner_radius=24,
+                            border_width=4,
                             border_color=p["sel_hi"])
                         # 选中行 pady 收紧 -> 比未选中行稍大，浮起感
                         try:
-                            row["frame"].pack_configure(pady=1)
+                            row["frame"].pack_configure(pady=0)
                         except tk.TclError:
                             pass
                         if row.get("line") is not None:
                             row["line"].configure(fg_color=p["sel_top"])
+                        # 3D 立体：顶部高光条 + 底部阴影条（place 定位不占布局空间）
+                        try:
+                            row["_hi_bar"].place(relx=0, rely=0,
+                                                  relwidth=1, height=2)
+                            row["_shadow_bar"].place(relx=0, rely=1.0,
+                                                      relwidth=1, height=2,
+                                                      anchor="sw")
+                        except (tk.TclError, KeyError):
+                            pass
                         row["summary"].configure(
                             text_color=p["sel_text"])
                         row["head"].configure(text_color=p["sel_text"])
@@ -3835,16 +3853,22 @@ class LogCompressorApp(_make_app_base()):
                                 text_color=p["sel_text"])
                     else:
                         row["frame"].configure(
-                            fg_color=color, corner_radius=6,
+                            fg_color=color, corner_radius=10,
                             border_width=1,
                             border_color=p["row_border"])
                         # 未选中恢复默认 pady
                         try:
-                            row["frame"].pack_configure(pady=3)
+                            row["frame"].pack_configure(pady=4)
                         except tk.TclError:
                             pass
                         if row.get("line") is not None:
                             row["line"].configure(fg_color="transparent")
+                        # 未选中隐藏 3D 高光/阴影
+                        try:
+                            row["_hi_bar"].place_forget()
+                            row["_shadow_bar"].place_forget()
+                        except (tk.TclError, KeyError):
+                            pass
                         row["summary"].configure(
                             text_color=p["row_text"])
                         # 头部/展开按钮恢复原色（级别色/链接色）
