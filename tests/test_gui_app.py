@@ -338,6 +338,34 @@ class TestClusterListWrap:
         assert str(selected) != str(normal), "选中/未选中应明显区分"
         assert str(states["selected"]) not in ("", "None")
 
+    def test_selected_classic_row_unified_rounded(self, app):
+        """修复缺陷R29：经典选中行完整圆角矩形，内部无两个粘着矩形。
+
+        头部条 line 与 head/toggle/summary 控件必须全部透明（各自
+        带色会拼出两个方角矩形压外层圆角）；头部/摘要间有 1px
+        分界细线（选中态亮色、两端内缩不碰边框）。
+        """
+        _run_paste_analysis(app, LONG_SUMMARY_LOG)
+        app._select_cluster(1)
+        app.update()
+        p = app._palette()
+        sel, normal = app._cluster_rows[1], app._cluster_rows[0]
+        # 头部条与内容控件全部透明（背景只由外层圆角 frame 提供）
+        if sel.get("line") is not None:
+            assert str(sel["line"].cget("fg_color")) == "transparent"
+        for key in ("head", "summary"):
+            assert str(sel[key].cget("fg_color")) == "transparent", \
+                f"选中行 {key} 应透明（实际 {sel[key].cget('fg_color')}）"
+        if sel.get("toggle") is not None:
+            assert str(sel["toggle"].cget("fg_color")) == "transparent"
+        # 外层圆角矩形统一背景 + 分界细线亮色
+        assert str(sel["frame"].cget("fg_color")) == p["sel_bot"]
+        assert sel.get("divider") is not None, "选中行应有分界细线"
+        assert str(sel["divider"].cget("bg")) == p["sel_border"], \
+            "选中行分界线应为亮色"
+        # 未选中行：分界线低调色
+        assert str(normal["divider"].cget("bg")) == p["row_border"]
+
     def test_hover_highlight(self, app):
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         # 行 0 在结果渲染后自动选中，悬停测试使用未选中的行 1
@@ -2240,18 +2268,17 @@ class TestVirtualList:
         app.update()
         slots = {s["idx"]: s for s in app._virtual_list.slots}
         if 1 in slots and 2 in slots:
-            sel = str(slots[1]["frame"].cget("fg_color"))
-            normal = str(slots[2]["frame"].cget("fg_color"))
+            sel = str(slots[1]["frame"].cget("bg"))
+            normal = str(slots[2]["frame"].cget("bg"))
             assert sel != normal, "选中/未选中背景应区分"
 
     def test_selected_virtual_row_continuous_block(self, app):
-        """修复R22/R26：选中行渐变能带（顶亮底暗）+ 白字 + 画布描边。
+        """修复R22/R26：选中行渐变能带（顶亮底暗）+ 白字 + 画布圆角底。
 
         R22 修复头部条暗缝后，R26 升级为方案A 能带：line/toggle/
         head = sel_top（顶部受光），frame/summary = sel_bot（底部
         背光），模拟上下渐变；文字统一 sel_text 白保可读；选中行
-        原生方形描边关闭（1px 亮描边由画布圆角轮廓呈现，见圆角
-        组测试）。
+        原生方形描边关闭（圆角背景/亮描边由画布图元呈现）。
         """
         _run_many_clusters(app)
         app.update()
@@ -2261,13 +2288,17 @@ class TestVirtualList:
         slots = {s["idx"]: s for s in app._virtual_list.slots}
         assert 1 in slots and 2 in slots
         sel = slots[1]
-        # 修复缺陷R27：CTk 控件用 fg_color/text_color，选中行 24px 圆角+4px边框
-        assert str(sel["frame"].cget("fg_color")) == p["sel_bot"]
-        assert sel["frame"].cget("corner_radius") == 24, "选中行应为 24px 药丸圆角"
-        assert sel["frame"].cget("border_width") == 4, "选中行应有 4px 高光边框"
+        for key in ("line", "toggle", "head"):
+            assert str(sel[key].cget("bg")) == p["sel_top"], \
+                f"选中行 {key} 应为顶部能带色（实际 {sel[key].cget('bg')}）"
+        for key in ("frame", "summary"):
+            assert str(sel[key].cget("bg")) == p["sel_bot"], \
+                f"选中行 {key} 应为底部能带色（实际 {sel[key].cget('bg')}）"
         for key in ("toggle", "head", "summary"):
-            assert str(sel[key].cget("text_color")) == p["sel_text"], \
-                f"选中行 {key} 文字应为选中白"
+            assert str(sel[key].cget("fg")) == p["sel_text"], \
+                f"选中行 {key} 文字应为选中白（实际 {sel[key].cget('fg')}）"
+        assert int(sel["frame"].cget("highlightthickness")) == 0, \
+            "选中行原生描边应关闭（画布圆角描边替代）"
 
     def test_row_press_pop_animation(self, app):
         """优化缺陷R23/R25：点击行立体弹起（下沉→上弹→回落 240ms）。
@@ -2284,8 +2315,7 @@ class TestVirtualList:
         slots = {s["idx"]: s for s in vl.slots}
         assert 1 in slots
         s1 = slots[1]
-        base = vl._row_y0(1)
-        # 修复缺陷R27：CTkFrame 圆角，不再有 Canvas 投影图元
+        base = vl._row_y0(1) + 12       # R27：行窗口静止位含 +12 垂直偏移
         vl._pop_press(s1)
         assert vl._canvas.coords(s1["win"])[1] > base, "按下应下沉"
         vl._pop_release(s1)
@@ -2296,7 +2326,6 @@ class TestVirtualList:
             time.sleep(0.02)
         assert s1.get("_pop") is None, "动画应在约 240ms 内完成"
         assert vl._canvas.coords(s1["win"])[1] == base, "结束应回落原位"
-        # 修复缺陷R27：无 Canvas 投影，动画结束后坐标复位即可
 
     def test_row_click_triggers_pop(self, app):
         """优化缺陷R23：行点击事件驱动按压/弹起（与选中同链路）。"""
@@ -2329,19 +2358,22 @@ class TestVirtualList:
         s1 = slots[1]
         vl._pop_press(s1)
         vl._pop_release(s1)
-        # 修复缺陷R27：CTkFrame 圆角，无 Canvas 圆角图元
-        assert s1["frame"].cget("corner_radius") == 24, "选中行应为 24px 圆角"
+        # 圆角背景组（R27：画布圆角矩形底 + 选中 3D 件）
+        grp = s1.get("_round")
+        assert grp and grp.get("sel"), "选中行应有圆角背景组（sel）"
+        for key in ("bg", "border", "hi", "shadow", "rshadow"):
+            assert grp.get(key), f"选中行圆角组缺 {key}"
         vl._fill_slot(s1, 5, vl._region_w())      # 回收到未选中索引
         assert s1.get("_pop") is None, "回收应取消动画"
-        assert s1["frame"].cget("corner_radius") == 10, "未选中行应为 10px 圆角"
-        assert vl._canvas.coords(s1["win"])[1] == vl._row_y0(5)
+        assert not s1["_round"].get("sel"), "回收为未选中行应无 3D 件"
+        assert vl._canvas.coords(s1["win"])[1] == vl._row_y0(5) + 12
 
     def test_selected_row_rounded_corners(self, app):
-        """优化缺陷R24/R26：选中行圆角组全件（遮罩+描边+高光+双投影）。
+        """优化缺陷R24/R27：选中行画布圆角背景组（底+描边+高光+双投影）。
 
-        选中行：4 角遮罩（r=14 逻辑px 明显弯曲）+ 1px 圆角亮描边
-        + 顶部高光 + 底部/右侧常驻投影；未选中行：仅 4 角小半径
-        遮罩（r=7）+ 原生 1px 细边框，无 3D 件（平面）。
+        R27 方案：行窗口缩小居中，画布绘制圆角矩形背景（选中
+        sel_bot / 未选中 row_bg）；选中行另加亮描边+顶部高光+底部/
+        右侧投影；未选中行仅圆角背景 + 原生 1px 细边框（平面）。
         """
         _run_many_clusters(app)
         app.update()
@@ -2351,16 +2383,26 @@ class TestVirtualList:
         p = app._palette()
         slots = {s["idx"]: s for s in vl.slots}
         sel, normal = slots[1], slots[2]
-        # 修复缺陷R27：CTkFrame 原生圆角，选中 24px 药丸形+4px高光边框
-        assert sel["frame"].cget("corner_radius") == 24, "选中行应为 24px 药丸圆角"
-        assert sel["frame"].cget("border_width") == 4, "选中行应有 4px 高光边框"
-        assert sel["frame"].cget("fg_color") == p["sel_bot"], "选中行背景应为 sel_bot"
-        # 未选中行：10px 圆角 + 1px 细边框
-        assert normal["frame"].cget("corner_radius") == 10, "未选中行应为 10px 圆角"
-        assert normal["frame"].cget("border_width") == 1, "未选中行应有 1px 细边框"
+        grp = sel.get("_round")
+        assert grp and grp.get("sel"), "选中行应有圆角背景组（sel）"
+        assert vl._canvas.type(grp["bg"]) == "polygon", "圆角背景应为多边形"
+        assert str(vl._canvas.itemcget(grp["bg"], "fill")) == p["sel_bot"]
+        for key in ("border", "hi", "shadow", "rshadow"):
+            assert grp.get(key), f"选中行圆角组缺 3D 件 {key}"
+        base = vl._row_y0(1)
+        bbox = vl._canvas.bbox(grp["bg"])      # 圆角背景顶缘贴行槽顶
+        assert abs(bbox[1] - base) <= 1
+        assert grp["r"] >= 24, "选中圆角半径应明显（14 逻辑px×缩放）"
+        # 未选中行：圆角背景（row_bg）+ 无 3D 件 + 1px 细边框
+        n_grp = normal.get("_round")
+        assert n_grp and not n_grp.get("sel"), "未选中行不应有 3D 件"
+        assert str(vl._canvas.itemcget(n_grp["bg"], "fill")) == p["row_bg"]
+        assert n_grp["r"] < grp["r"], "未选中圆角应小于选中"
+        assert int(normal["frame"].cget("highlightthickness")) == 1, \
+            "未选中行应有 1px 细边框"
 
     def test_round_masks_follow_pop_and_recycle(self, app):
-        """修复缺陷R27：CTkFrame 圆角跟随弹起动画；槽位回收时重建。"""
+        """优化缺陷R24/R27：圆角背景跟随弹起动画；槽位回收时重建。"""
         _run_many_clusters(app)
         app.update()
         app._select_cluster(1)
@@ -2369,18 +2411,17 @@ class TestVirtualList:
         slots = {s["idx"]: s for s in vl.slots}
         s1 = slots[1]
         base = vl._row_y0(1)
-        # 选中行应为 24px 圆角 + 4px 边框
-        assert s1["frame"].cget("corner_radius") == 24
-        assert s1["frame"].cget("border_width") == 4
         vl._pop_press(s1)
         dy = s1["_pop"]["dy"]
-        # 行窗口随弹起动画位移
-        assert abs(vl._canvas.coords(s1["win"])[1] - (base + dy)) <= 1, "行应跟随位移"
+        bbox = vl._canvas.bbox(s1["_round"]["bg"])  # 背景顶缘随下沉
+        assert abs(bbox[1] - (base + dy)) <= 1, "圆角背景应跟随行位移"
+        old = s1["_round"]
         vl._fill_slot(s1, 5, vl._region_w())     # 回收到未选中索引
-        # 回收为未选中行：10px 圆角 + 1px 边框
-        assert s1["frame"].cget("corner_radius") == 10
-        assert s1["frame"].cget("border_width") == 1
-        assert vl._canvas.coords(s1["win"])[1] == vl._row_y0(5)
+        alive = set(vl._canvas.find_all())
+        assert old["bg"] not in alive, "回收应清除旧圆角背景"
+        # 回收为未选中行：重建圆角背景（无 3D 件）
+        assert s1.get("_round") and not s1["_round"].get("sel")
+        assert vl._canvas.coords(s1["win"])[1] == vl._row_y0(5) + 12
 
     def test_virtual_list_survives_theme_switch(self, app):
         """修复R6：虚拟模式下主题切换刷新配色不崩溃。"""

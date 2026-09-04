@@ -3716,15 +3716,18 @@ class LogCompressorApp(_make_app_base()):
             link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
             line = ctk.CTkFrame(frame, fg_color="transparent")
             line.pack(fill="x", padx=(10, 10), pady=(7, 2))
+            # 修复缺陷R29：头部控件一律透明 —— 背景只由外层圆角
+            # frame 统一提供（各自带色会拼出两个方角矩形压圆角）
             toggle = ctk.CTkLabel(
                 line, text=f"\u25b6 \u00d7{cluster.count}",
-                font=f_head, text_color=link, cursor="hand2")
+                font=f_head, text_color=link, cursor="hand2",
+                fg_color="transparent")
             toggle.pack(side="left", padx=(0, 10))
             head = ctk.CTkLabel(
                 line, text=self._row_text(cluster, with_count=False),
                 anchor="w",
                 text_color=self._row_color(cluster) or None,
-                font=f_head)
+                font=f_head, fg_color="transparent")
             head.pack(side="left", fill="x", expand=True)
             # 展开按钮独立绑定（不触发行选中）
             self._bind_row_events((toggle,), on_toggle,
@@ -3733,8 +3736,13 @@ class LogCompressorApp(_make_app_base()):
             head = ctk.CTkLabel(
                 frame, text=self._row_text(cluster), anchor="w",
                 text_color=self._row_color(cluster) or None,
-                font=f_head)
+                font=f_head, fg_color="transparent")
             head.pack(fill="x", padx=(10, 10), pady=(7, 2))
+        # 修复缺陷R29：头部/摘要间 1px 细分界线（两端内缩 14px 不碰
+        # 左右边框；颜色随选中态在 _apply_row_bg 切换）
+        divider = tk.Frame(frame, height=1, bd=0, highlightthickness=0,
+                           bg=p["row_border"])
+        divider.pack(fill="x", padx=(14, 14))
         # 修复缺陷R9：摘要单行不换行（wraplength=0）
         # CTkLabel 传 CTkFont 对象（自动 DPI 缩放+档位跟随），
         # 不能传 create_scaled_tuple 的 tuple（CTk 内部解析 'normal roman' 失败）
@@ -3755,7 +3763,9 @@ class LogCompressorApp(_make_app_base()):
                # 头部条单独着顶部亮色（无展开按钮时无 line 容器）
                "line": line if on_toggle is not None else None,
                # 修复缺陷R27：3D 立体高光/阴影条
-               "_hi_bar": _hi_bar, "_shadow_bar": _shadow_bar}
+               "_hi_bar": _hi_bar, "_shadow_bar": _shadow_bar,
+               # 修复缺陷R29：头部/摘要细分界线（选中态换亮色）
+               "divider": divider}
         if toggle is not None:
             row["toggle"] = toggle
         if register:
@@ -3855,15 +3865,23 @@ class LogCompressorApp(_make_app_base()):
                             row["frame"].pack_configure(pady=0)
                         except tk.TclError:
                             pass
+                        # 修复缺陷R29：头部条/控件一律透明 —— 背景只由
+                        # 外层圆角 frame 统一提供（原 sel_top 色块方角
+                        # 压圆角，拼出两个粘着的矩形）；分界细线换亮
+                        # 色区分头部/摘要
                         if row.get("line") is not None:
-                            row["line"].configure(fg_color=p["sel_top"])
+                            row["line"].configure(fg_color="transparent")
+                        if row.get("divider") is not None:
+                            row["divider"].configure(bg=p["sel_border"])
                         # 3D 立体：顶部高光条 + 底部阴影条（place 定位不占布局空间）
+                        # 修复缺陷R29：高光/阴影条两端内缩 26px（圆角
+                        # 半径 24 + 2 余量），方角端头不再压圆角切角区
                         try:
-                            row["_hi_bar"].place(relx=0, rely=0,
-                                                  relwidth=1, height=2)
-                            row["_shadow_bar"].place(relx=0, rely=1.0,
-                                                      relwidth=1, height=2,
-                                                      anchor="sw")
+                            row["_hi_bar"].place(
+                                x=26, y=0, relwidth=1, width=-52, height=2)
+                            row["_shadow_bar"].place(
+                                x=26, rely=1.0, relwidth=1, width=-52,
+                                height=2, anchor="sw")
                         except (tk.TclError, KeyError):
                             pass
                         row["summary"].configure(
@@ -3884,6 +3902,9 @@ class LogCompressorApp(_make_app_base()):
                             pass
                         if row.get("line") is not None:
                             row["line"].configure(fg_color="transparent")
+                        # 修复缺陷R29：未选中分界细线恢复低调色
+                        if row.get("divider") is not None:
+                            row["divider"].configure(bg=p["row_border"])
                         # 未选中隐藏 3D 高光/阴影
                         try:
                             row["_hi_bar"].place_forget()
