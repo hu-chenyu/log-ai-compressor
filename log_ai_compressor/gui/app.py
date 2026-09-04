@@ -991,10 +991,11 @@ class VirtualClusterList:
                            wraplength=0,
                            bg=p["row_bg"], fg=p["row_text"])
         summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
-        # 窗口项高度锁 ROW_HEIGHT：整行高亮覆盖完整行（无残留缝隙）
+        # 修复缺陷R27：行窗口尺寸缩小，留出圆角空间（左右各留24px，
+        # 上下各留12px），避免行窗口覆盖Canvas上绘制的圆角背景
         win = self._canvas.create_window(0, 0, window=frame,
-                                         anchor="nw", width=width,
-                                         height=self.ROW_HEIGHT)
+                                         anchor="nw", width=width - 48,
+                                         height=self.ROW_HEIGHT - 24)
         self._bind_row_wheel(frame, toggle, head, summary)
         # 修复缺陷R22：line 入字典 —— 选中/悬停着色需覆盖头部条
         # （原未保存引用，line 底色停留 row_bg，选中蓝块被头部
@@ -1110,14 +1111,17 @@ class VirtualClusterList:
             # 选中行另加画布亮描边+顶部高光+底部/右侧投影（3D 凸起）
             self._round_masks(slot, selected)
             gx, gy = self._row_gaps()
+            # 修复缺陷R27：行窗口尺寸缩小，留出圆角空间（左右各24px，
+            # 上下各12px），位置偏移居中在圆角背景内
             self._canvas.itemconfigure(
                 slot["win"], state="normal",
-                width=max(10, width - 2 * gx),
-                height=self.ROW_HEIGHT - 2 * gy)
+                width=max(10, width - 48),
+                height=self.ROW_HEIGHT - 24)
             # 优化缺陷R23：弹起动画进行中坐标由动画持有（同 idx
             # 填充刷新不打断位移，避免悬停着色刷新造成 1 帧回跳）
             if slot.get("_pop") is None:
-                self._canvas.coords(slot["win"], gx, self._row_y0(idx))
+                self._canvas.coords(slot["win"], gx + 24,
+                                    self._row_y0(idx) + 12)
         except (tk.TclError, ValueError, IndexError):
             pass
 
@@ -1164,7 +1168,8 @@ class VirtualClusterList:
         gx, _gy = self._row_gaps()
         base = self._row_y0(idx)
         try:
-            self._canvas.coords(slot["win"], gx, base + dy)
+            # 修复缺陷R27：行窗口位置偏移（居中在圆角背景内）
+            self._canvas.coords(slot["win"], gx + 24, base + 12 + dy)
         except tk.TclError:
             return
         slot["_pop"] = {"base": base, "dy": dy,
@@ -1213,7 +1218,8 @@ class VirtualClusterList:
         pop["dy"] = dy
         try:
             gx, _gy = self._row_gaps()
-            self._canvas.coords(slot["win"], gx, base + dy)
+            # 修复缺陷R27：行窗口位置偏移（居中在圆角背景内）
+            self._canvas.coords(slot["win"], gx + 24, base + 12 + dy)
             self._round_move(slot)             # 圆角+投影逐帧跟随
         except tk.TclError:
             slot["_pop"] = None
@@ -1242,7 +1248,9 @@ class VirtualClusterList:
         if idx >= 0:
             try:
                 gx, _gy = self._row_gaps()
-                self._canvas.coords(slot["win"], gx, self._row_y0(idx))
+                # 修复缺陷R27：行窗口位置偏移（居中在圆角背景内）
+                self._canvas.coords(slot["win"], gx + 24,
+                                    self._row_y0(idx) + 12)
             except tk.TclError:
                 pass
             self._round_move(slot)              # 圆角组随复位
@@ -1294,17 +1302,13 @@ class VirtualClusterList:
         return flat
 
     def _round_masks(self, slot: dict, selected: bool) -> None:
-        """创建行圆角组：全行四角遮罩；选中行加描边/高光/投影。
+        """创建行圆角背景：全行圆角矩形填充；选中行加描边/高光/投影。
 
-        优化缺陷R24：tk 原生控件无透明圆角 —— 四角覆盖「角方块减
-        四分之一圆」多边形（填充画布底色 window；R26 行块间有真
-        间隙，外侧统一画布底色），视觉切成圆角。
-        修复缺陷R26（方案A）：全部行圆角（选中 14px/未选中 7px，
-        风格统一选中更明显）；选中行另加 3D 凸起三件套 ——
-        1px 圆角亮描边（sel_border 轮廓线）、顶部 2px 受光高光条
-        （sel_hi）、底部+右侧常驻投影（sel_shadow，两端按半径内缩
-        贴合圆角）；未选中行仅 1px row_border 细边框（原生），无
-        渐变无阴影保持平面。弹起动画中 _round_move 逐帧跟随。
+        修复缺陷R27：Canvas子窗口（tk.Frame）覆盖圆角遮罩，导致圆角
+        不显示。改方案：行窗口尺寸缩小留出圆角空间，Canvas上绘制圆角
+        矩形背景（用行背景色填充），行窗口居中在圆角背景内。
+        选中行另加 3D 凸起三件套 —— 圆角亮描边、顶部受光高光条、
+        底部+右侧常驻投影；未选中行仅圆角背景，平面无阴影。
         """
         self._unround(slot)
         idx = slot.get("idx", -1)
@@ -1315,12 +1319,14 @@ class VirtualClusterList:
         r = min(int(round((self.ROW_R_SEL if selected
                            else self.ROW_R_FLAT) * s)),
                 self.ROW_HEIGHT // 2 - 4)
+        # 修复缺陷R27：行背景色（选中sel_bot / 未选中row_bg）
+        bg_color = p["sel_bot"] if selected else p["row_bg"]
         grp = {"r": r, "sel": selected}
         try:
-            grp["masks"] = [self._canvas.create_polygon(
-                self._corner_pts(0, 0, 1, 1, r, corner),
-                fill=p["window"], outline="")
-                for corner in ("tl", "tr", "bl", "br")]
+            # 修复缺陷R27：圆角矩形背景（替代四个角的遮罩）
+            grp["bg"] = self._canvas.create_polygon(
+                self._rrect_pts(0, 0, 1, 1, r),
+                fill=bg_color, outline="")
             if selected:
                 grp["border"] = self._canvas.create_polygon(
                     self._rrect_pts(0, 0, 1, 1, max(2, r - 1)),
@@ -1333,7 +1339,7 @@ class VirtualClusterList:
                 grp["rshadow"] = self._canvas.create_rectangle(
                     0, 0, 1, 1, fill=p["sel_shadow"], width=0)
         except tk.TclError:
-            for it in list(grp.get("masks") or []) + [
+            for it in [grp.get("bg")] + [
                     grp[k] for k in ("border", "hi", "shadow", "rshadow")
                     if grp.get(k)]:
                 try:
@@ -1365,9 +1371,9 @@ class VirtualClusterList:
         x1 = max(x0 + 12, self._region_w() - gx)
         r = grp["r"]
         try:
-            for it, corner in zip(grp["masks"], ("tl", "tr", "bl", "br")):
-                self._canvas.coords(
-                    it, *self._corner_pts(x0, y0, x1, y1, r, corner))
+            # 修复缺陷R27：移动圆角背景（替代四个角的遮罩）
+            self._canvas.coords(
+                grp["bg"], *self._rrect_pts(x0, y0, x1, y1, r))
             if grp.get("sel"):
                 s = self._pop_scale()
                 base_d = int(round(4 * s))
@@ -1396,7 +1402,7 @@ class VirtualClusterList:
         grp = slot.pop("_round", None)
         if not grp:
             return
-        items = list(grp.get("masks") or ())
+        items = [grp.get("bg")] if grp.get("bg") else []
         for key in ("border", "hi", "shadow", "rshadow"):
             if grp.get(key):
                 items.append(grp[key])
