@@ -3682,6 +3682,8 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R2：行距/内边距加大（大字体下行高充足不拥挤）
         frame = ctk.CTkFrame(parent, corner_radius=6,
                              fg_color=p["row_bg"])
+        # 修复缺陷R27：未选中 pady=3，选中态由 _apply_row_bg 收紧为
+        # pady=1 制造「浮起凸起」视觉差（选中行比未选中行稍大）。
         frame.pack(fill="x", padx=5, pady=3)
         if on_toggle is not None:
             # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
@@ -3708,12 +3710,15 @@ class LogCompressorApp(_make_app_base()):
                 font=f_head)
             head.pack(fill="x", padx=(10, 10), pady=(7, 2))
         # 修复缺陷R9：摘要单行不换行（wraplength=0）
-        summary = tk.Label(
+        # CTkLabel 传 CTkFont 对象（自动 DPI 缩放+档位跟随），
+        # 不能传 create_scaled_tuple 的 tuple（CTk 内部解析 'normal roman' 失败）
+        summary = ctk.CTkLabel(
             frame, text=cluster.summary, anchor="w", justify="left",
             wraplength=0,
-            font=f_sum,
-            bg=p["row_bg"], fg=p["row_text"])
-        summary.pack(fill="x", padx=(10, 4), pady=(2, 6))
+            font=self._font_row_summary,
+            fg_color="transparent",
+            text_color=p["row_text"])
+        summary.pack(fill="x", padx=(10, 16), pady=(2, 6))
         select_cb = on_select or (lambda: self._select_cluster(idx))
         hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
         # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
@@ -3776,9 +3781,13 @@ class LogCompressorApp(_make_app_base()):
             hover_cb(hovered)
 
         for target in targets:
-            target.bind("<Button-1>", lambda e: select_cb())
-            target.bind("<Enter>", lambda e: set_hover(True))
-            target.bind("<Leave>", lambda e: set_hover(False))
+            # 修复缺陷R27：CTk 复合控件（CTkLabel/CTkFrame 等）重写了
+            # bind() 把事件转发到内部子控件，导致容器本身的绑定在
+            # event_generate 时不触发（真实鼠标点击命中内部控件仍有效）。
+            # 用原始 tk.Misc.bind 确保容器绑定也生效，测试与真实行为一致。
+            tk.Misc.bind(target, "<Button-1>", lambda e: select_cb())
+            tk.Misc.bind(target, "<Enter>", lambda e: set_hover(True))
+            tk.Misc.bind(target, "<Leave>", lambda e: set_hover(False))
 
     def _apply_row_bg(self, idx: int, color) -> None:
         """统一更新行背景（经典 CTk 行 / 虚拟池化行都支持）。
@@ -3803,14 +3812,23 @@ class LogCompressorApp(_make_app_base()):
                     p = self._palette()
                     sel_c = self._resolve_row_color(p["row_selected"])
                     if resolved == sel_c:
+                        # 修复缺陷R27：3D 凸起增强 —— 3px 高光边框
+                        # （sel_hi 受光色）+ 选中行 pack 收紧 pady 制造
+                        # 「浮起」感；渐变背景（line sel_top / frame sel_bot）
+                        # 模拟光照，圆角 14 保持药丸形。
                         row["frame"].configure(
                             fg_color=p["sel_bot"], corner_radius=14,
-                            border_width=2,
-                            border_color=p["sel_border"])
+                            border_width=3,
+                            border_color=p["sel_hi"])
+                        # 选中行 pady 收紧 -> 比未选中行稍大，浮起感
+                        try:
+                            row["frame"].pack_configure(pady=1)
+                        except tk.TclError:
+                            pass
                         if row.get("line") is not None:
                             row["line"].configure(fg_color=p["sel_top"])
-                        row["summary"].configure(bg=p["sel_bot"],
-                                                 fg=p["sel_text"])
+                        row["summary"].configure(
+                            text_color=p["sel_text"])
                         row["head"].configure(text_color=p["sel_text"])
                         if row.get("toggle") is not None:
                             row["toggle"].configure(
@@ -3820,10 +3838,15 @@ class LogCompressorApp(_make_app_base()):
                             fg_color=color, corner_radius=6,
                             border_width=1,
                             border_color=p["row_border"])
+                        # 未选中恢复默认 pady
+                        try:
+                            row["frame"].pack_configure(pady=3)
+                        except tk.TclError:
+                            pass
                         if row.get("line") is not None:
                             row["line"].configure(fg_color="transparent")
-                        row["summary"].configure(bg=resolved,
-                                                 fg=p["row_text"])
+                        row["summary"].configure(
+                            text_color=p["row_text"])
                         # 头部/展开按钮恢复原色（级别色/链接色）
                         c = (self._displayed[idx] if 0 <= idx
                              < len(self._displayed) else None)
@@ -4056,34 +4079,59 @@ class LogCompressorApp(_make_app_base()):
         p = self._palette()
         text = (f"{format_timestamp(inst.timestamp)}  "
                 f"L{inst.line_no}  {inst.summary}")
-        lbl = tk.Label(parent, text=text, anchor="w", justify="left",
-                       font=self._scaled_font(self._font_row_summary),
-                       bg=bg, fg=p["row_text"], cursor="hand2",
-                       wraplength=0)
-        lbl.pack(fill="x", padx=(34, 8), pady=2)
+        # 修复缺陷R27：实例行改 CTkLabel 透明背景 + 圆角容器，
+        # 与簇行风格统一（选中态圆角+立体）
+        # 修复缺陷R27：实例行圆角容器 —— 未选中 8px 圆角+1px 细边，
+        # 选中态由 _classic_inst_click 升级为 10px 圆角+2px 高光边
+        inst_wrap = ctk.CTkFrame(
+            parent, corner_radius=8,
+            fg_color=bg, border_width=1,
+            border_color=p["row_border"])
+        inst_wrap.pack(fill="x", padx=(28, 8), pady=1)
+        lbl = ctk.CTkLabel(
+            inst_wrap, text=text, anchor="w", justify="left",
+            wraplength=0,
+            font=self._font_row_summary,
+            fg_color="transparent",
+            text_color=p["row_text"], cursor="hand2")
+        lbl.pack(fill="x", padx=10, pady=4)
         lbl.bind("<Button-1>",
                  lambda e: self._classic_inst_click(cidx, iidx, lbl))
-        lbl.bind("<Enter>", lambda e: lbl.configure(
-            bg=p["row_selected"] if self._classic_inst_sel is lbl
+        lbl.bind("<Enter>", lambda e: inst_wrap.configure(
+            fg_color=p["row_selected"] if self._classic_inst_sel is lbl
             else p["row_hover"]))
-        lbl.bind("<Leave>", lambda e: lbl.configure(
-            bg=p["row_selected"] if self._classic_inst_sel is lbl
+        lbl.bind("<Leave>", lambda e: inst_wrap.configure(
+            fg_color=p["row_selected"] if self._classic_inst_sel is lbl
             else bg))
-        return lbl
+        return {"label": lbl, "wrap": inst_wrap}
 
-    def _classic_inst_click(self, cidx, iidx, lbl) -> None:
+    def _classic_inst_click(self, cidx, iidx, inst_dict) -> None:
         """经典实例行点击：单选高亮 + 实例详情。"""
         p = self._palette()
+        lbl = inst_dict["label"]
+        inst_wrap = inst_dict["wrap"]
         prev = self._classic_inst_sel
         if prev is not None and prev is not lbl:
             try:
                 if prev.winfo_exists():
-                    prev.configure(bg=p["window"])
+                    # 恢复未选中态：8px 圆角 + 1px 细边 + 默认文字色
+                    prev.master.configure(
+                        fg_color=p["window"],
+                        corner_radius=8,
+                        border_width=1,
+                        border_color=p["row_border"])
+                    prev.configure(text_color=p["row_text"])
             except tk.TclError:
                 pass
         self._classic_inst_sel = lbl
         try:
-            lbl.configure(bg=p["row_selected"])
+            # 选中态 3D：10px 圆角 + 2px 高光边框 + 稍亮背景
+            inst_wrap.configure(
+                fg_color=p["sel_bot"],
+                corner_radius=10,
+                border_width=2,
+                border_color=p["sel_hi"])
+            lbl.configure(text_color=p["sel_text"])
         except tk.TclError:
             pass
         self._select_instance(cidx, iidx)
