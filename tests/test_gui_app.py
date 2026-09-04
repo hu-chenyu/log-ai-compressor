@@ -1546,7 +1546,7 @@ class TestPerformanceOptimizations:
 
 
 # ---------------------------------------------------------------------------
-# 修复5：上下文行数（默认 50 + GUI 可调节 5~200）
+# 修复5：上下文行数（默认 50；优化缺陷R43：GUI 输入框已删除，固定默认）
 # ---------------------------------------------------------------------------
 class TestContextLines:
     def test_default_context_lines_is_50(self):
@@ -1554,70 +1554,17 @@ class TestContextLines:
         from log_ai_compressor.constants import DEFAULT_CONTEXT_LINES
         assert DEFAULT_CONTEXT_LINES == 50
 
-    def test_context_entry_exists_with_default(self, app):
-        """配置区必须有「上下文行数」输入框，默认值 50。"""
-        assert app._ctx_entry is not None
-        assert app._ctx_entry.get() == "50"
-
-    def test_context_lines_clamped_to_range(self, app):
-        """修复缺陷R20：下限钳制到 5，无上限（数字可填任意大）。"""
-        for raw, expected in [("1", 5), ("0", 5), ("-3", 5), ("999", 999),
-                              ("99999", 99999), ("abc", 50), ("", 50),
-                              ("8", 8), ("120", 120), ("200", 200)]:
-            app._ctx_entry.delete(0, "end")
-            app._ctx_entry.insert(0, raw)
-            assert app._current_context_lines() == expected, \
-                f"输入 {raw!r} 应得 {expected}（下限 5、无上限）"
-
-    def test_context_lines_passed_to_pipeline(self, app, monkeypatch):
-        """GUI 配置的上下文行数必须传给分析管线。"""
-        import log_ai_compressor.gui.app as app_mod
-        captured = {}
-
-        def spy_analyze(text, **kwargs):
-            captured["context_lines"] = kwargs.get("context_lines")
-            from log_ai_compressor.core.models import RunStats, AnalysisResult
-            return AnalysisResult(stats=RunStats(source="<t>", total_lines=1),
-                                  clusters=[])
-
-        monkeypatch.setattr(app_mod, "analyze_text", spy_analyze)
-        app._ctx_entry.delete(0, "end")
-        app._ctx_entry.insert(0, "30")
-        app._tabview.set("文本粘贴")
-        app._paste_box.delete("1.0", "end")
-        app._paste_box.insert("1.0", SAMPLE_PASTE)
-        app._on_start()
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            app.update()
-            if app._result is not None:
-                break
-            time.sleep(0.02)
-        assert captured["context_lines"] == 30
-
-    def test_context_lines_persisted(self, app, tmp_path):
-        """用户调整的上下文行数必须持久化，重启后恢复。"""
-        app._ctx_entry.delete(0, "end")
-        app._ctx_entry.insert(0, "100")
-        app._save_config()
-        saved = app._store.load()
-        assert saved.get("context_lines") == 100
-
-    def test_context_lines_restored_from_config(self, app, monkeypatch):
-        """配置文件中的 context_lines 启动时恢复到输入框。
-
-        不创建第二个 Tk root（长序列句柄耗尽风险），以
-        _restore_config 在干净输入框上的重放等效验证。
-        """
-        app._ctx_entry.delete(0, "end")
-        app._ctx_entry.insert(0, "77")
-        app._save_config()
-        # 模拟重启：清空输入框后用保存的配置重放恢复逻辑
-        app._ctx_entry.delete(0, "end")
-        app._config = app._store.load()
-        app._restore_config()
-        app.update()
-        assert app._ctx_entry.get() == "77"
+    def test_filter_inputs_removed(self, app):
+        """优化缺陷R43：包含/排除关键字与上下文行数输入区整体删除。"""
+        assert not hasattr(app, "_include_entry"), "包含关键字输入框应已删除"
+        assert not hasattr(app, "_exclude_entry"), "排除关键字输入框应已删除"
+        assert not hasattr(app, "_ctx_entry"), "上下文行数输入框应已删除"
+        assert not hasattr(app, "_topn_entry"), "Top N 输入框应已删除"
+        # 分析参数固定为管线默认（不再采集过滤输入）
+        common_levels = [lv for lv, var in app._level_vars.items()
+                         if var.get()]
+        assert set(common_levels) == {"ERROR", "FAIL"}, \
+            "默认级别仍为 ERROR+FAIL"
 
 
 # ---------------------------------------------------------------------------
@@ -2309,9 +2256,8 @@ def _make_virtual_log(n=60):
 
 
 def _run_many_clusters(app, n=60):
-    """分析 n 簇日志并把 Top N 调大（触发虚拟列表阈值）。"""
-    app._topn_entry.delete(0, "end")
-    app._topn_entry.insert(0, "200")
+    """分析 n 簇日志（优化缺陷R43：Top N 已删除，全量显示即触发
+    虚拟列表阈值，无需再调大 Top N）。"""
     _run_paste_analysis(app, _make_virtual_log(n))
 
 
