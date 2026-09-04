@@ -2323,6 +2323,41 @@ class TestVirtualList:
         assert sh not in vl._canvas.find_all(), "回收应删除阴影"
         assert vl._canvas.coords(s1["win"])[1] == 5 * vl.ROW_HEIGHT
 
+    def test_selected_row_rounded_corners(self, app):
+        """优化缺陷R24：选中行四角圆角遮罩（椭圆角常驻），未选中无。"""
+        _run_many_clusters(app)
+        app.update()
+        app._select_cluster(1)
+        app.update()
+        vl = app._virtual_list
+        slots = {s["idx"]: s for s in vl.slots}
+        sel, normal = slots[1], slots[2]
+        ids = sel.get("_round")
+        assert ids and len(ids) == 4, "选中行应有四角圆角遮罩"
+        for it in ids:
+            assert vl._canvas.type(it) == "polygon"
+        assert not normal.get("_round"), "未选中行应无遮罩（保持直角）"
+        base = 1 * vl.ROW_HEIGHT
+        bbox = vl._canvas.bbox(ids[0])          # 左上遮罩贴行顶缘
+        assert abs(bbox[1] - base) <= 1
+
+    def test_round_masks_follow_pop_and_recycle(self, app):
+        """优化缺陷R24：圆角遮罩跟随弹起动画；槽位回收时清除。"""
+        _run_many_clusters(app)
+        app.update()
+        app._select_cluster(1)
+        app.update()
+        vl = app._virtual_list
+        slots = {s["idx"]: s for s in vl.slots}
+        s1 = slots[1]
+        base = 1 * vl.ROW_HEIGHT
+        vl._pop_press(s1)
+        dy = s1["_pop"]["dy"]
+        bbox = vl._canvas.bbox(s1["_round"][0])  # 左上遮罩顶缘随下沉
+        assert abs(bbox[1] - (base + dy)) <= 1, "遮罩应跟随行位移"
+        vl._fill_slot(s1, 5, vl._region_w())     # 回收到未选中索引
+        assert not s1.get("_round"), "回收/取消选中应清除遮罩"
+
     def test_virtual_list_survives_theme_switch(self, app):
         """修复R6：虚拟模式下主题切换刷新配色不崩溃。"""
         _run_many_clusters(app)
