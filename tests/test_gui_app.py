@@ -370,11 +370,12 @@ class TestClusterListWrap:
         for key in ("head", "summary"):
             assert str(normal[key].cget("fg_color")) == p["row_bg"]
         assert str(normal["divider"].cget("fg_color")) == p["row_border"]
-        # 修复缺陷R31：未选中行创建即带可见圆角 —— 圆角 12px +
+        # 修复缺陷R31/R33：未选中行创建即带可见圆角 —— 圆角 9px +
         # 1px 细边框（原创建时 border_width=0 且底色对比极低，
-        # 圆角存在但肉眼不可见）
-        assert normal["frame"].cget("corner_radius") == 12, \
-            "未选中行应为 12px 圆角"
+        # 圆角存在但肉眼不可见；R33 随选中圆角 24→18 同步 12→9
+        # 保持 2:1 比例）
+        assert normal["frame"].cget("corner_radius") == 9, \
+            "未选中行应为 9px 圆角"
         assert normal["frame"].cget("border_width") == 1, \
             "未选中行创建即应有 1px 细边框"
         assert str(normal["frame"].cget("border_color")) == \
