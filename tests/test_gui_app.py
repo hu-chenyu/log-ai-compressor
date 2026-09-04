@@ -399,8 +399,10 @@ class TestClusterListFontAndWidth:
         inner = [c for c in head.winfo_children()
                  if c.winfo_class() == "Label"][0]
         head_size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
-        sum_size = int(
-            tkfont.Font(font=row["summary"].cget("font")).cget("size"))
+        # R27: summary 改 CTkLabel，从内部 tk.Label 取实际渲染字体
+        sum_inner = [c for c in row["summary"].winfo_children()
+                     if c.winfo_class() == "Label"][0]
+        sum_size = int(tkfont.Font(font=sum_inner.cget("font")).cget("size"))
         ratio = sum_size / max(1, head_size)
         assert abs(ratio - 18 / 22) < 0.06, \
             f"摘要/头部渲染比例 {ratio:.3f} 应 ≈ 18/22（均含 DPI 缩放）"
@@ -414,8 +416,10 @@ class TestClusterListFontAndWidth:
         inner = [c for c in head.winfo_children()
                  if c.winfo_class() == "Label"][0]
         head_size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
-        sum_size = int(tkfont.Font(
-            font=app._cluster_rows[0]["summary"].cget("font")).cget("size"))
+        # R27: summary 改 CTkLabel，从内部 tk.Label 取实际渲染字体
+        sum_inner2 = [c for c in app._cluster_rows[0]["summary"].winfo_children()
+                      if c.winfo_class() == "Label"][0]
+        sum_size = int(tkfont.Font(font=sum_inner2.cget("font")).cget("size"))
         assert abs(sum_size / max(1, head_size) - 18 / 22) < 0.06
 
     def test_virtual_row_fonts_match_classic(self, app):
@@ -428,8 +432,11 @@ class TestClusterListFontAndWidth:
                  if c.winfo_class() == "Label"][0]
         classic_head_size = tkfont.Font(
             font=inner.cget("font")).cget("size")
+        # R27: summary 改 CTkLabel，从内部 tk.Label 取实际渲染字体
+        classic_sum_inner = [c for c in app._cluster_rows[0]["summary"].winfo_children()
+                             if c.winfo_class() == "Label"][0]
         classic_sum_size = tkfont.Font(
-            font=app._cluster_rows[0]["summary"].cget("font")).cget("size")
+            font=classic_sum_inner.cget("font")).cget("size")
         # 虚拟模式取样
         _run_many_clusters(app)
         app.update()
