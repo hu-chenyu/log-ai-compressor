@@ -1063,6 +1063,15 @@ class VirtualClusterList:
                 highlightthickness=1 if selected else 0,
                 highlightbackground=p["row_selected_edge"],
                 highlightcolor=p["row_selected_edge"])
+            # 优化缺陷R24：选中行四角圆角遮罩（椭圆角常驻形态，
+            # 未选中行恢复直角）；行外色分上/下（首末行邻画布底色）
+            if selected:
+                top_out = p["window"] if idx == 0 else states["bg"]
+                bot_out = (p["window"] if idx == len(self._data) - 1
+                           else states["bg"])
+                self._round_masks(slot, top_out, bot_out)
+            else:
+                self._unround(slot)
             self._canvas.itemconfigure(slot["win"], state="normal",
                                        width=width,
                                        height=self.ROW_HEIGHT)
@@ -1109,6 +1118,7 @@ class VirtualClusterList:
             return
         slot["_pop"] = {"base": idx * self.ROW_HEIGHT, "dy": dy,
                         "job": None, "shadow": None}
+        self._round_move(slot)                 # R24：圆角随下沉
 
     def _pop_release(self, slot: dict) -> None:
         """释放：上弹 5px（阴影展开）→ 回落原位，总时长 240ms。
@@ -1161,6 +1171,7 @@ class VirtualClusterList:
         pop["dy"] = dy
         try:
             self._canvas.coords(slot["win"], 0, base + dy)
+            self._round_move(slot)             # R24：圆角随浮起逐帧跟随
             if dy < 0:                         # 浮起：阴影铺满行底缝隙
                 y0 = base + self.ROW_HEIGHT + dy
                 self._canvas.coords(pop["shadow"], 6, y0,
@@ -1197,6 +1208,105 @@ class VirtualClusterList:
         if idx >= 0:
             try:
                 self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
+            except tk.TclError:
+                pass
+            self._round_move(slot)              # R24：圆角遮罩随复位
+
+    # ------------------------------------------------------------------
+    # 优化（R24）：选中行圆角（椭圆角）—— 四角多边形遮罩把直角切成圆角
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _arc_pts(cx: float, cy: float, r: float,
+                 a0: float, a1: float, n: int = 8) -> list:
+        """圆弧采样点（圆心+半径，角度 a0→a1 度，n 段）。"""
+        import math
+        return [(cx + r * math.cos(math.radians(a0 + (a1 - a0) * i / n)),
+                 cy + r * math.sin(math.radians(a0 + (a1 - a0) * i / n)))
+                for i in range(n + 1)]
+
+    def _corner_pts(self, x0, y0, x1, y1, r, corner):
+        """单个圆角遮罩多边形（角方块 − 四分之一圆的区域）顶点序列。"""
+        if corner == "tl":
+            pts = [(x0, y0), (x0 + r, y0)] + self._arc_pts(
+                x0 + r, y0 + r, r, 270, 180)
+        elif corner == "tr":
+            pts = [(x1, y0), (x1, y0 + r)] + self._arc_pts(
+                x1 - r, y0 + r, r, 0, -90)
+        elif corner == "bl":
+            pts = [(x0, y1), (x0 + r, y1)] + self._arc_pts(
+                x0 + r, y1 - r, r, 90, 180)
+        else:  # "br"
+            pts = [(x1, y1), (x1 - r, y1)] + self._arc_pts(
+                x1 - r, y1 - r, r, 90, 0)
+        flat = []
+        for px, py in pts:
+            flat.extend((px, py))
+        return flat
+
+    def _round_masks(self, slot: dict, out_top: str, out_bot: str) -> None:
+        """为选中行创建四角圆角遮罩（颜色=行外背景，视觉切角）。
+
+        优化缺陷R24：tk 原生控件无透明圆角 —— 在四角画布上覆盖
+        「角方块减四分之一圆」多边形（填充行外背景色），蓝色块
+        视觉上呈现圆角（椭圆角）矩形；首行上缘/末行下缘外侧是
+        画布底色（window），行间外侧是邻行底色（row_bg），分色
+        处理保证任何位置都无缝。弹起动画中随 _round_move 逐帧跟随。
+        """
+        self._unround(slot)
+        idx = slot.get("idx", -1)
+        if idx < 0:
+            return
+        pop = slot.get("_pop")
+        dy = pop["dy"] if pop else 0
+        y0 = idx * self.ROW_HEIGHT + dy
+        y1 = y0 + self.ROW_HEIGHT
+        w = self._region_w()
+        r = int(round(10 * self._pop_scale()))
+        ids = []
+        try:
+            for corner, fill in (("tl", out_top), ("tr", out_top),
+                                 ("bl", out_bot), ("br", out_bot)):
+                ids.append(self._canvas.create_polygon(
+                    self._corner_pts(0, y0, w, y1, r, corner),
+                    fill=fill, outline=""))
+        except tk.TclError:
+            for it in ids:
+                try:
+                    self._canvas.delete(it)
+                except tk.TclError:
+                    pass
+            return
+        slot["_round"] = ids
+
+    def _round_move(self, slot: dict) -> None:
+        """弹起/复位时圆角遮罩跟随行窗口当前 y 坐标（逐帧重算）。"""
+        ids = slot.get("_round")
+        if not ids:
+            return
+        idx = slot.get("idx", -1)
+        if idx < 0:
+            return
+        pop = slot.get("_pop")
+        dy = pop["dy"] if pop else 0
+        y0 = idx * self.ROW_HEIGHT + dy
+        y1 = y0 + self.ROW_HEIGHT
+        w = self._region_w()
+        r = int(round(10 * self._pop_scale()))
+        try:
+            for it, corner in zip(ids, ("tl", "tr", "bl", "br")):
+                self._canvas.coords(
+                    it, *self._corner_pts(0, y0, w, y1, r, corner))
+        except tk.TclError:
+            pass
+
+    def _unround(self, slot: dict) -> None:
+        """删除圆角遮罩（取消选中/槽位回收时调用）。"""
+        ids = slot.pop("_round", None)
+        if not ids:
+            return
+        for it in ids:
+            try:
+                self._canvas.delete(it)
             except tk.TclError:
                 pass
 
