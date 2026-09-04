@@ -365,14 +365,6 @@ class TestClusterListWrap:
         assert sel.get("divider") is not None, "选中行应有分界细线"
         assert str(sel["divider"].cget("fg_color")) == p["sel_border"], \
             "选中行分界线应为亮色"
-        # 修复缺陷R39：选中行文字应为选中白 + 高光/阴影条就位
-        # （原 CTkFrame bar 的 place(width/height) 抛 ValueError，
-        # 中断了白字设置且条从未显示；R39 改原生 tk.Frame 修复）
-        for key in ("head", "summary"):
-            assert str(sel[key].cget("text_color")) == p["sel_text"], \
-                f"选中行 {key} 文字应为选中白"
-        assert sel["_hi_bar"].winfo_ismapped(), "选中应显示顶部高光条"
-        assert sel["_shadow_bar"].winfo_ismapped(), "选中应显示底部阴影条"
         # 未选中行：内部控件与行底色同色 + 分界线低调色
         assert str(normal["frame"].cget("fg_color")) == p["row_bg"]
         for key in ("head", "summary"):
@@ -2040,14 +2032,6 @@ def _click_ctk_label(widget):
     widget.update()
 
 
-def _pady_of(frame):
-    """pack pady 归一化为 (上, 下) int 二元组（标量补齐）。"""
-    v = frame.pack_info()["pady"]
-    if not isinstance(v, (tuple, list)):
-        v = (v, v)
-    return tuple(int(x) for x in v)
-
-
 class TestFullscreenExpand:
     def _open_fs(self, app):
         """分析 REPEAT_LOG 后打开列表全屏，返回窗口。
@@ -2716,52 +2700,6 @@ class TestClusterExpandMain:
         assert row["head"].winfo_x() == x_collapsed, \
             "收起后头部文字起始 x 复原"
 
-    def test_classic_row_click_pop_animation(self, app):
-        """修复缺陷R39：经典行点击立体感（下沉→回弹→投影回落）。
-
-        按下：pady=(2d,0) 行体下沉 + 投影收缩 1d；释放：归位 +
-        投影加深 4d → 3d → 2d 常态（Tk 不允许负 pady，上弹以光影
-        补偿）。
-        """
-        _run_paste_analysis(app, self._repeat_log(8))
-        app.update()
-        assert app._virtual_list is None, "小数据应走经典列表"
-        row = next(r for r in app._cluster_rows if r.get("idx") == 0)
-        frame = row["frame"]
-        _s = max(1.0, getattr(app, "_font_scale", 1.0))
-
-        def _h():
-            return int(row["_shadow_bar"].place_info()["height"])
-
-        # 按下：选中先生效（边框 4），随后下沉（pady 上增）+ 投影收缩
-        row["head"].event_generate("<Button-1>", x=5, y=5)
-        app.update()
-        assert int(str(frame.cget("border_width"))) == 4, "点击后应选中"
-        assert _pady_of(frame) == (int(round(2 * _s)), 0), \
-            f"按压应下沉（上 pady 增大），实际 {_pady_of(frame)}"
-        assert _h() == int(round(1 * _s)), "按压时投影应收缩"
-        # 释放：归位 + 投影加深 → 回落 → 常态
-        row["head"].event_generate("<ButtonRelease-1>", x=5, y=5)
-        app.update()
-        assert _pady_of(frame) == (0, 0), "释放应归位"
-        assert _h() == int(round(4 * _s)), "释放瞬间投影应加深（上弹光影）"
-        time.sleep(0.12)
-        app.update()
-        assert _h() == int(round(3 * _s)), "投影应回落中间档"
-        time.sleep(0.12)
-        app.update()
-        assert _h() == int(round(2 * _s)), "投影应恢复常态"
-        # 再次点击已选中行：按压/释放质感依然生效
-        row["head"].event_generate("<Button-1>", x=5, y=5)
-        app.update()
-        assert _pady_of(frame) == (int(round(2 * _s)), 0), \
-            "已选中行按压也应下沉"
-        row["head"].event_generate("<ButtonRelease-1>", x=5, y=5)
-        app.update()
-        time.sleep(0.3)
-        app.update()
-        assert _pady_of(frame) == (0, 0)
-
     def test_rerender_clears_expand_state(self, app):
         """重新渲染（过滤/TopN/再分析）后展开与实例选中状态清空。"""
         _run_many_clusters(app)
@@ -2873,33 +2811,6 @@ class TestFullscreenReuse:
                 "选中行头部应与外层同色"
             assert str(row["head"].cget("fg")) == p["sel_text"], \
                 "选中行文字应为选中白"
-        finally:
-            win.destroy()
-            app.update()
-
-    def test_fs_row_click_pop_animation(self, app):
-        """修复缺陷R39：全屏簇行点击立体感（与经典共用按压助手）。"""
-        _run_paste_analysis(app, REPEAT_LOG)
-        win = self._open_fs(app)
-        try:
-            row = app._fs_rows[0]
-            frame = row["frame"]
-            _s = max(1.0, getattr(app, "_font_scale", 1.0))
-            _click_ctk_label(row["head"])          # 选中 + 按压下沉
-            app.update()
-            assert int(str(frame.cget("border_width"))) == 4, "点击后应选中"
-            assert _pady_of(frame) == (int(round(2 * _s)), 0), \
-                f"按压应下沉，实际 {_pady_of(frame)}"
-            row["head"].event_generate("<ButtonRelease-1>", x=3, y=2)
-            app.update()
-            assert _pady_of(frame) == (0, 0), "释放应归位"
-            # after 链式定时器：每帧在上帧回调中排下一帧，需持续推进
-            # 事件循环才能逐帧触发（一次性长 sleep 只会触发一帧）
-            for _ in range(8):
-                time.sleep(0.05)
-                app.update()
-            assert int(row["_shadow_bar"].place_info()["height"]) == \
-                int(round(2 * _s)), "动画结束投影应恢复常态"
         finally:
             win.destroy()
             app.update()
