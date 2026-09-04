@@ -2312,12 +2312,12 @@ class TestVirtualList:
             assert sel != normal, "选中/未选中背景应区分"
 
     def test_selected_virtual_row_continuous_block(self, app):
-        """修复R22/R26：选中行渐变能带（顶亮底暗）+ 白字 + 画布圆角底。
+        """修复R22/R37：选中行统一蓝底 + 白字 + 画布圆角底。
 
-        R22 修复头部条暗缝后，R26 升级为方案A 能带：line/toggle/
-        head = sel_top（顶部受光），frame/summary = sel_bot（底部
-        背光），模拟上下渐变；文字统一 sel_text 白保可读；选中行
-        原生方形描边关闭（圆角背景/亮描边由画布图元呈现）。
+        R37 三模式样式统一：line/toggle/head/frame/summary 均为
+        sel_bot（与经典 _apply_row_bg 同色无缝，弃用 R26 渐变能
+        带）；文字统一 sel_text 白保可读；选中行原生方形描边关闭
+        （圆角背景/亮描边由画布图元呈现）。
         """
         _run_many_clusters(app)
         app.update()
@@ -2328,8 +2328,8 @@ class TestVirtualList:
         assert 1 in slots and 2 in slots
         sel = slots[1]
         for key in ("line", "toggle", "head"):
-            assert str(sel[key].cget("bg")) == p["sel_top"], \
-                f"选中行 {key} 应为顶部能带色（实际 {sel[key].cget('bg')}）"
+            assert str(sel[key].cget("bg")) == p["sel_bot"], \
+                f"选中行 {key} 应为统一行体色（实际 {sel[key].cget('bg')}）"
         for key in ("frame", "summary"):
             assert str(sel[key].cget("bg")) == p["sel_bot"], \
                 f"选中行 {key} 应为底部能带色（实际 {sel[key].cget('bg')}）"
