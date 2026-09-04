@@ -2262,6 +2262,67 @@ class TestVirtualList:
         normal = slots[2]
         assert int(normal["frame"].cget("highlightthickness")) == 0
 
+    def test_row_press_pop_animation(self, app):
+        """优化缺陷R23：点击行立体弹起（下沉→上弹+阴影→回落 240ms）。
+
+        按下：行窗口 y 坐标下沉（按压感）；释放：启动两段缓动动画
+        （上弹带阴影 → 回落），完成后阴影删除、坐标精确复位。
+        """
+        _run_many_clusters(app)
+        app.update()
+        vl = app._virtual_list
+        slots = {s["idx"]: s for s in vl.slots}
+        assert 1 in slots
+        s1 = slots[1]
+        base = 1 * vl.ROW_HEIGHT
+        vl._pop_press(s1)
+        assert vl._canvas.coords(s1["win"])[1] > base, "按下应下沉"
+        vl._pop_release(s1)
+        pop = s1.get("_pop")
+        assert pop and pop.get("shadow"), "释放应进入弹起动画（含阴影）"
+        t0 = time.time()
+        while s1.get("_pop") is not None and time.time() - t0 < 2.0:
+            app.update()
+            time.sleep(0.02)
+        assert s1.get("_pop") is None, "动画应在约 240ms 内完成并清理"
+        assert pop["shadow"] not in vl._canvas.find_all(), "阴影应删除"
+        assert vl._canvas.coords(s1["win"])[1] == base, "结束应回落原位"
+
+    def test_row_click_triggers_pop(self, app):
+        """优化缺陷R23：行点击事件驱动按压/弹起（与选中同链路）。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = app._virtual_list
+        slots = {s["idx"]: s for s in vl.slots}
+        s1 = slots[1]
+        s1["head"].event_generate("<Button-1>", x=20, y=10)
+        app.update()
+        assert s1.get("_pop") is not None, "按下应记录按压态"
+        s1["head"].event_generate("<ButtonRelease-1>", x=20, y=10)
+        app.update()
+        pop = s1.get("_pop")
+        assert pop and pop.get("shadow"), "释放应启动弹起动画"
+        t0 = time.time()
+        while s1.get("_pop") is not None and time.time() - t0 < 2.0:
+            app.update()
+            time.sleep(0.02)
+        assert s1.get("_pop") is None
+
+    def test_pop_cancel_on_slot_recycle(self, app):
+        """优化缺陷R23：槽位回收取消弹起动画（阴影清理、坐标归新位）。"""
+        _run_many_clusters(app)
+        app.update()
+        vl = app._virtual_list
+        slots = {s["idx"]: s for s in vl.slots}
+        s1 = slots[1]
+        vl._pop_press(s1)
+        vl._pop_release(s1)
+        sh = s1["_pop"]["shadow"]
+        vl._fill_slot(s1, 5, vl._region_w())      # 回收到新索引
+        assert s1.get("_pop") is None, "回收应取消动画"
+        assert sh not in vl._canvas.find_all(), "回收应删除阴影"
+        assert vl._canvas.coords(s1["win"])[1] == 5 * vl.ROW_HEIGHT
+
     def test_virtual_list_survives_theme_switch(self, app):
         """修复R6：虚拟模式下主题切换刷新配色不崩溃。"""
         _run_many_clusters(app)

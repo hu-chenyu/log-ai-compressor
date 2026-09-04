@@ -756,6 +756,10 @@ class VirtualClusterList:
         """
         if self._xsnap is not None or not self._data:
             return
+        # 优化缺陷R23：行窗口即将隐藏，取消进行中的弹起动画并
+        # 清理阴影图元（避免残留矩形悬在快照上方）
+        for _s in self._slots:
+            self._pop_cancel(_s)
         try:
             if self._canvas.winfo_width() >= self._region_w():
                 return          # 无水平滚动范围
@@ -973,6 +977,10 @@ class VirtualClusterList:
             row = self._data[idx]
         except IndexError:
             return
+        # 优化缺陷R23：槽位回收到新数据索引前清理残留弹起动画
+        # （阴影/定时器）；同 idx 刷新保留动画（坐标由动画持有）
+        if slot.get("idx") != idx:
+            self._pop_cancel(slot)
         p = app._palette()
         states = app._row_states()
         bg = (states["hover"] if idx == self._hovered else states["bg"])
@@ -1006,8 +1014,13 @@ class VirtualClusterList:
                     w.bind("<Leave>",
                            lambda e, i=idx: self._hover(i, False))
                 for w in (slot["frame"], slot["head"], slot["summary"]):
+                    # 优化缺陷R23：点击触发立体弹起（先选中着色，
+                    # 再下沉按压；释放时上弹+阴影回落）
                     w.bind("<Button-1>",
-                           lambda e, i=cidx: app._select_cluster(i))
+                           lambda e, i=cidx, s=slot:
+                           (app._select_cluster(i), self._pop_press(s)))
+                    w.bind("<ButtonRelease-1>",
+                           lambda e, s=slot: self._pop_release(s))
                 # 展开按钮独立绑定（不触发行选中）
                 slot["toggle"].bind(
                     "<Button-1>",
@@ -1030,9 +1043,13 @@ class VirtualClusterList:
                                                 self.SUMMARY_CLIP))
                 for w in (slot["frame"], slot["head"], slot["summary"],
                           slot["toggle"]):
+                    # 优化缺陷R23：实例行同款立体弹起
                     w.bind("<Button-1>",
-                           lambda e, ci=cidx, ii=iidx:
-                           app._select_instance(ci, ii))
+                           lambda e, ci=cidx, ii=iidx, s=slot:
+                           (app._select_instance(ci, ii),
+                            self._pop_press(s)))
+                    w.bind("<ButtonRelease-1>",
+                           lambda e, s=slot: self._pop_release(s))
                     w.bind("<Enter>",
                            lambda e, i=idx: self._hover(i, True))
                     w.bind("<Leave>",
@@ -1049,9 +1066,139 @@ class VirtualClusterList:
             self._canvas.itemconfigure(slot["win"], state="normal",
                                        width=width,
                                        height=self.ROW_HEIGHT)
-            self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
+            # 优化缺陷R23：弹起动画进行中坐标由动画持有（同 idx
+            # 填充刷新不打断位移，避免悬停着色刷新造成 1 帧回跳）
+            if slot.get("_pop") is None:
+                self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
         except (tk.TclError, ValueError, IndexError):
             pass
+
+    # ------------------------------------------------------------------
+    # 优化（R23）：点击行立体弹起动画 —— 下沉按压 → 上弹浮起+阴影 → 回落
+    # ------------------------------------------------------------------
+    def _pop_scale(self) -> float:
+        """弹起位移的 DPI 缩放因子（不同设备视觉幅度一致）。"""
+        return max(1.0, getattr(self._app, "_font_scale", 1.0))
+
+    def _shadow_color(self) -> str:
+        """行下阴影色：画布底色向黑混合 45%（Tk 无透明度，预混合近似）。"""
+        try:
+            base = self._canvas.cget("bg")
+            r, g, b = (int(base[i:i + 2], 16) for i in (1, 3, 5))
+            k = 0.55
+            return f"#{int(r * k):02x}{int(g * k):02x}{int(b * k):02x}"
+        except (ValueError, IndexError, tk.TclError):
+            return "#000000"
+
+    def _pop_press(self, slot: dict) -> None:
+        """按下：行整体下沉 3px（物理按压感，即时无动画）。
+
+        优化缺陷R23：仅画布 window 坐标平移（<0.1ms），不触发任何
+        重排；快照滚动/分隔条拖动中跳过（行窗口已隐藏/冻结）。
+        """
+        if self._xsnap is not None or self._dragging_splitter:
+            return
+        idx = slot.get("idx", -1)
+        if idx < 0:
+            return
+        self._pop_cancel(slot)                 # 清理上一次残留动画
+        dy = int(round(3 * self._pop_scale()))
+        try:
+            self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT + dy)
+        except tk.TclError:
+            return
+        slot["_pop"] = {"base": idx * self.ROW_HEIGHT, "dy": dy,
+                        "job": None, "shadow": None}
+
+    def _pop_release(self, slot: dict) -> None:
+        """释放：上弹 5px（阴影展开）→ 回落原位，总时长 240ms。
+
+        两段缓动（ease-out 上弹 120ms + ease-in-out 回落 120ms），
+        16ms 步进 ≈15 帧；每帧仅 coords 行窗口 + 阴影矩形（<0.5ms），
+        零重排零卡顿。阴影随浮起高度伸缩，回落结束删除。
+        """
+        pop = slot.get("_pop")
+        if pop is None:
+            return
+        import time as _time
+        try:
+            width = max(20, self._region_w())
+            shadow = self._canvas.create_rectangle(
+                0, 0, 0, 0, fill=self._shadow_color(), width=0)
+            # 阴影贴行窗口下缘（仅低于本行，可能覆盖下一行顶部 2px
+            # = 投影落在下一行上的视觉效果）
+            self._canvas.tag_lower(shadow, slot["win"])
+        except tk.TclError:
+            return
+        pop.update(t0=_time.monotonic(),
+                   start=pop["dy"],
+                   lift=int(round(5 * self._pop_scale())),
+                   shadow=shadow, width=width)
+        self._pop_step(slot)
+
+    def _pop_step(self, slot: dict) -> None:
+        """动画步进：按分段缓动应用位移/阴影，结束自动清理。"""
+        import math
+        import time as _time
+        pop = slot.get("_pop")
+        if pop is None or pop.get("shadow") is None:
+            return
+        DUR1, DUR2 = 0.12, 0.12                # 上弹 / 回落（合计 240ms）
+        el = _time.monotonic() - pop["t0"]
+        base = pop["base"]
+        if el < DUR1:                          # ease-out：start → -lift
+            x = el / DUR1
+            e = 1.0 - (1.0 - x) ** 3
+            dy = pop["start"] + (-pop["lift"] - pop["start"]) * e
+        elif el < DUR1 + DUR2:                 # ease-in-out：-lift → 0
+            x = (el - DUR1) / DUR2
+            e = 0.5 * (1.0 - math.cos(math.pi * x))
+            dy = -pop["lift"] * (1.0 - e)
+        else:                                  # 结束：复位 + 删阴影
+            self._pop_cancel(slot)
+            return
+        dy = int(round(dy))
+        pop["dy"] = dy
+        try:
+            self._canvas.coords(slot["win"], 0, base + dy)
+            if dy < 0:                         # 浮起：阴影铺满行底缝隙
+                y0 = base + self.ROW_HEIGHT + dy
+                self._canvas.coords(pop["shadow"], 6, y0,
+                                    pop["width"] - 4,
+                                    base + self.ROW_HEIGHT + 2)
+            else:                              # 下沉/回落中：阴影收起
+                self._canvas.coords(pop["shadow"], 0, 0, 0, 0)
+        except tk.TclError:
+            slot["_pop"] = None
+            return
+        try:
+            pop["job"] = self._canvas.after(16, self._pop_step, slot)
+        except tk.TclError:
+            slot["_pop"] = None
+
+    def _pop_cancel(self, slot: dict) -> None:
+        """取消动画：停表/删阴影/坐标复位（槽位回收、快照滚动前调用）。"""
+        pop = slot.pop("_pop", None)
+        if not pop:
+            return
+        job = pop.get("job")
+        if job:
+            try:
+                self._canvas.after_cancel(job)
+            except tk.TclError:
+                pass
+        shadow = pop.get("shadow")
+        if shadow:
+            try:
+                self._canvas.delete(shadow)
+            except tk.TclError:
+                pass
+        idx = slot.get("idx", -1)
+        if idx >= 0:
+            try:
+                self._canvas.coords(slot["win"], 0, idx * self.ROW_HEIGHT)
+            except tk.TclError:
+                pass
 
     def _hover(self, idx: int, hovered: bool) -> None:
         self._hovered = idx if hovered else -1
