@@ -3889,6 +3889,8 @@ class LogCompressorApp(_make_app_base()):
             if toggle is not None:
                 row["toggle"] = toggle
                 row["toggle_icon"] = toggle_icon
+            # 修复缺陷R39：全屏簇行点击立体按压绑定
+            self._bind_row_pop(row)
             if register:
                 self._cluster_rows.append(row)
             return row
@@ -3906,10 +3908,15 @@ class LogCompressorApp(_make_app_base()):
         # pady=0 制造「浮起凸起」视觉差（选中行比未选中行稍大）。
         frame.pack(fill="x", padx=5, pady=4)
         # 3D 立体效果：顶部受光高光条 + 底部投影（选中态显示，未选中隐藏）
-        _hi_bar = ctk.CTkFrame(frame, height=2, fg_color=p["sel_hi"],
-                                corner_radius=0)
-        _shadow_bar = ctk.CTkFrame(frame, height=2, fg_color=p["sel_shadow"],
-                                    corner_radius=0)
+        # 修复缺陷R39：高光/阴影条 CTkFrame → 原生 tk.Frame —— CTk 的
+        # place() 禁止 width/height 参数（抛 ValueError），原 place
+        # 调用自 R27 起一直静默失败（高光/阴影条从未显示，且中断了
+        # 后续 summary/head/toggle 选中白字设置）；原生 tk place 无
+        # 此限制（与全屏 native 行 R35 同款）
+        _hi_bar = tk.Frame(frame, bg=p["sel_hi"], bd=0,
+                           highlightthickness=0, height=self._dpx(2))
+        _shadow_bar = tk.Frame(frame, bg=p["sel_shadow"], bd=0,
+                               highlightthickness=0, height=self._dpx(2))
         if on_toggle is not None:
             # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
             link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
@@ -3988,6 +3995,8 @@ class LogCompressorApp(_make_app_base()):
         if toggle is not None:
             row["toggle"] = toggle
             row["toggle_icon"] = toggle_icon
+        # 修复缺陷R39：经典簇行点击立体按压绑定
+        self._bind_row_pop(row)
         if register:
             self._cluster_rows.append(row)
         return row
@@ -4047,6 +4056,120 @@ class LogCompressorApp(_make_app_base()):
             tk.Misc.bind(target, "<Enter>", lambda e: set_hover(True))
             tk.Misc.bind(target, "<Leave>", lambda e: set_hover(False))
 
+    # ------------------------------------------------------------------
+    # 修复缺陷R39：经典/全屏簇行点击立体感（补齐虚拟列表 R23 的
+    # 下沉按压 → 上弹浮起+投影加深 → 回落复位质感）
+    # ------------------------------------------------------------------
+    def _bind_row_pop(self, row: dict) -> None:
+        """行点击立体按压绑定（经典/全屏簇行共用）。
+
+        Tk 事件不冒泡：真实点击命中子控件，绑定递归挂到行体全部
+        控件（展开按钮 toggle/toggle_icon 除外 —— 展开不触发行
+        选中，不做行按压）。add="+" 与 _bind_row_events 的选中
+        绑定叠加（绑定顺序保证选中先执行、按压后执行）。
+        """
+        skip = set()
+        for key in ("toggle", "toggle_icon"):
+            w = row.get(key)
+            if w is not None:
+                skip.add(id(w))
+                skip.update(id(c) for c in w.winfo_children())
+        targets: list = []
+
+        def walk(w) -> None:
+            if id(w) in skip:
+                return
+            targets.append(w)
+            for c in w.winfo_children():
+                walk(c)
+
+        frame = row.get("frame")
+        if frame is None:
+            return
+        walk(frame)
+        for t in targets:
+            tk.Misc.bind(t, "<Button-1>",
+                         lambda e, r=row: self._row_pop_press(r), add="+")
+            tk.Misc.bind(t, "<ButtonRelease-1>",
+                         lambda e, r=row: self._row_pop_release(r),
+                         add="+")
+
+    def _row_pop_press(self, row: dict) -> None:
+        """按压：行下沉 + 投影收缩（选中绑定先行，行已是选中态）。
+
+        Tk 拒绝负 pady（"must be positive screen distance"），下沉
+        以 pady=(2d, 0) 实现：行体下移 2d（腔体随增，邻行被下压
+        2d —— 反成「推挤」物理感）；底部投影同时收缩。
+        pack/place_configure 不经 CTk 缩放（仅创建时 pack 缩放），
+        位移量按 _dpx 换算保持各 DPI 视觉幅度一致。
+        """
+        frame = row.get("frame")
+        if frame is None:
+            return
+        try:
+            if not frame.winfo_exists():
+                return
+            frame.pack_configure(pady=(self._dpx(2), 0))
+            bar = row.get("_shadow_bar")
+            # 注意：place 后 winfo_ismapped 需等空闲几何排布才变 1，
+            # 同一事件流内不可靠 —— 用 place_info（同步反映托管态）
+            if bar is not None and bar.place_info():
+                bar.place_configure(height=self._dpx(1))
+            # 代次递增：中止进行中的释放动画
+            row["_pop_gen"] = row.get("_pop_gen", 0) + 1
+        except (tk.TclError, ValueError):
+            pass
+
+    def _row_pop_release(self, row: dict) -> None:
+        """释放：行体回弹归位 + 投影加深→回落（~140ms 弹簧感）。
+
+        位置回 0 的同时投影瞬间加深（视觉上浮起到最高点），随后
+        投影两帧回落常态 —— 位置+光影组合出上弹弹簧感（Tk 不允
+        许负 pady，无法画出超越原位的上抬位移，以光影补偿）。
+        代次守卫 —— 动画进行中再次按压/行被重建/行被取消选中
+        （border 变回 1）即中止，不复位错误状态。
+        """
+        frame = row.get("frame")
+        if frame is None:
+            return
+        gen = row.get("_pop_gen", 0) + 1
+        row["_pop_gen"] = gen
+
+        def _selected() -> bool:
+            try:
+                return int(str(frame.cget("border_width"))) == 4
+            except (tk.TclError, ValueError):
+                return False
+
+        def step(i: int) -> None:
+            if row.get("_pop_gen") != gen:
+                return
+            try:
+                if not frame.winfo_exists() or not _selected():
+                    return
+                bar = row.get("_shadow_bar")
+                # place_info 同步反映托管态（ismapped 事件流内不可靠）
+                mapped = bar is not None and bar.place_info()
+                if i == 0:
+                    # 回弹归位 + 投影加深（浮起到最高点的光影）
+                    frame.pack_configure(pady=0)
+                    if mapped:
+                        bar.place_configure(height=self._dpx(4))
+                    self.after(70, lambda: step(1))
+                elif i == 1:
+                    # 投影回落中间档
+                    if mapped:
+                        bar.place_configure(height=self._dpx(3))
+                    self.after(70, lambda: step(2))
+                else:
+                    # 投影恢复常态，动画结束
+                    if mapped:
+                        bar.place_configure(height=self._dpx(2))
+            except (tk.TclError, ValueError):
+                pass
+
+        step(0)
+
     def _apply_row_bg(self, idx: int, color) -> None:
         """统一更新行背景（经典 CTk 行 / 虚拟池化行都支持）。
 
@@ -4104,14 +4227,16 @@ class LogCompressorApp(_make_app_base()):
                         # 修复缺陷R29/R33：高光/阴影条两端内缩 24px
                         # （圆角半径 18 + 6 余量），方角端头不压圆角
                         # 切角区、不与圆角描边重合
+                        # 修复缺陷R39：tk place 为物理px，按 _dpx 换算
                         try:
+                            _bi = self._dpx(_ROW_BAR_INSET)
                             row["_hi_bar"].place(
-                                x=_ROW_BAR_INSET, y=0, relwidth=1,
-                                width=-2 * _ROW_BAR_INSET, height=2)
+                                x=_bi, y=0, relwidth=1,
+                                width=-2 * _bi, height=self._dpx(2))
                             row["_shadow_bar"].place(
-                                x=_ROW_BAR_INSET, rely=1.0, relwidth=1,
-                                width=-2 * _ROW_BAR_INSET,
-                                height=2, anchor="sw")
+                                x=_bi, rely=1.0, relwidth=1,
+                                width=-2 * _bi,
+                                height=self._dpx(2), anchor="sw")
                         except (tk.TclError, KeyError):
                             pass
                         row["summary"].configure(
