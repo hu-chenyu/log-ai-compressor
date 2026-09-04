@@ -370,6 +370,15 @@ class TestClusterListWrap:
         for key in ("head", "summary"):
             assert str(normal[key].cget("fg_color")) == p["row_bg"]
         assert str(normal["divider"].cget("bg")) == p["row_border"]
+        # 修复缺陷R31：未选中行创建即带可见圆角 —— 圆角 12px +
+        # 1px 细边框（原创建时 border_width=0 且底色对比极低，
+        # 圆角存在但肉眼不可见）
+        assert normal["frame"].cget("corner_radius") == 12, \
+            "未选中行应为 12px 圆角"
+        assert normal["frame"].cget("border_width") == 1, \
+            "未选中行创建即应有 1px 细边框"
+        assert str(normal["frame"].cget("border_color")) == \
+            p["row_border"]
 
     def test_hover_highlight(self, app):
         _run_paste_analysis(app, LONG_SUMMARY_LOG)

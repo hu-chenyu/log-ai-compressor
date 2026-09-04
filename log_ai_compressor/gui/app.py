@@ -3701,8 +3701,14 @@ class LogCompressorApp(_make_app_base()):
                 self._cluster_rows.append(row)
             return row
         # 修复缺陷R2：行距/内边距加大（大字体下行高充足不拥挤）
-        frame = ctk.CTkFrame(parent, corner_radius=10,
-                             fg_color=p["row_bg"])
+        # 修复缺陷R31：未选中行也要可见圆角 —— 创建即带 1px 细边框
+        # （原仅 _apply_row_bg 后才有，未选中行 border_width=0 且行
+        # 底色与列表底色对比极低，圆角存在但肉眼不可见）；圆角半径
+        # 12px（选中 24 药丸形 / 未选中 12 小圆角，风格统一有区分）
+        frame = ctk.CTkFrame(parent, corner_radius=12,
+                             fg_color=p["row_bg"],
+                             border_width=1,
+                             border_color=p["row_border"])
         # 修复缺陷R27：未选中 pady=4，选中态由 _apply_row_bg 收紧为
         # pady=0 制造「浮起凸起」视觉差（选中行比未选中行稍大）。
         frame.pack(fill="x", padx=5, pady=4)
@@ -3895,8 +3901,9 @@ class LogCompressorApp(_make_app_base()):
                             row["toggle"].configure(
                                 text_color=p["sel_text"])
                     else:
+                        # 修复缺陷R31：未选中圆角半径 12（原为 10）
                         row["frame"].configure(
-                            fg_color=color, corner_radius=10,
+                            fg_color=color, corner_radius=12,
                             border_width=1,
                             border_color=p["row_border"])
                         # 未选中恢复默认 pady
