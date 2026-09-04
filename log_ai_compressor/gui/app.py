@@ -4,7 +4,7 @@
 交互结构
 --------
 - 顶部 Tab：「文件导入」（主力）/「文本粘贴」（快捷）/「多文件对比」；
-- 配置区：级别勾选（默认 ERROR+FAIL）、包含/排除关键字、Top N、解析规则；
+- 配置区：级别勾选（默认 ERROR+FAIL）、解析规则；
 - 进度区：实时行数 / 速率 / 错误种类数 + 进度条 + 取消按钮；
 - 结果区：左侧错误分类列表（图标+次数+摘要+优先级），右侧完整
   堆栈与上下文详情（关键字自动高亮、业务栈帧高亮）；
@@ -27,11 +27,8 @@ import customtkinter as ctk
 
 from log_ai_compressor import __version__
 from log_ai_compressor.constants import (
-    DEFAULT_CONTEXT_LINES,
     DEFAULT_SELECTED_LEVELS,
-    DEFAULT_TOP_N,
     HUMAN_NAME,
-    MIN_CONTEXT_LINES,
 )
 from log_ai_compressor.core.analysis import simplify_stack
 from log_ai_compressor.core.comparator import CompareResult, compare_files
@@ -1959,36 +1956,9 @@ class LogCompressorApp(_make_app_base()):
             self._level_tooltips[level] = Tooltip(
                 info, lambda lv=level: _LEVEL_HELP[lv])
 
-        self._include_entry = ctk.CTkEntry(panel, width=200,
-                                           placeholder_text="包含关键字（逗号分隔）")
-        self._include_entry.grid(row=1, column=0, columnspan=2, padx=(12, 6),
-                                 pady=(4, 6), sticky="ew")
-        self._exclude_entry = ctk.CTkEntry(panel, width=200,
-                                           placeholder_text="排除关键字（逗号分隔）")
-        self._exclude_entry.grid(row=1, column=2, columnspan=2, padx=6,
-                                 pady=(4, 6), sticky="ew")
-        ctk.CTkLabel(panel, text="Top N").grid(row=1, column=4, padx=(6, 2),
-                                               sticky="e")
-        self._topn_entry = ctk.CTkEntry(panel, width=60)
-        self._topn_entry.insert(0, str(DEFAULT_TOP_N))
-        self._topn_entry.grid(row=1, column=5, padx=(2, 12), pady=(4, 6),
-                              sticky="w")
-
-        # 修复缺陷#5：上下文行数可调节输入框（≥5 不限上限，默认 50）
-        ctk.CTkLabel(panel, text="上下文行数").grid(
-            row=2, column=0, padx=(12, 2), pady=(0, 6), sticky="e")
-        self._ctx_entry = ctk.CTkEntry(panel, width=60)
-        self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
-        self._ctx_entry.grid(row=2, column=1, padx=(2, 6), pady=(0, 6),
-                             sticky="w")
-        # 修复缺陷R11：字体大小选择器移至错误列表标题栏后，提示文字
-        # 扩展跨列填充原空白（col 2~5，不留大块空隙）
-        # 修复缺陷R20：提示文案同步「不限上限」
-        ctx_hint = ctk.CTkLabel(
-            panel, text="典型样例前后各保留的上下文行数（≥5，不限上限）")
-        ctx_hint.grid(row=2, column=2, columnspan=4, padx=(2, 12),
-                      pady=(0, 6), sticky="w")
-        self._muted_labels.append(ctx_hint)
+        # 优化缺陷R43：过滤输入区整体删除（用户决策：包含/排除
+        # 关键字、上下文行数、Top N 全部从 GUI 移除；分析固定
+        # 使用管线默认值 —— 无关键字过滤、上下文 50 行、全量簇）
 
         # 修复缺陷R10：级别复选框容器跨列 1~6，解析规则右移至列 7~9
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=7, padx=(6, 2),
@@ -3095,17 +3065,8 @@ class LogCompressorApp(_make_app_base()):
         levels = list(cfg.get("levels") or DEFAULT_SELECTED_LEVELS)
         for level, var in self._level_vars.items():
             var.set(level in levels)
-        if cfg.get("include"):
-            self._include_entry.insert(0, ",".join(cfg["include"]))
-        if cfg.get("exclude"):
-            self._exclude_entry.insert(0, ",".join(cfg["exclude"]))
-        if isinstance(cfg.get("top_n"), int):
-            self._topn_entry.delete(0, "end")
-            self._topn_entry.insert(0, str(cfg["top_n"]))
-        # 修复缺陷#5：恢复上次设置的上下文行数
-        if isinstance(cfg.get("context_lines"), int):
-            self._ctx_entry.delete(0, "end")
-            self._ctx_entry.insert(0, str(cfg["context_lines"]))
+        # 优化缺陷R43：旧配置中的 include/exclude/top_n/context_lines
+        # 键静默忽略（过滤输入区已整体删除）
         if cfg.get("rule") in RULE_NAMES:
             self._rule_menu.set(cfg["rule"])
         # 修复缺陷R10：字体大小档位恢复（__init__ 已按档位建字体，
@@ -3122,10 +3083,6 @@ class LogCompressorApp(_make_app_base()):
     def _current_config_dict(self) -> dict:
         return {
             "levels": [lv for lv, var in self._level_vars.items() if var.get()],
-            "include": self._split_keywords(self._include_entry.get()),
-            "exclude": self._split_keywords(self._exclude_entry.get()),
-            "top_n": self._current_top_n(),
-            "context_lines": self._current_context_lines(),
             "rule": self._rule_menu.get(),
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
@@ -3144,30 +3101,6 @@ class LogCompressorApp(_make_app_base()):
     def _save_config(self) -> None:
         self._config = self._current_config_dict()
         self._store.save(self._config)
-
-    @staticmethod
-    def _split_keywords(raw: str) -> List[str]:
-        return [k.strip() for k in raw.split(",") if k and k.strip()] if raw else []
-
-    def _current_top_n(self) -> int:
-        try:
-            return max(1, int(self._topn_entry.get() or DEFAULT_TOP_N))
-        except ValueError:
-            return DEFAULT_TOP_N
-
-    def _current_context_lines(self) -> int:
-        """读取上下文行数（非法输入回退默认；下限 5，无上限）。
-
-        修复缺陷R20：放开 200 上限（用户决策：数字可填任意大）。
-        上限保留下限防 0/负值；过大值的内存代价随「上下文行数
-        ×簇数」线性增长，由用户按需控制。Top N 同理无上限
-        （_current_top_n 本就 max(1, ...)）。
-        """
-        try:
-            value = int(self._ctx_entry.get() or DEFAULT_CONTEXT_LINES)
-        except ValueError:
-            return DEFAULT_CONTEXT_LINES
-        return max(MIN_CONTEXT_LINES, value)
 
     def _on_rule_changed(self, choice: str) -> None:
         """解析规则切换：状态栏即时展示该规则的适用场景说明。
@@ -3607,10 +3540,6 @@ class LogCompressorApp(_make_app_base()):
         # 全部 UI 状态必须在主线程采集（Tk 控件禁止跨线程访问）
         payload["common"] = dict(
             levels=[lv for lv, var in self._level_vars.items() if var.get()],
-            include=self._split_keywords(self._include_entry.get()),
-            exclude=self._split_keywords(self._exclude_entry.get()),
-            top_n=self._current_top_n(),
-            context_lines=self._current_context_lines(),
             rule=self._rule_menu.get(),
         )
         if mode == "文件导入":
@@ -3773,16 +3702,16 @@ class LogCompressorApp(_make_app_base()):
         self._cluster_rows = []
 
     def _render_cluster_list(self) -> None:
-        """左侧错误列表：Top N 行（图标/优先级/次数行 + 单行摘要）。
+        """左侧错误列表：全部错误行（图标/优先级/次数行 + 单行摘要）。
 
         修复缺陷：原单行 CTkButton 长文本溢出右侧且无横向滚动能力，
         R9 起摘要单行不换行 + 底部水平滚动条左右滑动查看完整内容。
         修复缺陷R6：行数超过 VIRTUAL_LIST_THRESHOLD 切换虚拟滚动
         （池化复用可见区行控件，列表长度不再影响渲染耗时）。
+        优化缺陷R43：Top N 截断删除（全量簇显示，不再「其余 N 种」提示）。
         """
         assert self._result is not None
-        n = self._current_top_n()
-        self._displayed = self._result.clusters[:n]
+        self._displayed = list(self._result.clusters)
         self._clear_list()
         # 清理随列表销毁的动态 muted 标签（防登记表无限累积）
         self._muted_labels = [
@@ -3824,14 +3753,6 @@ class LogCompressorApp(_make_app_base()):
             self._make_cluster_row(self._cluster_list, idx, cluster,
                                    on_toggle=lambda i=idx:
                                    self._toggle_cluster_expand(i))
-        total = len(self._result.clusters)
-        if total > n:
-            more = ctk.CTkLabel(
-                self._cluster_list,
-                text=f"…… 其余 {total - n} 种错误可通过调大 Top N 查看",
-                font=self._font_hint)
-            more.pack(pady=6)
-            self._muted_labels.append(more)
 
     def _make_cluster_row(self, parent, idx: int, cluster: ErrorCluster,
                           register: bool = True,
@@ -4627,10 +4548,13 @@ class LogCompressorApp(_make_app_base()):
         self._highlight_keywords(box)
 
     def _highlight_keywords(self, box: ctk.CTkTextbox) -> None:
-        """关键字自动高亮（包含关键字 + 常见错误特征词）。"""
+        """关键字自动高亮（常见错误特征词）。
+
+        优化缺陷R43：包含关键字输入框已删除，高亮词表固定为
+        内置错误特征词（_KW_DEFAULT）。
+        """
         text = box.get("1.0", "end")
-        keywords = set(self._split_keywords(self._include_entry.get()))
-        keywords.update(_KW_DEFAULT)
+        keywords = set(_KW_DEFAULT)
         for kw in keywords:
             if not kw:
                 continue
@@ -4796,7 +4720,8 @@ class LogCompressorApp(_make_app_base()):
             return
         try:
             if self._result is not None:
-                top_n = self._current_top_n()
+                # 优化缺陷R43：Top N 删除 —— 导出/摘要含全部错误种类
+                top_n = len(self._result.clusters)
                 if path.lower().endswith(".json"):
                     content = to_json(self._result, top_n=top_n)
                 elif path.lower().endswith(".txt"):
@@ -4814,7 +4739,8 @@ class LogCompressorApp(_make_app_base()):
     def _on_copy_summary(self) -> None:
         if self._result is None:
             return
-        summary = brief_summary(self._result, top_n=self._current_top_n())
+        summary = brief_summary(self._result,
+                                top_n=len(self._result.clusters))
         self.clipboard_clear()
         self.clipboard_append(summary)
         self._status_label.configure(
@@ -4920,8 +4846,8 @@ class LogCompressorApp(_make_app_base()):
             except tk.TclError:
                 pass
             # 数据未变则跳过重渲染（复用已有行控件）
-            sig = (id(self._result), len(self._displayed),
-                   self._current_top_n())
+            # 优化缺陷R43：签名去掉 top_n 维度（Top N 功能已删除）
+            sig = (id(self._result), len(self._displayed))
             if sig != self._fs_list_sig and callable(self._fs_list_refresh):
                 self._fs_list_refresh()
                 self._fs_list_sig = sig
@@ -5019,8 +4945,7 @@ class LogCompressorApp(_make_app_base()):
         search_var.trace_add("write", lambda *a: render(search_var.get()))
         # 修复缺陷R6：登记刷新回调 + 数据签名（数据未变时跳过重渲染）
         self._fs_list_refresh = render
-        self._fs_list_sig = (id(self._result), len(self._displayed),
-                             self._current_top_n())
+        self._fs_list_sig = (id(self._result), len(self._displayed))
         # 首批异步渲染：回调即刻返回（<300ms 交互不卡，同 R6 语义），
         # 窗口 deiconify 后 1ms 填充数据行
         win.after(1, render)
