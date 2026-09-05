@@ -240,6 +240,12 @@ class TestTextAndBrief:
         # 简要摘要应显著短于完整报告（压缩比）
         assert len(brief) < len(to_markdown(result)) / 2
 
+    def test_brief_has_line_ranges(self, result):
+        """优化缺陷R62：摘要每条附行号范围（行 x~y），便于 AI 定位。"""
+        brief = brief_summary(result, top_n=5)
+        first = result.clusters[0]
+        assert f"行 {first.first_line}~{first.last_line}" in brief
+
 
 # ---------------------------------------------------------------------------
 # 修复缺陷R59：方括号 ISO 时间戳日志的端到端解析与导出

@@ -250,6 +250,9 @@ def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
             tags.append("根因")
         if c.anomaly:
             tags.append(_anomaly_label(c))
+        # 优化缺陷R62：摘要附行号范围 —— 粘贴投喂 AI 后对方可直接
+        # 定位原文位置（用户决策，低成本高价值）
+        tags.append(f"行 {c.first_line}~{c.last_line}")
         out.append(f"{i}. [{' | '.join(tags)}] {c.summary}")
         if c.is_root_cause:
             out.append(f"   -> {c.root_cause_reason}")
