@@ -132,6 +132,24 @@ class TestJson:
         for key in ("line_no", "last_line_no", "timestamp", "summary"):
             assert key in inst
 
+    def test_lean_mode(self, result):
+        """修复缺陷R61：full=False 精简输出 —— 无上下文/堆栈/样例
+        原文，仅核心字段 + 实例行号列表，体积大幅缩小。"""
+        lean = to_json(result, full=False)
+        payload = json.loads(lean)
+        first = payload["clusters"][0]
+        assert "sample" not in first, "精简模式不得含样例原文"
+        assert "instances" not in first, "精简模式以 instance_lines 替代"
+        assert first["instance_lines"], "精简模式应含实例行号列表"
+        for key in ("id", "level", "summary", "count", "priority_label",
+                    "first_line", "last_line", "first_seen"):
+            assert key in first
+        assert "context_before" not in lean, "精简模式不得含上下文"
+        full_text = to_json(result)
+        assert len(lean) < len(full_text) / 2, "精简体积应显著小于完整版"
+        # 默认（不参）保持完整结构（向后兼容）
+        assert "sample" in json.loads(full_text)["clusters"][0]
+
 
 # ---------------------------------------------------------------------------
 # HTML 报告（优化缺陷R58）

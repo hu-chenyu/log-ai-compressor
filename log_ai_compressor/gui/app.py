@@ -5446,6 +5446,14 @@ class LogCompressorApp(_make_app_base()):
             ctk.CTkCheckBox(sec_box, text=label, variable=var,
                             checkbox_width=18, checkbox_height=18).grid(
                 row=i // 2, column=i % 2, padx=(0, 18), pady=3, sticky="w")
+        # 修复缺陷R61：JSON 默认精简（核心字段+实例行号，人可通读）；
+        # 完整上下文/堆栈为显式勾选（体积 >10 倍，供脚本二次处理）
+        self._export_json_full_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            dlg, text="JSON 含完整上下文与堆栈（体积大，供脚本处理）",
+            variable=self._export_json_full_var,
+            checkbox_width=18, checkbox_height=18).pack(
+            anchor="w", padx=16, pady=(6, 0))
 
         btn_box = ctk.CTkFrame(dlg, fg_color="transparent")
         btn_box.pack(fill="x", padx=16, pady=(14, 14))
@@ -5467,6 +5475,7 @@ class LogCompressorApp(_make_app_base()):
             return
         sections = {k for k, _ in self._EXPORT_SECTIONS
                     if self._export_sec_vars[k].get()}
+        json_full = self._export_json_full_var.get()
         dlg = getattr(self, "_export_dlg", None)
         if dlg is not None and dlg.winfo_exists():
             dlg.destroy()
@@ -5479,7 +5488,8 @@ class LogCompressorApp(_make_app_base()):
         if not path:
             return
         try:
-            written = self._export_with_options(path, formats, sections)
+            written = self._export_with_options(path, formats, sections,
+                                                json_full=json_full)
         except OSError as exc:
             messagebox.showerror("导出失败", str(exc))
             return
@@ -5496,12 +5506,15 @@ class LogCompressorApp(_make_app_base()):
             except (AttributeError, OSError):
                 pass
 
-    def _export_with_options(self, path: str, formats, sections) -> list:
+    def _export_with_options(self, path: str, formats, sections,
+                             json_full: bool = False) -> list:
         """多格式导出执行器（优化缺陷R58；无对话框，可测试）。
 
         范围跟随当前级别过滤勾选：按导出时刻的级别复选框实时过滤
         簇（分析后改勾选不重新分析也能导出所见范围）；同一基础名
         按格式各写一份文件，返回写出的路径列表。
+        修复缺陷R61：json_full=False 时 JSON 精简输出（核心字段 +
+        实例行号），True 时含完整上下文/堆栈（供脚本二次处理）。
         """
         base, _ext = os.path.splitext(path)
         active = {lv for lv, var in self._level_vars.items() if var.get()}
@@ -5513,7 +5526,8 @@ class LogCompressorApp(_make_app_base()):
                                               sections=sections)),
             "md": (".md", lambda: to_markdown(view, top_n=full,
                                               sections=sections)),
-            "json": (".json", lambda: to_json(view, top_n=full)),
+            "json": (".json", lambda: to_json(view, top_n=full,
+                                              full=json_full)),
             "txt": (".txt", lambda: to_text(view, top_n=full,
                                             sections=sections)),
         }
