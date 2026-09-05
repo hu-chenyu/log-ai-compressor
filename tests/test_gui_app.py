@@ -3134,42 +3134,67 @@ class TestMainWindowSearch:
         app.update()
         assert app._search_count_box.cget("fg_color") == "transparent"
 
-    def test_level_checkboxes_compact_width(self, app):
-        """修复缺陷R73：复选框紧凑宽（100→68），DEBUG 不越分隔条。
+    def test_level_filter_even_gaps_and_alignment(self, app):
+        """修复缺陷R74：可视区间完全相等 + DEBUG 文本右缘对齐全屏按钮右缘。
 
-        CTkCheckBox 默认 width=100 固定值（不随文本自适应），五个
-        复选框各空耗约 32px，DEBUG 右缘越过分隔条竖线；紧凑化后
-        组体整体左移、文本不裁切、各项间距仍严格相同。
+        复选框按各自文本实测宽紧凑定宽（尾部余量一致）；四个可视
+        区间（文本右缘到下一个ⓘ左缘）统一增减保持完全相等；DEBUG
+        的 G 右缘精确对齐左列「⛶ 全屏」按钮右缘，分隔条拖动后
+        自动重同步。
         """
         app.geometry("2560x1475")
         app.update()
         panel = app._ctx_entry.master
         level_box = panel.grid_slaves(row=0, column=1)[0]
         children = level_box.winfo_children()
-        cbs = [w for w in children
-               if hasattr(w, "_text_label") and w._text_label is not None]
-        assert len(cbs) == 5
+        infos, cbs = children[0::2], children[1::2]
+        assert len(infos) == 5 and len(cbs) == 5
+
+        def visual_gaps():
+            out = []
+            for i in range(4):
+                tl = cbs[i]._text_label
+                text_right = (cbs[i].winfo_x() + tl.winfo_x()
+                              + tl.winfo_reqwidth())
+                out.append(infos[i + 1].winfo_x() - text_right)
+            return out
+
+        def debug_text_right():
+            tl = cbs[-1]._text_label
+            return (level_box.winfo_x() + cbs[-1].winfo_x()
+                    + tl.winfo_x() + tl.winfo_reqwidth())
+
+        def target_x():
+            return (app._list_ctrl_box.winfo_x()
+                    + app._list_ctrl_box.winfo_width())
+
+        # 文本无裁切
         for cb in cbs:
-            assert cb.cget("width") == 68, "复选框应按文本紧凑定宽"
             tl = cb._text_label
             assert tl.winfo_x() + tl.winfo_reqwidth() <= \
                 cb.winfo_width() + 2, f"{cb.cget('text')} 文本不得裁切"
-        # 间距仍相同：相邻（复选框→下一个ⓘ）间隔一致
-        gaps = []
-        for i in range(0, len(children) - 2, 2):
-            cur_cb, next_info = children[i + 1], children[i + 2]
-            gaps.append(next_info.winfo_x()
-                        - (cur_cb.winfo_x() + cur_cb.winfo_width()))
+        # 可视区间完全相等
+        gaps = visual_gaps()
         assert max(gaps) - min(gaps) <= 2, \
-            f"复选框间距应保持相同（实测 {gaps}）"
-        # 用户实际分隔条比例（0.4929）下 DEBUG 右缘不越分隔条左缘
-        app._splitter_ratio = 0.4928571428571429
+            f"可视区间应完全相等（实测 {gaps}）"
+        # DEBUG 文本右缘 == 全屏按钮右缘（整数 padx 取整残差 ≤4px）
+        assert abs(debug_text_right() - target_x()) <= 4, \
+            f"应对齐全屏按钮右缘（{debug_text_right()} vs {target_x()}）"
+        # 分隔条移动后重同步：仍对齐且区间仍相等
+        app._splitter_ratio = 0.62
         app._layout_splitter()
         app.update()
-        debug_right = (level_box.winfo_x() + cbs[-1].winfo_x()
-                       + cbs[-1].winfo_width())
-        assert debug_right <= app._splitter.winfo_x() + 2, \
-            "DEBUG 右缘不得越过分隔条竖线"
+        assert abs(debug_text_right() - target_x()) <= 4, \
+            f"分隔条移动后应重同步对齐（{debug_text_right()} vs {target_x()}）"
+        gaps2 = visual_gaps()
+        assert max(gaps2) - min(gaps2) <= 2, \
+            f"分隔条移动后区间仍应相等（实测 {gaps2}）"
+        # 拖到极左（目标线左于组体自然宽）：padx 触底不崩溃
+        app._splitter_ratio = 0.05
+        app._layout_splitter()
+        app.update()
+        pads = [int(cb.grid_info()["padx"][1]) for cb in cbs[:4]]
+        assert pads == [0, 0, 0, 0], "目标线过左时间距 padx 应触底 0"
 
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
