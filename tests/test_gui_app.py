@@ -2888,6 +2888,9 @@ class TestMainWindowSearch:
         info = app._search_entry.master.grid_info()
         assert str(info["row"]) == "0", "搜索框应与级别过滤同行"
         assert str(info["column"]) == "3", "搜索框应在复选框右侧空白区"
+        # 优化缺陷R50：搜索输入框与上下文行数输入框同宽（60）
+        assert app._search_entry.cget("width") == \
+            app._ctx_entry.cget("width") == 60
 
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
@@ -2901,7 +2904,8 @@ class TestMainWindowSearch:
         assert len(app._cluster_rows) == 1
         row = app._cluster_rows[0]
         assert "kernel" in app._displayed[row["idx"]].summary
-        assert app._search_count.cget("text") == "1 / 2 条"
+        # 优化缺陷R50：输入后未导航，计数为 0/匹配数（kernel 仅 1 簇命中）
+        assert app._search_count.cget("text") == "0 / 1 条"
 
     def test_search_clear_restores_all(self, app):
         """清空关键字 → 全部簇恢复显示，计数标签隐藏。"""
@@ -2967,8 +2971,7 @@ class TestMainWindowSearch:
         # 展开状态保留（命中过滤的展开簇其实例行仍在视图中）
         assert kidx in app._expanded_clusters
         assert any(r[0] == "i" and r[1] == kidx for r in vl._data)
-        assert app._search_count.cget("text") == \
-            f"{expected} / {len(app._displayed)} 条"
+        assert app._search_count.cget("text") == f"0 / {expected} 条"
 
     def test_search_debounce_schedules_job(self, app):
         """输入经 trace 调度防抖任务（200ms 合并连续输入）。"""
@@ -2983,31 +2986,44 @@ class TestMainWindowSearch:
     # 优化缺陷R46：Enter 跳下一个匹配 + 详情关键字照亮
     # ------------------------------------------------------------------
     def test_enter_jumps_to_next_match(self, app):
-        """Enter 在匹配簇间循环跳转（到尾回绕到首）。"""
+        """Enter 定位下一个匹配（1/y→2/y→回绕 1/y），计数同步。"""
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
         app._search_var.set("error")     # 级别 ERROR，两簇均命中
         app._apply_search_filter()
         app.update()
-        assert app._selected_row == 0    # 分析后自动选中首个可见簇
+        assert app._search_count.cget("text") == "0 / 2 条", \
+            "输入后未导航应为 0/y"
         app._on_search_enter(True)
         app.update()
-        assert app._selected_row == 1, "Enter 应跳到下一个匹配簇"
+        assert app._selected_row == 0
+        assert app._search_count.cget("text") == "1 / 2 条", \
+            "首次 Enter 定位第 1 个匹配"
         app._on_search_enter(True)
         app.update()
-        assert app._selected_row == 0, "到尾后应回绕到首个匹配"
+        assert app._selected_row == 1
+        assert app._search_count.cget("text") == "2 / 2 条"
+        app._on_search_enter(True)
+        app.update()
+        assert app._selected_row == 0
+        assert app._search_count.cget("text") == "1 / 2 条", \
+            "到 y/y 后再按回绕到 1/y"
 
     def test_shift_enter_jumps_back(self, app):
-        """Shift+Enter 反向跳转（从首个回绕到末尾）。"""
+        """Shift+Enter 反向定位（0/y 直接到 y/y）。"""
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
         app._search_var.set("error")
         app._apply_search_filter()
         app.update()
-        assert app._selected_row == 0
         app._on_search_enter(False)
         app.update()
-        assert app._selected_row == 1, "Shift+Enter 应反向回绕到末尾匹配"
+        assert app._selected_row == 1, "Shift+Enter 应反向定位到末尾匹配"
+        assert app._search_count.cget("text") == "2 / 2 条"
+        app._on_search_enter(False)
+        app.update()
+        assert app._selected_row == 0
+        assert app._search_count.cget("text") == "1 / 2 条"
 
     def test_enter_flushes_pending_debounce(self, app):
         """Enter 先冲刷挂起的防抖过滤再跳转（关键字立即生效）。"""
@@ -3061,11 +3077,35 @@ class TestMainWindowSearch:
         matches = [i for i, c in enumerate(app._displayed)
                    if "signal lost" in c.summary]
         assert len(matches) >= 2
-        app._select_cluster(matches[0])
+        # 模拟真实点击（sync_nav=True）：导航序号同步到第 1 个匹配
+        app._select_cluster(matches[0], sync_nav=True)
         app.update()
+        assert app._search_nav == 1
         app._on_search_enter(True)
         app.update()
         assert app._selected_row == matches[1]
+        assert app._search_nav == 2
+
+    def test_click_row_syncs_nav_index(self, app):
+        """优化缺陷R50：鼠标点选匹配簇 → 导航序号同步（计数 x/y）。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("error")     # 两簇均命中
+        app._apply_search_filter()
+        app.update()
+        assert app._search_count.cget("text") == "0 / 2 条"
+        # 点选第 2 个匹配簇（经典行）
+        row = next(r for r in app._cluster_rows if r.get("idx") == 1)
+        row["summary"].event_generate("<Button-1>", x=3, y=2)
+        app.update()
+        assert app._selected_row == 1
+        assert app._search_count.cget("text") == "2 / 2 条", \
+            "点选第 2 个匹配计数应为 2/y"
+        # 点选回第 1 个
+        row0 = next(r for r in app._cluster_rows if r.get("idx") == 0)
+        row0["summary"].event_generate("<Button-1>", x=3, y=2)
+        app.update()
+        assert app._search_count.cget("text") == "1 / 2 条"
 
     def test_filtered_out_selection_auto_moves_to_first_match(self, app):
         """当前选中簇被过滤掉时自动选中首个匹配簇（详情不滞留陈旧内容）。"""

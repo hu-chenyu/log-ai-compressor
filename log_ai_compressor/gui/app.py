@@ -1194,7 +1194,8 @@ class VirtualClusterList:
                     # 再下沉按压；释放时上弹+阴影回落）
                     w.bind("<Button-1>",
                            lambda e, i=cidx, s=slot:
-                           (app._select_cluster(i), self._pop_press(s)))
+                           (app._select_cluster(i, sync_nav=True),
+                            self._pop_press(s)))
                     w.bind("<ButtonRelease-1>",
                            lambda e, s=slot: self._pop_release(s))
                 # 展开按钮独立绑定（不触发行选中）
@@ -1662,6 +1663,8 @@ class LogCompressorApp(_make_app_base()):
         # 优化缺陷R45：主窗口结果搜索（显示层过滤，不触发重新分析）
         self._search_kw = ""
         self._search_job = None                 # 输入防抖 after 句柄
+        # 优化缺陷R50：查找导航序号（0=未导航，1..y=定位到第几个匹配）
+        self._search_nav = 0
 
         # 修复缺陷R1：主题调色板登记表（切换时按角色批量刷新）
         self._bg_widgets: List[tuple] = []       # (控件, "window"/"card"/"header")
@@ -1998,10 +2001,10 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkLabel(search_box, text="搜索").grid(row=0, column=0,
                                                    padx=(0, 4))
         self._search_var = tk.StringVar()
-        # 优化缺陷R49：输入框请求宽 80→40（右侧恒定占位的计数影子
-        # 框腾需求）；sticky=ew 下视觉宽度由弹性列分配决定
+        # 优化缺陷R50：输入框请求宽与上下文行数输入框一致（60）——
+        # 此前过窄视觉太小；sticky=ew 下列分配再略作拉伸
         self._search_entry = ctk.CTkEntry(
-            search_box, textvariable=self._search_var, width=40,
+            search_box, textvariable=self._search_var, width=60,
             placeholder_text="按摘要 / 模块 / 级别过滤列表…")
         self._search_entry.grid(row=0, column=1, sticky="ew")
         # 优化缺陷R49：计数影子显示框 —— 输入框右侧独立圆角框，
@@ -3848,6 +3851,8 @@ class LogCompressorApp(_make_app_base()):
                 pass
         self._search_job = None
         self._search_kw = self._search_var.get().strip().lower()
+        # 优化缺陷R50：关键字变化重置查找导航（计数回到 0/y 未定位态）
+        self._search_nav = 0
         if self._result is None:
             self._update_search_count()
             return
@@ -3867,11 +3872,13 @@ class LogCompressorApp(_make_app_base()):
             self._select_cluster(matches[0])
 
     def _on_search_enter(self, forward: bool = True):
-        """搜索框 Enter（Shift+Enter 反向）：选中下/上一个匹配簇。
+        """搜索框 Enter（Shift+Enter 反向）：定位下/上一个匹配簇。
 
-        优化缺陷R46：先冲刷挂起的防抖过滤（关键字立即生效），再在
-        匹配簇序列中循环定位（越过当前选中，到尾/首后回绕），并把
-        目标行滚动进视口。
+        优化缺陷R46：先冲刷挂起的防抖过滤（关键字立即生效），目标
+        行滚动进视口。
+        优化缺陷R50：1-based 导航序号 —— 输入后 0/y（未定位）；
+        Enter 1/y→2/y→…→y/y→回绕 1/y；Shift+Enter 反向
+        （0/y 或 1/y 时反向到 y/y）。
         """
         if self._search_job is not None:
             self._apply_search_filter()
@@ -3881,15 +3888,19 @@ class LogCompressorApp(_make_app_base()):
                    if self._cluster_matches(c)]
         if not matches:
             return "break"
-        cur = self._selected_row
-        if cur in matches:
-            step = 1 if forward else -1
-            pos = (matches.index(cur) + step) % len(matches)
+        n = len(matches)
+        nav = self._search_nav
+        if nav == 0:
+            nav = 1 if forward else n
+        elif forward:
+            nav = nav % n + 1
         else:
-            pos = 0 if forward else len(matches) - 1
-        target = matches[pos]
+            nav = n if nav == 1 else nav - 1
+        self._search_nav = nav
+        target = matches[nav - 1]
         self._select_cluster(target)
         self._see_cluster_row(target)
+        self._update_search_count()
         return "break"
 
     def _see_cluster_row(self, idx: int) -> None:
@@ -3949,9 +3960,10 @@ class LogCompressorApp(_make_app_base()):
         if not show:
             label.configure(text="")
             return
-        total = len(self._displayed)
-        shown = sum(1 for c in self._displayed if self._cluster_matches(c))
-        label.configure(text=f"{shown} / {total} 条")
+        # 优化缺陷R50：计数 = 导航序号 / 匹配总数（y 随关键字动态
+        # 变化；输入后未导航为 0/y，Enter/Shift+Enter 循环定位）
+        total = sum(1 for c in self._displayed if self._cluster_matches(c))
+        label.configure(text=f"{self._search_nav} / {total} 条")
 
     def _render_cluster_list(self, preserve_state: bool = False) -> None:
         """左侧错误列表：全部错误行（图标/优先级/次数行 + 单行摘要）。
@@ -4150,7 +4162,8 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R32/R33：摘要左右 padx 22 > 圆角半径 18（左下/右下角
         # 区域不留控件，不与圆角描边重合）
         summary.pack(fill="x", padx=(_ROW_PADX, _ROW_PADX), pady=(2, 6))
-        select_cb = on_select or (lambda: self._select_cluster(idx))
+        select_cb = on_select or (
+            lambda: self._select_cluster(idx, sync_nav=True))
         hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
         # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
         self._bind_row_events((frame, head, summary), select_cb, hover_cb)
@@ -4447,13 +4460,25 @@ class LogCompressorApp(_make_app_base()):
     # ------------------------------------------------------------------
     # 详情渲染
     # ------------------------------------------------------------------
-    def _select_cluster(self, idx: int) -> None:
+    def _select_cluster(self, idx: int, sync_nav: bool = False) -> None:
         if not (0 <= idx < len(self._displayed)):
             return
         self._selected_inst = None      # R16：切簇清除实例选中态
         self._mark_selected_row(idx)
         self._show_cluster_detail(self._displayed[idx])
         self._sync_fs_detail()          # 优化缺陷R42：全屏联动
+        if sync_nav:
+            self._sync_search_nav(idx)
+
+    def _sync_search_nav(self, idx: int) -> None:
+        """优化缺陷R50：用户主动点选簇时同步查找导航序号（计数
+        x/y 的 x）；点选的簇不在匹配序列中时序号归 0（未导航）。"""
+        if not self._search_kw or self._result is None:
+            return
+        matches = [i for i, c in enumerate(self._displayed)
+                   if self._cluster_matches(c)]
+        self._search_nav = matches.index(idx) + 1 if idx in matches else 0
+        self._update_search_count()
 
     def _sync_fs_detail(self) -> None:
         """优化缺陷R42：全屏列表联动 —— 选中簇/实例时全屏详情
@@ -4569,6 +4594,7 @@ class LogCompressorApp(_make_app_base()):
         self._fill_instance_detail(self._detail_box, cluster,
                                    cluster.instances[iidx])
         self._sync_fs_detail()          # 优化缺陷R42：全屏联动
+        self._sync_search_nav(cidx)     # 优化缺陷R50：点实例同步导航序号
 
     def _toggle_expand_classic(self, idx: int) -> None:
         """经典列表展开/收起簇实例（行内就地插入实例区）。
