@@ -306,7 +306,13 @@ def to_json(result: AnalysisResult, top_n: Optional[int] = None) -> str:
 # ---------------------------------------------------------------------------
 def to_text(result: AnalysisResult, top_n: Optional[int] = None,
             sections=None) -> str:
-    """导出纯文本报告（无 Markdown 标记，适配任意阅读环境）。"""
+    """导出纯文本报告（优化缺陷R59：与 Markdown 同内容的无标记版）。
+
+    此前仅为清单级薄报告（无样例/上下文/堆栈，用户对比 MD 后判定
+    半成品）；现按板块输出：概览统计 / 错误清单 / 典型样例详情
+    （元信息 + 智能分析 + 实例行号索引 + 前上下文 + 样例 + 降噪
+    堆栈 + 后上下文），实例索引可独立勾选输出紧凑清单。
+    """
     n = top_n or DEFAULT_TOP_N
     clusters = result.clusters[:n]
     s = result.stats
@@ -315,44 +321,100 @@ def to_text(result: AnalysisResult, top_n: Optional[int] = None,
     out.append("=" * 60)
     out.append(f"日志AI压缩报告：{s.source}")
     out.append("=" * 60)
-    if "overview" in secs:
-        out.append(f"总行数: {s.total_lines}  错误行: {s.error_lines}  "
-                   f"错误种类: {len(result.clusters)}  耗时: {s.duration:.2f}s")
-        out.append(f"时间范围: {_ts_range(result)}")
+    out.append(f"生成: log-ai-compressor v{__version__} | 规则 {s.rule_name}")
     out.append(f"初步根因: {_root_summary(result)}")
-    out.append("-" * 60)
-    # 优化缺陷R58：清单/详情/实例索引任一勾选即遍历簇（实例索引
-    # 依附簇行输出，单独勾选也能拿到行号清单）
-    if not ({"list", "detail", "instances"} & secs):
-        return "\n".join(out) + "\n"
-    for i, c in enumerate(clusters, 1):
-        if "list" not in secs and "detail" not in secs:
-            # 仅实例索引：紧凑行（级别 ×次数 + 行号索引）
-            out.append(f"[{i}] {c.priority_label} {c.level} ×{c.count}  "
+
+    if "overview" in secs:
+        out.append("")
+        out.append("[概览统计]")
+        out.append(f"  总行数: {s.total_lines}  错误行: {s.error_lines}  "
+                   f"错误种类: {len(result.clusters)}  "
+                   f"错误总次数: {s.error_entries}")
+        out.append(f"  编码: {s.encoding}  耗时: {s.duration:.2f}s  "
+                   f"速率: {_rate_text(s.lines_per_second)}")
+        out.append(f"  时间范围: {_ts_range(result)}")
+        level_parts = [f"{k}={v}" for k, v in sorted(s.level_counts.items())]
+        out.append(f"  级别分布: {', '.join(level_parts) if level_parts else '-'}")
+        if s.truncated:
+            out.append(f"  处理状态: 用户取消，已处理前 {s.total_lines} 行")
+
+    if "list" in secs:
+        out.append("")
+        out.append(f"[错误清单] 共 {len(clusters)} 种（按优先级排序）")
+        for i, c in enumerate(clusters, 1):
+            root = " [根因]" if c.is_root_cause else ""
+            anom = f" [{_anomaly_label(c)}]" if c.anomaly else ""
+            out.append(f"  {i:>2}. {c.priority_label} {c.level} ×{c.count}"
+                       f"{root}{anom}  {c.summary}")
+        if not clusters:
+            out.append("  未发现符合条件的错误。")
+
+    if "detail" in secs:
+        out.append("")
+        out.append("[典型样例详情]（每错误一份，含上下文与降噪堆栈）")
+        for i, c in enumerate(clusters, 1):
+            out.extend(_cluster_detail_txt(
+                i, c, include_instances="instances" in secs))
+    elif "instances" in secs:
+        # 仅实例索引：紧凑清单（级别 ×次数 + 行号索引）
+        out.append("")
+        out.append("[实例行号索引]")
+        for i, c in enumerate(clusters, 1):
+            out.append(f"  [{i}] {c.priority_label} {c.level} ×{c.count}  "
                        f"{c.summary}")
             inst_line = _instances_line(c)
             if inst_line:
-                out.append(f"     {inst_line}")
-            out.append("")
-            continue
-        out.append(f"[{i}] {c.priority_label} {c.level} ×{c.count}  "
-                   f"{c.summary}  (行 {c.first_line}~{c.last_line})")
-        if c.is_root_cause:
-            out.append(f"     根因: {c.root_cause_reason}")
-        if c.anomaly:
-            out.append(f"     异常: {_anomaly_label(c)}")
-        # 优化缺陷R58：实例行号索引（板块勾选时输出）
-        if "instances" in secs:
-            inst_line = _instances_line(c)
-            if inst_line:
-                out.append(f"     {inst_line}")
-        if ("detail" in secs and c.sample is not None
-                and c.sample.entry.stack):
-            simplified = simplify_stack(c.sample.entry.stack)
-            for line in simplified.lines[:8]:
-                out.append(f"     {line}")
-        out.append("")
+                out.append(f"       {inst_line}")
     return "\n".join(out) + "\n"
+
+
+def _cluster_detail_txt(index: int, c: ErrorCluster,
+                        include_instances: bool = False) -> List[str]:
+    """单个错误簇的纯文本详情段落（与 _cluster_detail_md 同内容）。"""
+    out: List[str] = ["", "-" * 60]
+    out.append(f"[{index}] {c.priority_label} {c.level} ×{c.count}  "
+               f"{c.summary}")
+    meta = [f"出现 {c.count} 次", f"行 {c.first_line}~{c.last_line}"]
+    if c.first_seen is not None:
+        meta.append(f"首末时间 {format_timestamp(c.first_seen)}"
+                    f" ~ {format_timestamp(c.last_seen)}")
+    if c.module:
+        meta.append(f"模块 {c.module}")
+    out.append(f"    {' | '.join(meta)}")
+    notes = []
+    if c.is_root_cause:
+        notes.append(f"根因：{c.root_cause_reason}")
+    elif c.root_cause_reason:
+        notes.append(c.root_cause_reason)
+    if c.anomaly:
+        notes.append(f"异常：{_anomaly_label(c)}")
+    if notes:
+        out.append(f"    智能分析：{'；'.join(notes)}")
+    if include_instances:
+        inst_line = _instances_line(c)
+        if inst_line:
+            out.append(f"    {inst_line}")
+
+    sample = c.sample
+    if sample is None:
+        out.append("    （无典型样例）")
+        return out
+    entry = sample.entry
+    if sample.before:
+        out.append("    前上下文:")
+        out.extend(f"      {line}" for line in sample.before)
+    out.append("    典型样例:")
+    out.append(f"      {entry.raw}")
+    out.extend(f"      {extra}" for extra in entry.message_extra)
+    if entry.stack:
+        simplified = simplify_stack(entry.stack)
+        out.append(f"    堆栈（已降噪：业务帧 {simplified.business_count} 行，"
+                   f"折叠系统/第三方帧 {simplified.noise_count} 行）:")
+        out.extend(f"      {line}" for line in simplified.lines)
+    if sample.after:
+        out.append("    后上下文:")
+        out.extend(f"      {line}" for line in sample.after)
+    return out
 
 
 # ---------------------------------------------------------------------------

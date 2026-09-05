@@ -5,6 +5,14 @@ name: generic
 description: 通用系统/应用日志（程序运行日志、访问日志、审计日志等主流格式）
 
 patterns:
+  - name: bracket_iso
+    # [2026-09-04T06:12:12.244Z] error: xxx —— Jenkins/CI 等方括号 ISO
+    # 时间戳（修复缺陷R59：此前 generic 无此模式，整文件落无结构
+    # 兜底，时间戳/模块全丢、时间范围与直方图为空）；级别为行内
+    # 关键词（error:/Warning:）时可选捕获，缺省关键词推断兜底
+    regex: '^\[(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)\]\s*(?:(?P<level>{LEVEL})\s*[:\-]\s+)?(?P<message>.*)$'
+    flags: [i]
+
   - name: iso_level_module
     # ISO 时间戳 + 级别(可带括号) + [模块] + 分隔符 + 内容
     regex: '^(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)\s*[\[(]?\s*(?P<level>{LEVEL})\s*[\])]?:?\s*(?:[\[(](?P<module>[^()\]]{1,64})[)\]]\s*)?(?:[-:>|\u2014]\s*)?(?P<message>.*)$'
