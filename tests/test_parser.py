@@ -281,6 +281,25 @@ class TestInference:
         assert e.level == "ERROR"
         assert e.message == "service unavailable"
 
+    def test_colon_prefix_not_module(self, parser):
+        """修复缺陷R66：消息头部冒号词不作模块 —— Jenkins 行
+        "Finished: FAILURE" 的 Finished 被误判为模块（模块宁缺毋错，
+        冒号前缀保留在消息原文）。"""
+        parser.feed("[2026-09-04T06:12:16.697Z] Finished: FAILURE", 1)
+        e = parser.flush()
+        assert e.module == "", "冒号句首词不得误判为模块"
+        assert e.message == "Finished: FAILURE", "冒号前缀应保留在原文"
+        assert e.level == "FAIL"
+
+    def test_git_remote_prefix_not_module(self, parser):
+        """修复缺陷R66：git 远端流前缀 remote: 同样不作模块。"""
+        parser.feed("[2026-09-04T06:12:10.000Z] remote: commit 5050429: "
+                    "warning: subject >50 characters", 1)
+        e = parser.flush()
+        assert e.module == ""
+        assert e.message.startswith("remote: commit 5050429")
+        assert e.level == "WARN"
+
 
 # ---------------------------------------------------------------------------
 # 嵌入式规则集

@@ -204,8 +204,10 @@ class TimestampParser:
 # ---------------------------------------------------------------------------
 # 模块/级别推断（消息头部）
 # ---------------------------------------------------------------------------
-# "auth - login failed" / "auth: login failed" / "auth | login failed"
-_HEAD_TOKEN_SEP = re.compile(r"^([\w][\w.\-/]{0,63})\s*(?::\s|\s[-|>]\s|\s\|\s)")
+# "auth - login failed" / "auth | login failed" / "auth > login failed"
+# 修复缺陷R66：删除冒号分隔符 —— "Finished: FAILURE"/"remote: xxx" 等
+# 英文句首词会被误判为模块（模块名绝不能猜错）；冒号前缀保留在消息原文
+_HEAD_TOKEN_SEP = re.compile(r"^([\w][\w.\-/]{0,63})\s*(?:\s[-|>]\s|\s\|\s)")
 
 
 def _is_level_token(token: str) -> bool:
