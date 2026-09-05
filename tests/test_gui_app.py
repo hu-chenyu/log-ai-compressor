@@ -2891,6 +2891,14 @@ class TestMainWindowSearch:
         # 优化缺陷R50：搜索输入框与上下文行数输入框同宽（60）
         assert app._search_entry.cget("width") == \
             app._ctx_entry.cget("width") == 60
+        # 优化缺陷R51：输入框脱离弹性列 —— sticky 去 ew、weight 移至
+        # 尾部空列，否则整行宽度不足时压缩量全压输入框，width 失效
+        entry_info = app._search_entry.grid_info()
+        assert "e" not in str(entry_info["sticky"]), \
+            "搜索输入框不得随弹性列横向拉伸/压缩"
+        sbox = app._search_entry.master
+        assert sbox.grid_columnconfigure(1)["weight"] == 0
+        assert sbox.grid_columnconfigure(3)["weight"] == 1
 
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""

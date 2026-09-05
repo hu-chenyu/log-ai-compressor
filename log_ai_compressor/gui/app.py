@@ -1997,16 +1997,20 @@ class LogCompressorApp(_make_app_base()):
         # 优化缺陷R49：搜索框独占弹性列 3（两侧固定间隔列等距）
         search_box = ctk.CTkFrame(panel, fg_color="transparent")
         search_box.grid(row=0, column=3, sticky="ew")
-        search_box.grid_columnconfigure(1, weight=1)
+        # 优化缺陷R51：弹性位移至尾部空列 3 —— 整行宽度不足时 Tk 把
+        # 压缩量全压到唯一 weight 列；此前 weight 挂在输入框列上，
+        # 输入框被挤到远小于请求宽（width 参数失效），现由空列吸收
+        search_box.grid_columnconfigure(3, weight=1)
         ctk.CTkLabel(search_box, text="搜索").grid(row=0, column=0,
                                                    padx=(0, 4))
         self._search_var = tk.StringVar()
-        # 优化缺陷R50：输入框请求宽与上下文行数输入框一致（60）——
-        # 此前过窄视觉太小；sticky=ew 下列分配再略作拉伸
+        # 优化缺陷R50：输入框请求宽与上下文行数输入框一致（60）
+        # 优化缺陷R51：sticky 去 ew —— 输入框按请求宽固定渲染，不再
+        # 随弹性列拉伸/压缩，视觉宽与上下文行数框严格一致
         self._search_entry = ctk.CTkEntry(
             search_box, textvariable=self._search_var, width=60,
             placeholder_text="按摘要 / 模块 / 级别过滤列表…")
-        self._search_entry.grid(row=0, column=1, sticky="ew")
+        self._search_entry.grid(row=0, column=1, sticky="w")
         # 优化缺陷R49：计数影子显示框 —— 输入框右侧独立圆角框，
         # 与输入框同底色（fg_color 元组随主题自适应）；恒定占位
         # （grid_propagate(False) 固定尺寸），有计数时显形、无计数
