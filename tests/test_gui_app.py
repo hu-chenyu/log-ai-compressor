@@ -2006,6 +2006,91 @@ class TestFullscreenView:
         assert "1 /" in str(labels[0].cget("text")), \
             f"过滤后应只剩 1 行，实际: {labels[0].cget('text')}"
 
+    # ------------------------------------------------------------------
+    # 优化缺陷R53：全屏搜索计数导航（与主窗口 x/y 条完全同款）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _fs_two_cluster_log():
+        """两簇日志：kernel ×3 + filesystem ×3（均 ERROR，关键字
+        error 两簇均命中）。"""
+        lines = []
+        for i in range(3):
+            lines.append(
+                f"2024-01-01 09:00:0{i} ERROR [db] kernel panic in scheduler")
+        for i in range(3):
+            lines.append(
+                f"2024-01-01 09:01:0{i} ERROR [db] filesystem journal corrupted")
+        return "\n".join(lines)
+
+    def _open_fs_with_two_clusters(self, app):
+        _run_paste_analysis(app, self._fs_two_cluster_log())
+        app.update()
+        app._open_list_fullscreen()
+        for _ in range(20):
+            app.update()
+            time.sleep(0.005)
+        assert app._fs_list_win is not None
+        return app._fs_list_win
+
+    def test_fs_search_count_box_nav_cycles(self, app):
+        """输入关键字 → 0/y；Enter 1/y→2/y→回绕 1/y；Shift+Enter 反向。"""
+        self._open_fs_with_two_clusters(app)
+        app._fs_search_entry.insert(0, "error")
+        app.update()
+        assert app._fs_count.cget("text") == "0 / 2 条", \
+            "输入后未导航应为 0/y"
+        # 影子框显形（与输入框同底色）
+        assert app._fs_count_box.cget("fg_color") == \
+            app._fs_search_entry.cget("fg_color")
+        app._on_fs_search_enter(True)
+        app.update()
+        assert app._selected_row == 0
+        assert app._fs_count.cget("text") == "1 / 2 条"
+        app._on_fs_search_enter(True)
+        app.update()
+        assert app._selected_row == 1
+        assert app._fs_count.cget("text") == "2 / 2 条"
+        app._on_fs_search_enter(True)
+        app.update()
+        assert app._selected_row == 0
+        assert app._fs_count.cget("text") == "1 / 2 条", \
+            "到 y/y 后应按回绕到 1/y"
+        app._on_fs_search_enter(False)
+        app.update()
+        assert app._selected_row == 1
+        assert app._fs_count.cget("text") == "2 / 2 条", \
+            "Shift+Enter 应从 1/y 反向到 y/y"
+
+    def test_fs_click_row_syncs_nav(self, app):
+        """点击全屏列表簇行 → 全屏计数序号同步（与主窗口同语义）。"""
+        self._open_fs_with_two_clusters(app)
+        app._fs_search_entry.insert(0, "error")
+        app.update()
+        assert app._fs_count.cget("text") == "0 / 2 条"
+        vl = app._fs_vl
+        slot = next(
+            s for s in vl.slots
+            if 0 <= s.get("idx", -1) < len(vl._data)
+            and vl._data[s["idx"]] == ("c", 1))
+        slot["summary"].event_generate("<Button-1>")
+        app.update()
+        assert app._selected_row == 1
+        assert app._fs_count.cget("text") == "2 / 2 条", \
+            "点选第 2 个匹配簇计数应为 2/y"
+
+    def test_fs_count_box_hidden_when_empty(self, app):
+        """清空关键字 → 计数影子框透明隐形（布局零扰动）。"""
+        self._open_fs_with_two_clusters(app)
+        assert app._fs_count.cget("text") == ""
+        assert app._fs_count_box.cget("fg_color") == "transparent"
+        app._fs_search_entry.insert(0, "kernel")
+        app.update()
+        assert app._fs_count.cget("text") == "0 / 1 条"
+        app._fs_search_entry.delete(0, "end")
+        app.update()
+        assert app._fs_count.cget("text") == ""
+        assert app._fs_count_box.cget("fg_color") == "transparent"
+
     def test_detail_fullscreen_shows_content(self, app):
         """详情全屏：内容与主面板一致且支持横向滚动。"""
         _run_paste_analysis(app, SAMPLE_PASTE)

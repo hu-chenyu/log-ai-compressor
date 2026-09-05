@@ -1665,6 +1665,10 @@ class LogCompressorApp(_make_app_base()):
         self._search_job = None                 # 输入防抖 after 句柄
         # 优化缺陷R50：查找导航序号（0=未导航，1..y=定位到第几个匹配）
         self._search_nav = 0
+        # 优化缺陷R53：全屏列表窗口独立搜索态（与主窗口同口径的
+        # 关键字过滤 + x/y 计数导航 + Enter/Shift+Enter 循环定位）
+        self._fs_search_kw = ""
+        self._fs_search_nav = 0
 
         # 修复缺陷R1：主题调色板登记表（切换时按角色批量刷新）
         self._bg_widgets: List[tuple] = []       # (控件, "window"/"card"/"header")
@@ -3974,6 +3978,62 @@ class LogCompressorApp(_make_app_base()):
         total = sum(1 for c in self._displayed if self._cluster_matches(c))
         label.configure(text=f"{self._search_nav} / {total} 条")
 
+    def _on_fs_search_enter(self, forward: bool = True):
+        """全屏搜索 Enter（Shift+Enter 反向）：定位下/上一个匹配簇。
+
+        优化缺陷R53：与主窗口 _on_search_enter 同一导航语义 ——
+        输入后 0/y（未定位）；Enter 1/y→2/y→…→y/y→回绕 1/y，
+        Shift+Enter 反向（0/y 或 1/y 时反向到 y/y）；目标行滚动
+        进全屏虚拟列表视口，详情面板经共享选中态联动。
+        """
+        if self._result is None or not getattr(self, "_fs_search_kw", ""):
+            return "break"
+        matches = [i for i, c in enumerate(self._displayed)
+                   if self._fs_cluster_matches(c)]
+        if not matches:
+            return "break"
+        n = len(matches)
+        nav = getattr(self, "_fs_search_nav", 0)
+        if nav == 0:
+            nav = 1 if forward else n
+        elif forward:
+            nav = nav % n + 1
+        else:
+            nav = n if nav == 1 else nav - 1
+        self._fs_search_nav = nav
+        target = matches[nav - 1]
+        self._select_cluster(target)          # 共享选中态：全屏详情联动
+        fs_vl = getattr(self, "_fs_vl", None)
+        if fs_vl is not None:
+            fs_vl.see_cluster(target)
+        self._update_fs_search_count()
+        return "break"
+
+    def _update_fs_search_count(self) -> None:
+        """全屏搜索计数影子框（优化缺陷R53：与主窗口同款 x/y 条）。
+
+        有计数显形（与输入框同底色）、无计数透明隐形；x=导航序号
+        （点击簇/实例行同步），y=全屏关键字实时匹配总数。
+        """
+        box = getattr(self, "_fs_count_box", None)
+        label = getattr(self, "_fs_count", None)
+        if label is None:
+            return
+        show = bool(getattr(self, "_fs_search_kw", "")
+                    and self._result is not None)
+        if box is not None:
+            entry = getattr(self, "_fs_search_entry", None)
+            box.configure(
+                fg_color=(entry.cget("fg_color")
+                          if show and entry is not None
+                          else "transparent"))
+        if not show:
+            label.configure(text="")
+            return
+        total = sum(1 for c in self._displayed
+                    if self._fs_cluster_matches(c))
+        label.configure(text=f"{self._fs_search_nav} / {total} 条")
+
     def _render_cluster_list(self, preserve_state: bool = False) -> None:
         """左侧错误列表：全部错误行（图标/优先级/次数行 + 单行摘要）。
 
@@ -4481,13 +4541,21 @@ class LogCompressorApp(_make_app_base()):
 
     def _sync_search_nav(self, idx: int) -> None:
         """优化缺陷R50：用户主动点选簇时同步查找导航序号（计数
-        x/y 的 x）；点选的簇不在匹配序列中时序号归 0（未导航）。"""
-        if not self._search_kw or self._result is None:
+        x/y 的 x）；点选的簇不在匹配序列中时序号归 0（未导航）。
+        优化缺陷R53：全屏窗口计数同步（独立关键字/序号，同口径）。"""
+        if self._result is None:
             return
-        matches = [i for i, c in enumerate(self._displayed)
-                   if self._cluster_matches(c)]
-        self._search_nav = matches.index(idx) + 1 if idx in matches else 0
-        self._update_search_count()
+        if self._search_kw:
+            matches = [i for i, c in enumerate(self._displayed)
+                       if self._cluster_matches(c)]
+            self._search_nav = matches.index(idx) + 1 if idx in matches else 0
+            self._update_search_count()
+        if getattr(self, "_fs_search_kw", ""):
+            matches = [i for i, c in enumerate(self._displayed)
+                       if self._fs_cluster_matches(c)]
+            self._fs_search_nav = (matches.index(idx) + 1
+                                   if idx in matches else 0)
+            self._update_fs_search_count()
 
     def _sync_fs_detail(self) -> None:
         """优化缺陷R42：全屏列表联动 —— 选中簇/实例时全屏详情
@@ -4519,17 +4587,23 @@ class LogCompressorApp(_make_app_base()):
         finally:
             vl._sync()      # 重绘可见槽位（选中态共享自应用层）
 
+    def _fs_cluster_matches(self, cluster: ErrorCluster) -> bool:
+        """优化缺陷R53：全屏搜索关键字匹配（与主窗口
+        _cluster_matches 同口径；空关键字全部命中）。"""
+        kw = getattr(self, "_fs_search_kw", "")
+        if not kw:
+            return True
+        hay = (f"{cluster.summary} {cluster.module} "
+               f"{cluster.level} {cluster.priority_label}").lower()
+        return kw in hay
+
     def _fs_view_rows(self) -> list:
         """优化缺陷R42：全屏列表视图行（搜索过滤后的簇行 +
         展开簇实例行；与主列表 _build_view_rows 同构 + 关键字过滤）。"""
-        kw = getattr(self, "_fs_search_kw", "")
         rows = []
         for idx, cluster in enumerate(self._displayed):
-            if kw:
-                hay = (f"{cluster.summary} {cluster.module} "
-                       f"{cluster.level} {cluster.priority_label}").lower()
-                if kw not in hay:
-                    continue
+            if not self._fs_cluster_matches(cluster):
+                continue
             rows.append(("c", idx))
             if idx in self._expanded_clusters:
                 for iidx in range(len(cluster.instances)):
@@ -4910,6 +4984,17 @@ class LogCompressorApp(_make_app_base()):
         # 检查，用户输入什么就找什么），醒目黄底「searchkw」标签；
         # 主/全屏详情面板共用本函数，两路同步生效
         kw = self._search_kw
+        # 优化缺陷R53：全屏列表窗口可见且有其独立搜索关键字时，详情
+        # 优先照亮全屏关键字（全屏搜索体验与主窗口完全一致）
+        fs_win = getattr(self, "_fs_list_win", None)
+        fs_kw = getattr(self, "_fs_search_kw", "")
+        try:
+            fs_visible = (fs_win is not None and fs_win.winfo_exists()
+                          and fs_win.winfo_viewable())
+        except tk.TclError:
+            fs_visible = False
+        if fs_kw and fs_visible:
+            kw = fs_kw
         if kw:
             start = 0
             while True:
@@ -5220,6 +5305,23 @@ class LogCompressorApp(_make_app_base()):
                              font=ctk.CTkFont(size=18),
                              placeholder_text="按摘要 / 模块 / 级别过滤…")
         search.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
+        self._fs_search_entry = search
+        # 优化缺陷R53：计数影子框（与主窗口同款）—— 输入框右侧恒定
+        # 占位，有关键字显形「x / y 条」、清空透明隐形（布局零扰动）；
+        # Enter / Shift+Enter 循环定位匹配簇，点击行同步导航序号
+        self._fs_count_box = ctk.CTkFrame(
+            bar, width=120, height=32, corner_radius=6,
+            fg_color="transparent")
+        self._fs_count_box.pack(side="left", padx=(0, 8))
+        self._fs_count_box.pack_propagate(False)
+        self._fs_count = ctk.CTkLabel(
+            self._fs_count_box, text="", text_color="#8fa4b8",
+            font=ctk.CTkFont(size=15), fg_color="transparent")
+        self._fs_count.place(relx=0.5, rely=0.5, anchor="c")
+        search.bind("<Return>",
+                    lambda e: self._on_fs_search_enter(True))
+        search.bind("<Shift-Return>",
+                    lambda e: self._on_fs_search_enter(False))
         count_label = ctk.CTkLabel(bar, text="", text_color="#8fa4b8")
         count_label.pack(side="right", padx=12)
         ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
@@ -5282,16 +5384,30 @@ class LogCompressorApp(_make_app_base()):
             _toggle_cluster_expand 内部联动全屏详情与选中态。
             """
             self._fs_search_kw = keyword.strip().lower()
+            # 优化缺陷R53：关键字变化重置查找导航（计数回到 0/y 未
+            # 定位态，与主窗口 _apply_search_filter 同语义）
+            self._fs_search_nav = 0
             rows = self._fs_view_rows()
             total = sum(1 for r in rows if r[0] == "c")
             count_label.configure(
                 text=f"显示 {total} / {len(self._displayed)} 条")
             self._fs_vl.set_data(rows)
+            # 优化缺陷R53：计数影子框 + 详情关键字高亮即时刷新
+            self._update_fs_search_count()
+            self._sync_fs_detail()
+            # 优化缺陷R53：当前选中簇被过滤掉时自动选中首个匹配簇
+            # （与主窗口同语义，详情面板不停留陈旧内容）
+            matches = [i for i, c in enumerate(self._displayed)
+                       if self._fs_cluster_matches(c)]
+            if matches and self._selected_row not in matches:
+                self._select_cluster(matches[0])
 
         # 文本变化即过滤（trace 不依赖键盘事件，无焦点也可靠触发）
         search_var.trace_add("write", lambda *a: render(search_var.get()))
         # 修复缺陷R6：登记刷新回调 + 数据签名（数据未变时跳过重渲染）
-        self._fs_list_refresh = render
+        # 优化缺陷R53：刷新读取输入框当前文本（而非空串重置过滤，
+        # 避免重开窗口时框内文字与实际过滤口径不一致）
+        self._fs_list_refresh = lambda: render(search_var.get())
         self._fs_list_sig = (id(self._result), len(self._displayed))
         # 首批异步渲染：回调即刻返回（<300ms 交互不卡，同 R6 语义），
         # 窗口 deiconify 后 1ms 填充数据行
