@@ -4714,6 +4714,10 @@ class LogCompressorApp(_make_app_base()):
         if not (0 <= idx < len(self._displayed)):
             return
         self._selected_inst = None      # R16：切簇清除实例选中态
+        # 优化缺陷R57：经典模式同步清除实例行蓝色选中样式（此前
+        # 切簇后旧实例行残留蓝底）
+        if self._virtual_list is None:
+            self._classic_mark_inst_sel(-1, -1)
         self._mark_selected_row(idx)
         self._show_cluster_detail(self._displayed[idx])
         self._sync_fs_detail()          # 优化缺陷R42：全屏联动
@@ -4849,6 +4853,11 @@ class LogCompressorApp(_make_app_base()):
             return
         self._selected_inst = (cidx, iidx)
         self._mark_selected_row(cidx)
+        # 优化缺陷R57：经典模式实例行同步蓝色 3D 选中样式 —— 此前
+        # 仅点击路径（_classic_inst_click）着色，Enter 扁平实例导航
+        # 定位的实例行无蓝色高亮，用户无法辨认当前定位到哪条
+        if self._virtual_list is None:
+            self._classic_mark_inst_sel(cidx, iidx)
         self._fill_instance_detail(self._detail_box, cluster,
                                    cluster.instances[iidx])
         self._sync_fs_detail()          # 优化缺陷R42：全屏联动
@@ -4966,14 +4975,38 @@ class LogCompressorApp(_make_app_base()):
         lbl.bind("<Leave>", lambda e: inst_wrap.configure(
             fg_color=p["row_selected"] if self._classic_inst_sel is lbl
             else bg))
+        # 优化缺陷R57：程序化选中（Enter 导航）的实例在批量渐进
+        # 创建到位时即补蓝色选中样式（大簇 >25 实例分批创建）
+        if (cidx, iidx) == getattr(self, "_selected_inst", None):
+            self._classic_inst_sel = lbl
+            inst_wrap.configure(
+                fg_color=p["sel_bot"], corner_radius=10,
+                border_width=2, border_color=p["sel_hi"])
+            lbl.configure(text_color=p["sel_text"])
         return inst
 
     def _classic_inst_click(self, cidx, iidx, inst_dict) -> None:
-        """经典实例行点击：单选高亮 + 实例详情。"""
+        """经典实例行点击：单选高亮 + 实例详情。
+
+        优化缺陷R57：着色统一收口 _select_instance →
+        _classic_mark_inst_sel（点击与 Enter 导航同一样式）。
+        """
+        self._select_instance(cidx, iidx)
+
+    def _classic_mark_inst_sel(self, cidx, iidx) -> None:
+        """经典实例行蓝色 3D 选中着色（优化缺陷R57）。
+
+        点击/程序化选中共用：清除旧选中行样式（恢复 8px 圆角细
+        边），新选中行 10px 圆角 + 2px 高光边 + sel_bot 蓝底；目标
+        行标签尚未批量创建到位时仅更新选中记录（创建时按
+        _selected_inst 补着色，见 _make_classic_inst_label）。
+        """
         p = self._palette()
-        lbl = inst_dict["label"]
-        inst_wrap = inst_dict["wrap"]
-        prev = self._classic_inst_sel
+        state = getattr(self, "_classic_expanded", {}).get(cidx)
+        lbl = None
+        if state is not None and 0 <= iidx < len(state.get("labels", [])):
+            lbl = state["labels"][iidx].get("label")
+        prev = getattr(self, "_classic_inst_sel", None)
         if prev is not None and prev is not lbl:
             try:
                 if prev.winfo_exists():
@@ -4987,9 +5020,11 @@ class LogCompressorApp(_make_app_base()):
             except tk.TclError:
                 pass
         self._classic_inst_sel = lbl
+        if lbl is None:
+            return
         try:
             # 选中态 3D：10px 圆角 + 2px 高光边框 + 稍亮背景
-            inst_wrap.configure(
+            state["labels"][iidx]["wrap"].configure(
                 fg_color=p["sel_bot"],
                 corner_radius=10,
                 border_width=2,
@@ -4997,7 +5032,6 @@ class LogCompressorApp(_make_app_base()):
             lbl.configure(text_color=p["sel_text"])
         except tk.TclError:
             pass
-        self._select_instance(cidx, iidx)
 
     def _show_cluster_detail(self, cluster: ErrorCluster) -> None:
         """主界面详情面板渲染（转发到通用填充函数）。"""
