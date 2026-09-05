@@ -27,7 +27,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "font_size": "中",
     # 修复缺陷R12：错误列表|详情面板 分隔条位置（左列宽度比例）
     "splitter_ratio": 0.4,
-    "rule": "generic",
+    # 优化缺陷R71：默认自动识别（150 行分层采样打分选最优规则）
+    "rule": "auto",
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},
     "last_files": [],

@@ -244,6 +244,8 @@ class RunStats:
     entry_lines: int = 0                 # 结构化条目数
     error_lines: int = 0                 # 错误级行数（FATAL/ERROR/FAIL）
     error_entries: int = 0               # 通过过滤并参与聚类的错误条目数
+    # 优化缺陷R71：带时间戳的条目数（规则体检的时间戳识别率分子）
+    ts_entries: int = 0
     level_counts: Dict[str, int] = field(default_factory=dict)
     duration: float = 0.0                # 处理耗时（秒）
     lines_per_second: float = 0.0
