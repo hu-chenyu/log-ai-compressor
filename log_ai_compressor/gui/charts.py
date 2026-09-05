@@ -45,17 +45,32 @@ def _fmt_time(t: float) -> str:
     return f"{t:.0f}s"
 
 
+def _clip(text: str, width: int) -> str:
+    """摘要截断（条形图 y 轴标签用，优化缺陷R63）。"""
+    text = (text or "").replace("\n", " ").strip()
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
 class ChartsPanel:
-    """三联统计图表面板（错误趋势折线 / 级别占比饼图 / 模块分布柱状图）。"""
+    """三联统计图表面板（错误趋势折线 / 级别占比饼图 / 错误种类 Top10）。
+
+    优化缺陷R63：
+    - dpi_scale 适配高 DPI（2x 屏按 192dpi 建图，文字不再缩半）；
+    - 字号整体上移（全屏窗口可读）；
+    - 第三图由「模块分布」改为「错误种类 Top 10」（无模块字段的
+      日志也有信息量；按次数排序、级别着色、点击定位簇）。
+    """
 
     def __init__(self, parent, result: AnalysisResult,
                  on_select_level: Optional[Callable[[str], None]] = None,
-                 on_select_module: Optional[Callable[[str], None]] = None):
+                 on_select_cluster: Optional[Callable[[str], None]] = None,
+                 dpi_scale: float = 1.0):
         self._result = result
         self._on_level = on_select_level
-        self._on_module = on_select_module
+        self._on_cluster = on_select_cluster
 
-        self.figure = Figure(figsize=(11, 3.6), dpi=96,
+        dpi = int(round(96 * max(1.0, dpi_scale)))
+        self.figure = Figure(figsize=(11.5, 4.0), dpi=dpi,
                               facecolor="#2b2b30")
         self.canvas = FigureCanvasTkAgg(self.figure, master=parent)
         self._build()
@@ -65,25 +80,25 @@ class ChartsPanel:
 
     # ------------------------------------------------------------------
     def _build(self) -> None:
-        gs = self.figure.add_gridspec(1, 3, wspace=0.35,
-                                      left=0.07, right=0.97,
-                                      top=0.86, bottom=0.18)
+        gs = self.figure.add_gridspec(
+            1, 3, width_ratios=[1.0, 0.85, 1.25], wspace=0.38,
+            left=0.05, right=0.985, top=0.82, bottom=0.17)
         self._ax_trend = self.figure.add_subplot(gs[0, 0])
         self._ax_pie = self.figure.add_subplot(gs[0, 1])
         self._ax_bar = self.figure.add_subplot(gs[0, 2])
         self._draw_trend()
         self._draw_pie()
-        self._draw_bar()
-        self.figure.suptitle("错误统计面板（点击饼图/柱状图可联动错误列表）",
-                             color="#e0e0e0", fontsize=11)
+        self._draw_top_clusters()
+        self.figure.suptitle("错误统计面板（点击饼图级别 / 条形种类可联动错误列表）",
+                             color="#e0e0e0", fontsize=13)
 
     def _style_axes(self, ax) -> None:
         ax.set_facecolor("#2b2b30")
         for spine in ax.spines.values():
             spine.set_color("#55555c")
-        ax.tick_params(colors="#bdbdbd", labelsize=8)
+        ax.tick_params(colors="#bdbdbd", labelsize=9)
         ax.title.set_color("#e0e0e0")
-        ax.title.set_fontsize(10)
+        ax.title.set_fontsize(11)
 
     # ------------------------------------------------------------------
     def _draw_trend(self) -> None:
@@ -94,16 +109,16 @@ class ChartsPanel:
         ax.set_title("错误时间趋势")
         if not series:
             ax.text(0.5, 0.5, "无时间戳数据", ha="center", va="center",
-                    color="#9e9e9e", transform=ax.transAxes)
+                    color="#9e9e9e", fontsize=10, transform=ax.transAxes)
             return
         xs = [_fmt_time(t) for t, _ in series]
         ys = [c for _, c in series]
-        ax.plot(range(len(xs)), ys, color=_ACCENT, linewidth=1.4,
-                marker="o", markersize=3)
+        ax.plot(range(len(xs)), ys, color=_ACCENT, linewidth=1.6,
+                marker="o", markersize=4)
         step = max(1, len(xs) // 6)
         ax.set_xticks(range(0, len(xs), step))
         ax.set_xticklabels(xs[::step], rotation=30, ha="right")
-        ax.set_ylabel("错误数/单位时间", fontsize=8)
+        ax.set_ylabel("错误数/单位时间", fontsize=9)
         # 集中爆发点标注（红色竖虚线）
         for t, _ in self._result.global_hist.burst_buckets():
             idx = next((i for i, (bt, _) in enumerate(series)
@@ -114,7 +129,7 @@ class ChartsPanel:
         ax.grid(axis="y", color="#3a3a40", linewidth=0.6)
 
     def _draw_pie(self) -> None:
-        """错误级别占比饼图（按簇次数加权）。"""
+        """错误级别占比饼图（按簇次数加权，含百分比标注）。"""
         ax = self._ax_pie
         self._style_axes(ax)
         ax.set_title("错误级别占比")
@@ -126,48 +141,59 @@ class ChartsPanel:
                 counts.append((level, total))
         if not counts:
             ax.text(0.5, 0.5, "无错误数据", ha="center", va="center",
-                    color="#9e9e9e", transform=ax.transAxes)
+                    color="#9e9e9e", fontsize=10, transform=ax.transAxes)
             return
         labels = [f"{lv} ({v})" for lv, v in counts]
         colors = [_LEVEL_COLORS.get(lv, "#78909c") for lv, _ in counts]
-        wedges, texts = ax.pie(
+        wedges, texts, autotexts = ax.pie(
             [v for _, v in counts], labels=labels, colors=colors,
-            textprops={"color": "#e0e0e0", "fontsize": 8},
+            autopct="%1.0f%%", pctdistance=0.72, labeldistance=1.12,
+            textprops={"color": "#e0e0e0", "fontsize": 9},
             startangle=90, counterclock=False,
             wedgeprops={"linewidth": 1, "edgecolor": "#2b2b30",
                         "picker": True})
+        for t in autotexts:
+            t.set_color("#ffffff")
+            t.set_fontsize(9)
         for wedge, (lv, _) in zip(wedges, counts):
             wedge.set_gid(f"level:{lv}")
 
-    def _draw_bar(self) -> None:
-        """模块错误分布柱状图（Top 10，按次数加权）。"""
+    def _draw_top_clusters(self) -> None:
+        """错误种类 Top 10 横向条形（优化缺陷R63：替代模块分布）。
+
+        按次数降序、级别着色、摘要截断标签、条端次数标注；条形
+        gid=cluster:<id>，点击经 _on_pick 联动定位该簇（无模块
+        字段的日志同样信息量充足）。
+        """
         ax = self._ax_bar
         self._style_axes(ax)
-        ax.set_title("模块错误分布（Top 10）")
-        module_counts = {}
-        for c in self._result.clusters:
-            key = c.module or "(未知)"
-            module_counts[key] = module_counts.get(key, 0) + c.count
-        items = sorted(module_counts.items(), key=lambda kv: kv[1],
+        ax.set_title("错误种类 Top 10（点击定位）")
+        items = sorted(self._result.clusters, key=lambda c: c.count,
                        reverse=True)[:10]
         if not items:
-            ax.text(0.5, 0.5, "无模块数据", ha="center", va="center",
-                    color="#9e9e9e", transform=ax.transAxes)
+            ax.text(0.5, 0.5, "无错误数据", ha="center", va="center",
+                    color="#9e9e9e", fontsize=10, transform=ax.transAxes)
             return
-        names = [k[:14] for k, _ in items]
-        values = [v for _, v in items]
-        bars = ax.barh(range(len(items)), values, color=_ACCENT,
-                       height=0.6, picker=True)
+        names = [_clip(c.summary, 26) for c in items]
+        values = [c.count for c in items]
+        colors = [_LEVEL_COLORS.get(c.level, "#78909c") for c in items]
+        bars = ax.barh(range(len(items)), values, color=colors,
+                       height=0.62, picker=True)
         ax.set_yticks(range(len(items)))
-        ax.set_yticklabels(names, fontsize=8)
+        ax.set_yticklabels(names, fontsize=9)
         ax.invert_yaxis()
-        for bar, (name, _) in zip(bars, items):
-            bar.set_gid(f"module:{name}")
+        for bar, c in zip(bars, items):
+            bar.set_gid(f"cluster:{c.cluster_id}")
+        for rect, v in zip(bars, values):
+            ax.annotate(str(v), xy=(rect.get_width(), rect.get_y()
+                                    + rect.get_height() / 2),
+                        xytext=(3, 0), textcoords="offset points",
+                        va="center", fontsize=8, color="#e0e0e0")
         ax.grid(axis="x", color="#3a3a40", linewidth=0.6)
 
     # ------------------------------------------------------------------
     def _on_pick(self, event) -> None:
-        """点击联动：饼图 -> 级别过滤；柱状图 -> 模块定位。"""
+        """点击联动：饼图 -> 级别过滤；种类条形 -> 定位簇（R63）。"""
         artist = event.artist
         gid = getattr(artist, "get_gid", lambda: None)()
         if not gid:
@@ -175,8 +201,8 @@ class ChartsPanel:
         kind, _, value = gid.partition(":")
         if kind == "level" and self._on_level:
             self._on_level(value)
-        elif kind == "module" and self._on_module:
-            self._on_module(value)
+        elif kind == "cluster" and self._on_cluster:
+            self._on_cluster(value)
 
     def refresh(self) -> None:
         self.canvas.draw_idle()
@@ -189,9 +215,11 @@ class CompareChartsPanel:
     右图：Top 差异项次数对比（横向双色条形，基准 A vs 对比 B）。
     """
 
-    def __init__(self, parent, results: List):
+    def __init__(self, parent, results: List, dpi_scale: float = 1.0):
         self._results = results
-        self.figure = Figure(figsize=(11, 3.8), dpi=96,
+        # 优化缺陷R63：高 DPI 适配（与分析图表同口径）
+        dpi = int(round(96 * max(1.0, dpi_scale)))
+        self.figure = Figure(figsize=(11, 3.8), dpi=dpi,
                               facecolor="#2b2b30")
         self.canvas = FigureCanvasTkAgg(self.figure, master=parent)
         self._build()
