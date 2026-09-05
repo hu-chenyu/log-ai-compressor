@@ -10,6 +10,7 @@ from log_ai_compressor.core.pipeline import analyze_text
 from log_ai_compressor.export.reporters import (
     brief_summary,
     compare_to_markdown,
+    to_html,
     to_json,
     to_markdown,
     to_text,
@@ -120,6 +121,75 @@ class TestJson:
     def test_top_n_limit(self, result):
         payload = json.loads(to_json(result, top_n=1))
         assert len(payload["clusters"]) == 1
+
+    def test_instances_index(self, result):
+        """优化缺陷R58：JSON 簇携带实例行号索引（结构化全量）。"""
+        payload = json.loads(to_json(result))
+        first = payload["clusters"][0]
+        assert first["instances"], "簇应携带实例行号索引"
+        inst = first["instances"][0]
+        for key in ("line_no", "last_line_no", "timestamp", "summary"):
+            assert key in inst
+
+
+# ---------------------------------------------------------------------------
+# HTML 报告（优化缺陷R58）
+# ---------------------------------------------------------------------------
+class TestHtmlReport:
+    def test_self_contained(self, result):
+        html = to_html(result)
+        assert html.startswith("<!DOCTYPE html>")
+        assert 'charset="utf-8"' in html
+        assert "<style>" in html, "应内联样式（自包含单文件）"
+        assert "日志AI压缩报告" in html
+        assert "connection refused" in html
+
+    def test_badge_and_anchor(self, result):
+        html = to_html(result)
+        assert 'class="badge"' in html, "级别应有着色徽章"
+        assert 'href="#c1"' in html and 'id="c1"' in html, \
+            "目录锚点应可跳转详情"
+
+    def test_escapes_content(self):
+        r = analyze_text(
+            '2024-01-01 09:00:00 ERROR [m] a <b> & "quoted"\n')
+        html = to_html(r)
+        assert 'a <b> & "quoted"' not in html, "未转义内容会注入报告"
+        assert "a &lt;b&gt; &amp; &quot;quoted&quot;" in html
+
+    def test_sections_toggle(self, result):
+        only_list = to_html(result, sections={"list"})
+        assert "错误清单" in only_list
+        assert "概览统计" not in only_list
+        assert "典型样例详情" not in only_list
+
+    def test_instances_index_toggle(self, result):
+        with_i = to_html(result, sections={"detail", "instances"})
+        without_i = to_html(result, sections={"detail"})
+        assert "实例行号" in with_i
+        assert "实例行号" not in without_i
+
+
+class TestSections:
+    """优化缺陷R58：内容板块勾选 → md/txt 按板块生成。"""
+
+    def test_md_sections_toggle(self, result):
+        md = to_markdown(result, sections={"overview"})
+        assert "概览统计" in md
+        assert "错误清单" not in md
+        assert "典型样例详情" not in md
+
+    def test_md_default_has_instances(self, result):
+        assert "实例行号" in to_markdown(result), "默认全板块含实例索引"
+        md = to_markdown(result, sections={"detail"})
+        assert "实例行号" not in md
+
+    def test_txt_sections(self, result):
+        txt = to_text(result, sections={"overview", "instances"})
+        assert "总行数" in txt
+        assert "实例行号" in txt
+        txt2 = to_text(result, sections={"overview"})
+        assert "实例行号" not in txt2
 
 
 # ---------------------------------------------------------------------------

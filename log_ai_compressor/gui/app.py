@@ -18,6 +18,8 @@ from __future__ import annotations
 import queue
 import threading
 import time
+import dataclasses
+import os
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox
@@ -41,8 +43,10 @@ from log_ai_compressor.core.models import (
 )
 from log_ai_compressor.core.pipeline import analyze_file, analyze_text
 from log_ai_compressor.export.reporters import (
+    SECTIONS_ALL,
     brief_summary,
     compare_to_markdown,
+    to_html,
     to_json,
     to_markdown,
     to_text,
@@ -5353,30 +5357,176 @@ class LogCompressorApp(_make_app_base()):
     def _on_export(self) -> None:
         if self._result is None and not self._compare_results:
             return
+        # 对比模式：单格式差异报告（保持旧流程）
+        if self._result is None:
+            path = filedialog.asksaveasfilename(
+                title="导出报告",
+                defaultextension=".md",
+                filetypes=[("Markdown 报告", "*.md"), ("JSON 数据", "*.json"),
+                           ("纯文本", "*.txt")])
+            if not path:
+                return
+            try:
+                content = compare_to_markdown(self._compare_results)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                self._status_label.configure(text=f"报告已导出：{path}")
+            except OSError as exc:
+                messagebox.showerror("导出失败", str(exc))
+            return
+        # 分析模式：优化缺陷R58 —— 导出选项对话框（格式多选 + 内容
+        # 板块 + 范围跟随当前级别过滤）
+        self._open_export_dialog()
+
+    # 优化缺陷R58：导出格式（对话框勾选 → _export_with_options 写出）
+    _EXPORT_FORMATS = (
+        ("html", "HTML 报告 (.html)"),
+        ("md", "Markdown (.md)"),
+        ("json", "JSON 数据 (.json)"),
+        ("txt", "纯文本 (.txt)"),
+    )
+    _EXPORT_SECTIONS = (
+        ("overview", "概览统计"),
+        ("list", "错误清单"),
+        ("detail", "典型样例详情"),
+        ("instances", "实例行号索引"),
+    )
+
+    def _open_export_dialog(self) -> None:
+        """导出选项对话框（优化缺陷R58）。
+
+        格式多选（一次同出多份，同名不同扩展名）；范围固定跟随当前
+        级别过滤勾选（用户决策）；内容板块勾选作用于 md/html/txt。
+        """
+        old = getattr(self, "_export_dlg", None)
+        if old is not None and old.winfo_exists():
+            old.focus_set()
+            return
+        dlg = ctk.CTkToplevel(self)
+        self._export_dlg = dlg
+        dlg.title("导出报告")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        # 居中于主窗口（物理像素坐标，winfo 已是 DPI 感知值）
+        self.update_idletasks()
+        cx = self.winfo_x() + max(0, (self.winfo_width() - 460) // 2)
+        cy = self.winfo_y() + max(0, (self.winfo_height() - 320) // 2)
+        dlg.geometry(f"460x320+{cx}+{cy}")
+
+        ctk.CTkLabel(dlg, text="导出格式（可多选，同名多份同出）",
+                     font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=16, pady=(14, 2))
+        self._export_fmt_vars: Dict[str, tk.BooleanVar] = {}
+        fmt_box = ctk.CTkFrame(dlg, fg_color="transparent")
+        fmt_box.pack(anchor="w", padx=16, fill="x")
+        for i, (key, label) in enumerate(self._EXPORT_FORMATS):
+            # 默认勾选 HTML（用户决策新增格式）
+            var = tk.BooleanVar(value=key == "html")
+            self._export_fmt_vars[key] = var
+            ctk.CTkCheckBox(fmt_box, text=label, variable=var,
+                            checkbox_width=18, checkbox_height=18).grid(
+                row=i // 2, column=i % 2, padx=(0, 18), pady=3, sticky="w")
+
+        # 范围：跟随当前级别过滤（导出时按勾选实时过滤）
+        active = [lv for lv, var in self._level_vars.items() if var.get()]
+        scope = "、".join(active) if active else "（未勾选级别）"
+        ctk.CTkLabel(dlg, text=f"范围：跟随当前级别过滤（{scope}）",
+                     text_color="#8fa4b8").pack(anchor="w", padx=16,
+                                                pady=(8, 2))
+
+        ctk.CTkLabel(dlg, text="内容板块（作用于 HTML / Markdown / 纯文本）",
+                     font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=16, pady=(8, 2))
+        self._export_sec_vars: Dict[str, tk.BooleanVar] = {}
+        sec_box = ctk.CTkFrame(dlg, fg_color="transparent")
+        sec_box.pack(anchor="w", padx=16, fill="x")
+        for i, (key, label) in enumerate(self._EXPORT_SECTIONS):
+            var = tk.BooleanVar(value=True)
+            self._export_sec_vars[key] = var
+            ctk.CTkCheckBox(sec_box, text=label, variable=var,
+                            checkbox_width=18, checkbox_height=18).grid(
+                row=i // 2, column=i % 2, padx=(0, 18), pady=3, sticky="w")
+
+        btn_box = ctk.CTkFrame(dlg, fg_color="transparent")
+        btn_box.pack(fill="x", padx=16, pady=(14, 14))
+        ctk.CTkButton(btn_box, text="取消", width=90, fg_color="#6b7280",
+                      command=dlg.destroy).pack(side="right", padx=(6, 0))
+        ok = ctk.CTkButton(btn_box, text="导出…", width=110,
+                           command=self._on_export_confirmed)
+        ok.pack(side="right")
+        self._accent_buttons.append((ok, "accent"))
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        dlg.after(60, dlg.focus_set)
+
+    def _on_export_confirmed(self) -> None:
+        """对话框确认：收集选项 → 选保存位置 → 多格式同出。"""
+        formats = [k for k, _ in self._EXPORT_FORMATS
+                   if self._export_fmt_vars[k].get()]
+        if not formats:
+            messagebox.showwarning("导出报告", "请至少勾选一种导出格式")
+            return
+        sections = {k for k, _ in self._EXPORT_SECTIONS
+                    if self._export_sec_vars[k].get()}
+        dlg = getattr(self, "_export_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.destroy()
+        first = formats[0]
         path = filedialog.asksaveasfilename(
-            title="导出报告",
-            defaultextension=".md",
-            filetypes=[("Markdown 报告", "*.md"), ("JSON 数据", "*.json"),
-                       ("纯文本", "*.txt")])
+            title="导出报告（同名多份按格式加扩展名）",
+            initialfile="日志分析报告",
+            defaultextension=f".{first}",
+            filetypes=[("报告文件", f"*.{first}"), ("全部文件", "*.*")])
         if not path:
             return
         try:
-            if self._result is not None:
-                # 优化缺陷R43：Top N 删除 —— 导出/摘要含全部错误种类
-                top_n = len(self._result.clusters)
-                if path.lower().endswith(".json"):
-                    content = to_json(self._result, top_n=top_n)
-                elif path.lower().endswith(".txt"):
-                    content = to_text(self._result, top_n=top_n)
-                else:
-                    content = to_markdown(self._result, top_n=top_n)
-            else:
-                content = compare_to_markdown(self._compare_results)
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            self._status_label.configure(text=f"报告已导出：{path}")
+            written = self._export_with_options(path, formats, sections)
         except OSError as exc:
             messagebox.showerror("导出失败", str(exc))
+            return
+        folder = os.path.dirname(written[0])
+        self._status_label.configure(
+            text=f"已导出 {len(written)} 个报告文件至 {folder}")
+        if messagebox.askyesno(
+                "导出成功",
+                f"已导出 {len(written)} 个文件：\n"
+                + "\n".join(os.path.basename(p) for p in written)
+                + "\n\n是否打开所在文件夹？"):
+            try:
+                os.startfile(folder)        # Windows 资源管理器定位
+            except (AttributeError, OSError):
+                pass
+
+    def _export_with_options(self, path: str, formats, sections) -> list:
+        """多格式导出执行器（优化缺陷R58；无对话框，可测试）。
+
+        范围跟随当前级别过滤勾选：按导出时刻的级别复选框实时过滤
+        簇（分析后改勾选不重新分析也能导出所见范围）；同一基础名
+        按格式各写一份文件，返回写出的路径列表。
+        """
+        base, _ext = os.path.splitext(path)
+        active = {lv for lv, var in self._level_vars.items() if var.get()}
+        clusters = [c for c in self._result.clusters if c.level in active]
+        view = dataclasses.replace(self._result, clusters=clusters)
+        full = len(view.clusters)
+        writers = {
+            "html": (".html", lambda: to_html(view, top_n=full,
+                                              sections=sections)),
+            "md": (".md", lambda: to_markdown(view, top_n=full,
+                                              sections=sections)),
+            "json": (".json", lambda: to_json(view, top_n=full)),
+            "txt": (".txt", lambda: to_text(view, top_n=full,
+                                            sections=sections)),
+        }
+        written = []
+        for fmt in ("html", "md", "json", "txt"):
+            if fmt not in formats:
+                continue
+            ext, build = writers[fmt]
+            out = base + ext
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write(build())
+            written.append(out)
+        return written
 
     def _on_copy_summary(self) -> None:
         if self._result is None:

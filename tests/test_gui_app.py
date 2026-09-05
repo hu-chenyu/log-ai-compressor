@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import json
+import os
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -4009,6 +4011,99 @@ class TestCompareMode:
                      if isinstance(w, tk.Toplevel)
                      and "对比差异列表" in w.title()]
         assert not remaining
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R58：导出报告（选项对话框 + 多格式同出 + 跟随级别过滤）
+# ---------------------------------------------------------------------------
+class TestExportReport:
+    _LEVEL_LOG = "\n".join([
+        "2024-01-01 09:00:00 ERROR [db] kernel panic in scheduler",
+        "2024-01-01 09:00:01 WARN [db] pool nearly exhausted",
+    ])
+
+    def test_export_with_options_multi_format(self, app, tmp_path):
+        """多格式同出：同一基础名按格式各写一份。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        written = app._export_with_options(
+            str(tmp_path / "报告"), {"html", "md", "json", "txt"},
+            {"overview", "list", "detail", "instances"})
+        names = sorted(os.path.basename(p) for p in written)
+        assert names == ["报告.html", "报告.json", "报告.md", "报告.txt"]
+        html = (tmp_path / "报告.html").read_text(encoding="utf-8")
+        assert "<!DOCTYPE html>" in html and "<style>" in html
+        payload = json.loads((tmp_path / "报告.json").read_text("utf-8"))
+        assert payload["clusters"], "JSON 应含簇数据"
+
+    def test_export_follows_level_filter(self, app, tmp_path):
+        """范围跟随当前级别过滤勾选（导出时刻实时过滤）。"""
+        for var in app._level_vars.values():
+            var.set(True)                # 分析时放行全部级别
+        _run_paste_analysis(app, self._LEVEL_LOG)
+        app.update()
+        levels_all = {c.level for c in app._result.clusters}
+        assert {"ERROR", "WARN"} <= levels_all, "结果应含 ERROR 与 WARN"
+        app._level_vars["WARN"].set(False)   # 导出前取消 WARN
+        app._export_with_options(str(tmp_path / "r"), {"json"}, set())
+        payload = json.loads((tmp_path / "r.json").read_text("utf-8"))
+        levels = {c["level"] for c in payload["clusters"]}
+        assert "WARN" not in levels, "未勾选级别不得出现在报告中"
+        assert "ERROR" in levels
+
+    def test_export_dialog_defaults(self, app):
+        """选项对话框默认：HTML 勾选、内容板块全选、范围随过滤。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._on_export()
+        app.update()
+        dlg = app._export_dlg
+        assert dlg is not None and dlg.winfo_exists()
+        assert app._export_fmt_vars["html"].get() is True
+        assert app._export_fmt_vars["md"].get() is False
+        assert all(v.get() for v in app._export_sec_vars.values())
+        dlg.destroy()
+        app.update()
+
+    def test_export_confirmed_requires_format(self, app, monkeypatch):
+        """未勾选任何格式确认 → 警告且不弹保存框。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._on_export()
+        app.update()
+        for var in app._export_fmt_vars.values():
+            var.set(False)
+        saves, warns = [], []
+        monkeypatch.setattr(
+            "log_ai_compressor.gui.app.filedialog.asksaveasfilename",
+            lambda **kw: saves.append(kw) and "")
+        monkeypatch.setattr(
+            "log_ai_compressor.gui.app.messagebox.showwarning",
+            lambda *a, **k: warns.append(a))
+        app._on_export_confirmed()
+        assert warns, "未勾选格式应弹警告"
+        assert not saves, "未勾选格式不得进入保存流程"
+        app._export_dlg.destroy()
+        app.update()
+
+    def test_export_confirmed_writes_and_prompts(self, app, tmp_path,
+                                                 monkeypatch):
+        """确认导出：写文件 + 状态栏反馈 + 成功提示（不打开文件夹）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._on_export()
+        app.update()
+        app._export_fmt_vars["html"].set(True)
+        monkeypatch.setattr(
+            "log_ai_compressor.gui.app.filedialog.asksaveasfilename",
+            lambda **kw: str(tmp_path / "out.html"))
+        monkeypatch.setattr(
+            "log_ai_compressor.gui.app.messagebox.askyesno",
+            lambda *a, **k: False)
+        app._on_export_confirmed()
+        app.update()
+        assert (tmp_path / "out.html").exists()
+        assert "已导出" in str(app._status_label.cget("text"))
 
 
 # ---------------------------------------------------------------------------
