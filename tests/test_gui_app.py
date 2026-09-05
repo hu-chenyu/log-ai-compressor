@@ -2887,7 +2887,7 @@ class TestMainWindowSearch:
         assert "过滤列表" in app._search_entry.cget("placeholder_text")
         info = app._search_entry.master.grid_info()
         assert str(info["row"]) == "0", "搜索框应与级别过滤同行"
-        assert str(info["column"]) == "2", "搜索框应在复选框右侧空白区"
+        assert str(info["column"]) == "3", "搜索框应在复选框右侧空白区"
 
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
@@ -3125,12 +3125,11 @@ class TestMainWindowSearch:
             app._rule_menu.winfo_reqwidth() - 2, "解析规则下拉不得裁字"
 
     def test_filter_bar_fixed_and_gaps_equal(self, app):
-        """优化缺陷R48：计数出现时整行位置固定；两区间等距。
+        """优化缺陷R49：计数出现时整行位置固定；两区间严格等距。
 
-        计数标签「X / Y 条」悬浮在输入框内部右端（place overlay，
-        不占网格需求）—— 出现/消失时级别复选框组、搜索框组、
-        上下文行数标签的位置完全不动；DEBUG→搜索框 与
-        搜索框→上下文行数 两区间距离相等（容差 4px，grid 取整）。
+        计数显示在输入框右侧恒定占位的影子框内（有计数显形、无
+        计数透明，不改变布局需求）；DEBUG→搜索框 与 搜索框→上下文
+        行数 两区间由等宽固定间隔列提供，与窗口大小无关、严格相等。
         """
         app.geometry("1600x900")
         app.update()
@@ -3161,12 +3160,21 @@ class TestMainWindowSearch:
         pos1 = (level_box.winfo_x(), search_box.winfo_x(),
                 ctx_lbl.winfo_x())
         assert pos0 == pos1, "计数出现时整行位置应完全固定"
-        # 计数悬浮在输入框内部（不占网格需求）
-        assert app._search_count.winfo_manager() == "place"
+        # 计数影子框：有计数时显形（与输入框同底色）、隐藏时透明
+        assert app._search_count_box.cget("fg_color") == \
+            app._search_entry.cget("fg_color"), "计数框应与输入框同底色"
         a1, b1 = gaps()
         assert abs(a1 - b1) <= 4, \
             f"两区间应等距（A={a1}, B={b1}）"
         assert abs(a0 - b0) <= 4, "计数隐藏时两区间同样等距"
+        # 清空计数 → 影子框透明隐形，位置仍不动
+        app._search_var.set("")
+        app._apply_search_filter()
+        app.update()
+        assert app._search_count_box.cget("fg_color") == "transparent"
+        pos2 = (level_box.winfo_x(), search_box.winfo_x(),
+                ctx_lbl.winfo_x())
+        assert pos0 == pos2, "计数消失后整行位置仍应固定"
 
 
 class TestFullscreenReuse:
