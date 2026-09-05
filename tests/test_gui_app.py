@@ -3300,6 +3300,52 @@ class TestMainWindowSearch:
         assert app._search_count.cget("text") == "6 / 6 条", \
             "点选实例行应对齐该实例自身序号"
 
+    def test_enter_nav_instance_blue_classic(self, app):
+        """优化缺陷R57：经典模式 Enter 定位实例行着蓝色选中样式。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("error")
+        app._apply_search_filter()
+        app.update()
+        app._on_search_enter(True)
+        for _ in range(10):
+            app.update()
+            time.sleep(0.01)
+        ci, ii = app._selected_inst
+        st = app._classic_expanded.get(ci)
+        assert st is not None and ii < len(st["labels"])
+        sel = app._palette()["sel_bot"]
+        wrap = st["labels"][ii]["wrap"]
+        assert wrap.cget("fg_color") == sel, \
+            "Enter 定位的实例行应着蓝色选中样式"
+        # 再 Enter：新实例行着蓝、旧实例行恢复默认
+        app._on_search_enter(True)
+        for _ in range(10):
+            app.update()
+            time.sleep(0.01)
+        ci2, ii2 = app._selected_inst
+        assert (ci2, ii2) != (ci, ii)
+        wrap2 = app._classic_expanded[ci2]["labels"][ii2]["wrap"]
+        assert wrap2.cget("fg_color") == sel
+        assert wrap.cget("fg_color") != sel, "旧实例行应恢复未选中样式"
+
+    def test_instance_click_marks_blue_classic(self, app):
+        """优化缺陷R57：经典模式点击实例行同样着蓝色选中样式。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._toggle_cluster_expand(0)
+        for _ in range(10):
+            app.update()
+            time.sleep(0.01)
+        st = app._classic_expanded[0]
+        # CTkLabel.bind 转发到内部 canvas（真实点击落点），事件须发到内层
+        st["labels"][1]["label"]._canvas.event_generate("<Button-1>",
+                                                        x=3, y=2)
+        app.update()
+        assert app._selected_inst == (0, 1)
+        assert st["labels"][1]["wrap"].cget("fg_color") == \
+            app._palette()["sel_bot"]
+
     def test_filtered_out_selection_auto_moves_to_first_match(self, app):
         """当前选中簇被过滤掉时自动选中首个匹配簇（详情不滞留陈旧内容）。"""
         _run_paste_analysis(app, self._two_cluster_log())
