@@ -694,16 +694,26 @@ class VirtualClusterList:
     def see_cluster(self, cidx: int) -> None:
         """滚动视口使指定簇行可见（搜索 Enter 跳转定位，优化缺陷R46）。"""
         for vidx, row in enumerate(self._data):
-            if row[0] != "c" or row[1] != cidx:
-                continue
-            total = max(1, len(self._data) * self.ROW_HEIGHT)
-            y = vidx * self.ROW_HEIGHT
-            vh = self._canvas.winfo_height()
-            top = self._canvas.canvasy(0)
-            if y < top or y + self.ROW_HEIGHT > top + vh:
-                self._canvas.yview_moveto(max(0.0, min(1.0, y / total)))
-            self._sync()
-            return
+            if row[0] == "c" and row[1] == cidx:
+                self._see_vidx(vidx)
+                return
+
+    def see_instance(self, cidx: int, iidx: int) -> None:
+        """滚动视口使指定实例行可见（优化缺陷R56：扁平实例导航定位）。"""
+        for vidx, row in enumerate(self._data):
+            if row[0] == "i" and row[1] == cidx and row[2] == iidx:
+                self._see_vidx(vidx)
+                return
+
+    def _see_vidx(self, vidx: int) -> None:
+        """按视图行索引滚动入视口并重绘（簇/实例行共用）。"""
+        total = max(1, len(self._data) * self.ROW_HEIGHT)
+        y = vidx * self.ROW_HEIGHT
+        vh = self._canvas.winfo_height()
+        top = self._canvas.canvasy(0)
+        if y < top or y + self.ROW_HEIGHT > top + vh:
+            self._canvas.yview_moveto(max(0.0, min(1.0, y / total)))
+        self._sync()
 
     def _tgl_icon_w(self) -> int:
         """「▶/▼」展开图标固定盒宽（物理px，修复缺陷R34）。
@@ -3845,15 +3855,55 @@ class LogCompressorApp(_make_app_base()):
                 pass
         self._search_job = self.after(200, self._apply_search_filter)
 
-    def _cluster_matches(self, cluster: ErrorCluster) -> bool:
-        """搜索关键字匹配（摘要/模块/级别/优先级档，小写子串；
-        与全屏 _fs_view_rows 同口径；空关键字全部命中）。"""
-        kw = self._search_kw
+    def _cluster_matches_kw(self, cluster: ErrorCluster, kw: str) -> bool:
+        """关键字匹配（摘要/模块/级别/优先级档，小写子串；主窗口
+        与全屏同口径；空关键字全部命中）。"""
         if not kw:
             return True
         hay = (f"{cluster.summary} {cluster.module} "
                f"{cluster.level} {cluster.priority_label}").lower()
         return kw in hay
+
+    def _cluster_matches(self, cluster: ErrorCluster) -> bool:
+        """搜索关键字匹配（主窗口关键字；空关键字全部命中）。"""
+        return self._cluster_matches_kw(cluster, self._search_kw)
+
+    def _search_targets(self, kw: str) -> list:
+        """优化缺陷R56：扁平实例导航序列 [(簇idx, 实例idx)…]。
+
+        每个匹配簇内「实例行摘要含关键字」的全部实例按列表顺序
+        收集；簇匹配（摘要/级别/优先级档）但无实例行含关键字时
+        回退该簇首实例（典型样例），保证每个匹配簇均可定位到。
+        """
+        seq = []
+        for ci, cluster in enumerate(self._displayed):
+            if not self._cluster_matches_kw(cluster, kw):
+                continue
+            # 实例命中判定含级别/模块上下文 —— 实例摘要本身不含
+            # 级别词（如 error），仅按摘要判定会把按级别命中的簇
+            # 全部回退首实例（导航退化为簇级，R56 测试实测暴露）
+            hits = [ii for ii, inst in enumerate(cluster.instances)
+                    if kw in (f"{inst.summary} {cluster.level} "
+                              f"{cluster.module}").lower()]
+            if hits:
+                seq.extend((ci, ii) for ii in hits)
+            elif cluster.instances:
+                seq.append((ci, 0))
+        return seq
+
+    @staticmethod
+    def _seq_index(seq: list, cidx: int, iidx=None) -> int:
+        """导航序列中的 1-based 位置（点实例按实例查、点簇取该簇
+        首个命中实例；不在序列归 0 = 未导航，优化缺陷R56）。"""
+        if iidx is not None:
+            try:
+                return seq.index((cidx, iidx)) + 1
+            except ValueError:
+                return 0
+        for pos, (ci, _ii) in enumerate(seq):
+            if ci == cidx:
+                return pos + 1
+        return 0
 
     def _apply_search_filter(self) -> None:
         """应用搜索过滤（防抖后执行）。
@@ -3890,23 +3940,22 @@ class LogCompressorApp(_make_app_base()):
             self._select_cluster(matches[0])
 
     def _on_search_enter(self, forward: bool = True):
-        """搜索框 Enter（Shift+Enter 反向）：定位下/上一个匹配簇。
+        """搜索框 Enter（Shift+Enter 反向）：定位下/上一个命中实例。
 
-        优化缺陷R46：先冲刷挂起的防抖过滤（关键字立即生效），目标
-        行滚动进视口。
-        优化缺陷R50：1-based 导航序号 —— 输入后 0/y（未定位）；
-        Enter 1/y→2/y→…→y/y→回绕 1/y；Shift+Enter 反向
-        （0/y 或 1/y 时反向到 y/y）。
+        优化缺陷R46：先冲刷挂起的防抖过滤（关键字立即生效）。
+        优化缺陷R56：扁平实例导航 —— 序列 = 各匹配簇内「实例行
+        摘要含关键字」的全部实例（无命中实例的簇回退首实例）；
+        定位时自动展开簇 ▼、选中该实例行、滚入视口，右侧详情
+        显示该实例自身上下文（高亮聚焦，不再只见簇父级）。
         """
         if self._search_job is not None:
             self._apply_search_filter()
         if self._result is None or not self._search_kw:
             return "break"
-        matches = [i for i, c in enumerate(self._displayed)
-                   if self._cluster_matches(c)]
-        if not matches:
+        seq = self._search_targets(self._search_kw)
+        if not seq:
             return "break"
-        n = len(matches)
+        n = len(seq)
         nav = self._search_nav
         if nav == 0:
             nav = 1 if forward else n
@@ -3915,11 +3964,54 @@ class LogCompressorApp(_make_app_base()):
         else:
             nav = n if nav == 1 else nav - 1
         self._search_nav = nav
-        target = matches[nav - 1]
-        self._select_cluster(target)
-        self._see_cluster_row(target)
+        ci, ii = seq[nav - 1]
+        self._jump_to_instance(ci, ii)
         self._update_search_count()
         return "break"
+
+    def _jump_to_instance(self, ci: int, ii: int) -> None:
+        """优化缺陷R56：定位实例行 —— 确保簇展开 + 选中实例 +
+        滚入视口（主列表/全屏虚拟列表经共享态同步）。"""
+        if ci not in self._expanded_clusters:
+            self._toggle_cluster_expand(ci)
+        self._select_instance(ci, ii)
+        self._see_instance_row(ci, ii)
+
+    def _see_instance_row(self, ci: int, ii: int) -> None:
+        """滚动左侧列表使实例行可见（虚拟/经典两路，优化缺陷R56）。"""
+        if self._virtual_list is not None:
+            self._virtual_list.see_instance(ci, ii)
+            return
+        # 经典模式：实例行在展开区 labels 中（批量渐进创建，未创建
+        # 到时回退滚动至簇行；选中态行创建时自动着选中色）
+        state = self._classic_expanded.get(ci)
+        if state is not None and ii < len(state.get("labels", [])):
+            wrap = state["labels"][ii].get("wrap")
+            if wrap is not None:
+                self._scroll_list_to(wrap)
+                return
+        self._see_cluster_row(ci)
+
+    def _scroll_list_to(self, widget) -> None:
+        """滚动经典列表使指定控件可见（y 沿父链换算到滚动容器）。"""
+        try:
+            canvas = self._cluster_list._parent_canvas
+            self.update_idletasks()
+            region = canvas.cget("scrollregion")
+            total = float(str(region).split()[3]) if region else 0.0
+            if total <= 0:
+                return
+            y = float(widget.winfo_y())
+            parent = widget.master
+            while parent is not None and parent is not self._cluster_list:
+                y += float(parent.winfo_y())
+                parent = parent.master
+            vh = float(canvas.winfo_height())
+            top = canvas.canvasy(0)
+            if y < top or y + widget.winfo_height() > top + vh:
+                canvas.yview_moveto(max(0.0, min(1.0, y / total)))
+        except (tk.TclError, ValueError, IndexError, AttributeError):
+            pass
 
     def _see_cluster_row(self, idx: int) -> None:
         """滚动左侧列表使簇行可见（Enter 跳转定位；虚拟/经典两路）。"""
@@ -3978,28 +4070,24 @@ class LogCompressorApp(_make_app_base()):
         if not show:
             label.configure(text="")
             return
-        # 优化缺陷R50：计数 = 导航序号 / 匹配总数（y 随关键字动态
-        # 变化；输入后未导航为 0/y，Enter/Shift+Enter 循环定位）
-        # 优化缺陷R55：单位「簇」—— 列表侧按错误簇计数/跳转，与详情
-        # 全屏文内查找的「处」（出现次数）语义区分，避免混淆
-        total = sum(1 for c in self._displayed if self._cluster_matches(c))
-        label.configure(text=f"{self._search_nav} / {total} 簇")
+        # 优化缺陷R56：计数 = 导航序号 / 命中实例总条数（扁平实例
+        # 导航序列长度，随关键字动态变化；输入后未导航为 0/y）
+        total = len(self._search_targets(self._search_kw))
+        label.configure(text=f"{self._search_nav} / {total} 条")
 
     def _on_fs_search_enter(self, forward: bool = True):
-        """全屏搜索 Enter（Shift+Enter 反向）：定位下/上一个匹配簇。
+        """全屏搜索 Enter（Shift+Enter 反向）：定位下/上一个命中实例。
 
-        优化缺陷R53：与主窗口 _on_search_enter 同一导航语义 ——
-        输入后 0/y（未定位）；Enter 1/y→2/y→…→y/y→回绕 1/y，
-        Shift+Enter 反向（0/y 或 1/y 时反向到 y/y）；目标行滚动
-        进全屏虚拟列表视口，详情面板经共享选中态联动。
+        优化缺陷R53：与主窗口同一导航语义（0/y→1/y→…→y/y→回绕）。
+        优化缺陷R56：扁平实例导航 —— 自动展开簇、选中实例行、
+        滚入全屏虚拟列表视口，详情经共享选中态联动到该实例。
         """
         if self._result is None or not getattr(self, "_fs_search_kw", ""):
             return "break"
-        matches = [i for i, c in enumerate(self._displayed)
-                   if self._fs_cluster_matches(c)]
-        if not matches:
+        seq = self._search_targets(self._fs_search_kw)
+        if not seq:
             return "break"
-        n = len(matches)
+        n = len(seq)
         nav = getattr(self, "_fs_search_nav", 0)
         if nav == 0:
             nav = 1 if forward else n
@@ -4008,11 +4096,11 @@ class LogCompressorApp(_make_app_base()):
         else:
             nav = n if nav == 1 else nav - 1
         self._fs_search_nav = nav
-        target = matches[nav - 1]
-        self._select_cluster(target)          # 共享选中态：全屏详情联动
+        ci, ii = seq[nav - 1]
+        self._jump_to_instance(ci, ii)        # 共享选中态：全屏详情联动
         fs_vl = getattr(self, "_fs_vl", None)
         if fs_vl is not None:
-            fs_vl.see_cluster(target)
+            fs_vl.see_instance(ci, ii)
         self._update_fs_search_count()
         return "break"
 
@@ -4037,9 +4125,9 @@ class LogCompressorApp(_make_app_base()):
         if not show:
             label.configure(text="")
             return
-        total = sum(1 for c in self._displayed
-                    if self._fs_cluster_matches(c))
-        label.configure(text=f"{self._fs_search_nav} / {total} 簇")
+        total = len(self._search_targets(
+            getattr(self, "_fs_search_kw", "")))
+        label.configure(text=f"{self._fs_search_nav} / {total} 条")
 
     def _apply_fd_search(self) -> None:
         """详情全屏文内查找（优化缺陷R54）。
@@ -4632,22 +4720,21 @@ class LogCompressorApp(_make_app_base()):
         if sync_nav:
             self._sync_search_nav(idx)
 
-    def _sync_search_nav(self, idx: int) -> None:
-        """优化缺陷R50：用户主动点选簇时同步查找导航序号（计数
-        x/y 的 x）；点选的簇不在匹配序列中时序号归 0（未导航）。
-        优化缺陷R53：全屏窗口计数同步（独立关键字/序号，同口径）。"""
+    def _sync_search_nav(self, cidx: int, iidx=None) -> None:
+        """优化缺陷R50：用户主动点选时同步查找导航序号（计数
+        x/y 的 x），不在序列归 0（未导航）。
+        优化缺陷R53：全屏窗口计数同步（独立关键字/序号，同口径）。
+        优化缺陷R56：扁平实例导航 —— 点簇行同步到该簇首个命中
+        实例序号；点实例行同步到该实例自身序号。"""
         if self._result is None:
             return
         if self._search_kw:
-            matches = [i for i, c in enumerate(self._displayed)
-                       if self._cluster_matches(c)]
-            self._search_nav = matches.index(idx) + 1 if idx in matches else 0
+            seq = self._search_targets(self._search_kw)
+            self._search_nav = self._seq_index(seq, cidx, iidx)
             self._update_search_count()
         if getattr(self, "_fs_search_kw", ""):
-            matches = [i for i, c in enumerate(self._displayed)
-                       if self._fs_cluster_matches(c)]
-            self._fs_search_nav = (matches.index(idx) + 1
-                                   if idx in matches else 0)
+            seq = self._search_targets(self._fs_search_kw)
+            self._fs_search_nav = self._seq_index(seq, cidx, iidx)
             self._update_fs_search_count()
 
     def _sync_fs_detail(self) -> None:
@@ -4681,14 +4768,9 @@ class LogCompressorApp(_make_app_base()):
             vl._sync()      # 重绘可见槽位（选中态共享自应用层）
 
     def _fs_cluster_matches(self, cluster: ErrorCluster) -> bool:
-        """优化缺陷R53：全屏搜索关键字匹配（与主窗口
-        _cluster_matches 同口径；空关键字全部命中）。"""
-        kw = getattr(self, "_fs_search_kw", "")
-        if not kw:
-            return True
-        hay = (f"{cluster.summary} {cluster.module} "
-               f"{cluster.level} {cluster.priority_label}").lower()
-        return kw in hay
+        """优化缺陷R53：全屏搜索关键字匹配（与主窗口同口径）。"""
+        return self._cluster_matches_kw(
+            cluster, getattr(self, "_fs_search_kw", ""))
 
     def _fs_view_rows(self) -> list:
         """优化缺陷R42：全屏列表视图行（搜索过滤后的簇行 +
@@ -4770,7 +4852,8 @@ class LogCompressorApp(_make_app_base()):
         self._fill_instance_detail(self._detail_box, cluster,
                                    cluster.instances[iidx])
         self._sync_fs_detail()          # 优化缺陷R42：全屏联动
-        self._sync_search_nav(cidx)     # 优化缺陷R50：点实例同步导航序号
+        # 优化缺陷R56：点实例按实例自身同步导航序号（扁平实例导航）
+        self._sync_search_nav(cidx, iidx)
 
     def _toggle_expand_classic(self, idx: int) -> None:
         """经典列表展开/收起簇实例（行内就地插入实例区）。
