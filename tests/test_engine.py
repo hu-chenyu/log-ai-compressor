@@ -8,8 +8,10 @@ from log_ai_compressor.rules.engine import (
     BUILTIN_RULESET,
     RuleSet,
     RuleSetError,
+    detect_rule,
     list_presets,
     load_ruleset,
+    stratified_sample,
 )
 
 
@@ -217,3 +219,52 @@ class TestCombinedRegexEquivalence:
             assert level in rs._hint_combined, f"{level} 提示未合并"
         assert "FATAL" not in rs._hint_combined, \
             "修复缺陷R18：FATAL 关键词提示应已删除（防 -Wfatal-errors 误判）"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R71：规则自动识别（分层采样 + 打分选择）
+# ---------------------------------------------------------------------------
+class TestDetectRule:
+    _EMBEDDED_LOG = [
+        "[  123.456] [ERR ] [im_pll] clk config failed",
+        "[  123.789] [WARN] [im_div] rate mismatch",
+        "12:00:01.123 FAIL test_case_clk_freq",
+    ]
+    _GENERIC_LOG = [
+        "2024-01-01 10:00:00 ERROR [db] connection refused",
+        "2024-01-01 10:00:01 WARN [cache] memory above 90%",
+        "2024-01-01 10:00:02 ERROR [api] request failed",
+    ]
+    _JENKINS_STYLE_LOG = [
+        "[2026-09-04T06:12:12.244Z] error: could not apply 84b4dc4",
+        "[2026-09-04T06:12:16.697Z] Finished: FAILURE",
+        "[2026-09-04T06:12:10.000Z] remote: warning: subject >50",
+    ]
+
+    def test_embedded_log_detects_embedded(self):
+        """相对秒+模块格式：embedded 命中率/时间戳/模块全面领先。"""
+        assert detect_rule(self._EMBEDDED_LOG) == "embedded"
+
+    def test_iso_log_detects_generic(self):
+        assert detect_rule(self._GENERIC_LOG) == "generic"
+
+    def test_bracket_iso_tiebreak_generic(self):
+        """方括号 ISO（generic 与 jenkins 同分）→ 兜底 generic。"""
+        assert detect_rule(self._JENKINS_STYLE_LOG) == "generic"
+
+    def test_garbage_fallback_generic(self):
+        """全都不命中（0 分同分）→ 兜底 candidates 首位 generic。"""
+        assert detect_rule(["{{{{随机文本}}}}", "!!!!"]) == "generic"
+
+    def test_stratified_sample_covers_head_mid_tail(self):
+        lines = [f"line-{i}" for i in range(1000)]
+        sample = stratified_sample(lines, 150)
+        assert len(sample) == 150
+        assert sample[0] == "line-0", "应含头部"
+        assert "line-999" in sample, "应含尾部"
+        mid_idx = (1000 - 50) // 2
+        assert f"line-{mid_idx}" in sample, "应含中部"
+
+    def test_stratified_sample_small_input(self):
+        lines = ["a", "b"]
+        assert stratified_sample(lines) == lines

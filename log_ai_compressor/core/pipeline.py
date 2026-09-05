@@ -35,7 +35,13 @@ from log_ai_compressor.core.encoding import detect_encoding, open_text_stream
 from log_ai_compressor.core.filters import EntryFilter, FilterConfig
 from log_ai_compressor.core.models import AnalysisResult, RunStats
 from log_ai_compressor.core.parser import LogParser
-from log_ai_compressor.rules.engine import RuleSet, load_ruleset
+from log_ai_compressor.rules.engine import (
+    AUTO_RULE,
+    RuleSet,
+    detect_rule,
+    load_ruleset,
+    stratified_sample,
+)
 
 # 进度回调签名：cb({"lines", "lps", "clusters", "elapsed", "phase"})
 ProgressCallback = Callable[[dict], None]
@@ -43,6 +49,37 @@ ProgressCallback = Callable[[dict], None]
 
 class ProcessingCancelled(Exception):
     """用户主动取消处理（run 仍会返回增量结果前抛出/或内部捕获）。"""
+
+
+def _sample_log_file(path: Path, encoding: str,
+                     total: int = 150) -> List[str]:
+    """文件分层采样（头 50 + 中 50 + 尾 50，优化缺陷R71）。
+
+    中部/尾部按文件大小估算行均长后 seek 读取（不整读大文件）；
+    seek 落点可能截断多字节字符，首行残段直接丢弃，解码错误替换。
+    小文件（估算行数 ≤total）退化为全量头部读取。
+    """
+    head: List[str] = []
+    with open_text_stream(path, encoding) as stream:
+        for i, line in enumerate(stream):
+            if i >= total // 3:
+                break
+            head.append(line.rstrip("\r\n"))
+    try:
+        size = path.stat().st_size
+        avg = max(1, sum(len(l) + 1 for l in head) // max(1, len(head)))
+        if size // avg <= total:
+            return head
+        for frac in (0.5, 1.0):
+            offset = int(size * frac) - avg * (total // 3)
+            with open(path, "rb") as fh:
+                fh.seek(max(0, offset))
+                data = fh.read(avg * (total // 3 + 4))
+            seg = data.decode(encoding, errors="replace").splitlines()[1:]
+            head.extend(seg[:total // 3])
+    except (OSError, UnicodeError, LookupError):
+        pass
+    return head
 
 
 @dataclass
@@ -64,8 +101,15 @@ class LogPipeline:
         self._config = config or PipelineConfig()
         self._progress_cb = progress_cb
         self._cancel_event = cancel_event
-        # 规则集：外部注入优先（复用已编译规则），否则按配置名加载
-        self._ruleset = ruleset or load_ruleset(self._config.rule)
+        # 规则集：外部注入优先（复用已编译规则），否则按配置名加载；
+        # 优化缺陷R71：rule=auto 时延迟到行源处自动识别后再加载
+        self._auto_rule = ruleset is None and self._config.rule == AUTO_RULE
+        if ruleset is not None:
+            self._ruleset = ruleset
+        elif self._auto_rule:
+            self._ruleset = None
+        else:
+            self._ruleset = load_ruleset(self._config.rule)
         self._entry_filter = EntryFilter(self._config.filter_config)
         self._ctx = self._config.filter_config.context_lines
 
@@ -78,16 +122,30 @@ class LogPipeline:
         if not path.is_file():
             raise FileNotFoundError(f"日志文件不存在: {path}")
         encoding = detect_encoding(path)
+        auto = self._resolve_ruleset(_sample_log_file(path, encoding))
         stats = RunStats(source=str(path), encoding=encoding,
-                         rule_name=self._ruleset.name)
+                         rule_name=self._ruleset.name + ("（自动）" if auto else ""))
         with open_text_stream(path, encoding) as stream:
             return self._process_lines(stream, stats)
 
     def run_text(self, text: str, source: str = "<粘贴文本>") -> AnalysisResult:
         """分析粘贴的日志文本。"""
+        lines = text.splitlines()
+        auto = self._resolve_ruleset(stratified_sample(lines))
         stats = RunStats(source=source, encoding="utf-8",
-                         rule_name=self._ruleset.name)
-        return self._process_lines(text.splitlines(), stats)
+                         rule_name=self._ruleset.name + ("（自动）" if auto else ""))
+        return self._process_lines(lines, stats)
+
+    def _resolve_ruleset(self, sample: List[str]) -> bool:
+        """auto 模式：按分层采样打分选规则并加载（返回是否自动识别）。
+
+        优化缺陷R71：rule_name 追加「（自动）」标记，状态栏/报告可见
+        实际生效的规则；手动指定规则时直接返回 False（原行为不变）。
+        """
+        if not self._auto_rule:
+            return False
+        self._ruleset = load_ruleset(detect_rule(sample))
+        return True
 
     # ------------------------------------------------------------------
     # 核心流式处理
@@ -196,6 +254,7 @@ class LogPipeline:
 
         # 日志时间范围（所有带时间戳条目，不限级别）
         if entry.timestamp is not None:
+            stats.ts_entries += 1     # 优化缺陷R71：时间戳识别率分子
             if stats.time_start is None or entry.timestamp < stats.time_start:
                 stats.time_start = entry.timestamp
             if stats.time_end is None or entry.timestamp > stats.time_end:

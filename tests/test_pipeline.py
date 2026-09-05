@@ -84,6 +84,51 @@ class TestAnalyzeText:
         assert len(r.clusters) == 1
         assert "token" in r.clusters[0].summary
 
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R71：rule="auto" 自动识别（分层采样打分 + rule_name 标记）
+# ---------------------------------------------------------------------------
+class TestAutoRule:
+    _EMBEDDED_LOG = "\n".join(
+        ["[  123.456] [ERR ] [im_pll] clk config failed",
+         "[  123.789] [WARN] [im_div] rate mismatch warning",
+         "12:00:01.123 FAIL test_case_clk_freq"])
+
+    def test_auto_detects_embedded(self):
+        r = analyze_text(self._EMBEDDED_LOG, rule="auto",
+                         levels=["ERROR", "FAIL", "WARN"])
+        assert r.stats.rule_name == "embedded（自动）"
+        assert any(c.module == "im_pll" for c in r.clusters), \
+            "auto 应选 embedded 并解析出模块"
+
+    def test_auto_detects_generic_on_iso(self):
+        r = analyze_text(SAMPLE_LOG, rule="auto")
+        assert r.stats.rule_name == "generic（自动）"
+        assert r.stats.error_lines == 7, "auto 选 generic 后语义不变"
+
+    def test_auto_rule_file_mode(self, tmp_path):
+        """文件模式：分层采样（头/中/尾 seek）后同样自动识别。"""
+        log = tmp_path / "emb.log"
+        log.write_text(self._EMBEDDED_LOG + "\n", encoding="utf-8")
+        r = analyze_file(str(log), rule="auto",
+                         levels=["ERROR", "FAIL", "WARN"])
+        assert r.stats.rule_name == "embedded（自动）"
+        assert any(c.module == "im_pll" for c in r.clusters)
+
+    def test_manual_rule_unaffected(self):
+        """手动指定规则：无自动识别标记，行为与此前完全一致。"""
+        r = analyze_text(self._EMBEDDED_LOG, rule="embedded",
+                         levels=["ERROR", "FAIL", "WARN"])
+        assert r.stats.rule_name == "embedded"
+        r2 = analyze_text(SAMPLE_LOG)
+        assert r2.stats.rule_name == "generic"
+
+    def test_ts_entries_counted(self):
+        """优化缺陷R71：ts_entries 计数（体检时间戳识别率分子）。"""
+        r = analyze_text(SAMPLE_LOG)
+        assert r.stats.ts_entries > 0
+        assert r.stats.ts_entries <= r.stats.entry_lines
+
     def test_filter_exclude(self):
         r = analyze_text(SAMPLE_LOG, exclude=["request"])
         assert not any("request" in c.summary for c in r.clusters)

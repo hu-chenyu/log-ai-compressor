@@ -3851,14 +3851,8 @@ def _texts_in(root):
 
 # ---------------------------------------------------------------------------
 # 修复8：解析规则悬停说明（动态 tooltip + 状态栏说明）
+# 优化缺陷R71：选项改中文显示名 + 自动识别默认，说明按规则键查找
 # ---------------------------------------------------------------------------
-RULE_TOOLTIPS = {
-    "generic": "通用系统日志格式，适用于大多数标准应用日志、服务日志",
-    "embedded": "嵌入式/UT测试日志格式，适用于嵌入式设备、单元测试输出、编译日志",
-    "jenkins": "Jenkins控制台输出格式，适用于CI/CD流水线日志、构建日志",
-}
-
-
 class TestRuleTooltips:
     def test_rule_help_tooltip_exists(self, app):
         """解析规则旁必须有 ⓘ 悬停说明。"""
@@ -3866,43 +3860,48 @@ class TestRuleTooltips:
 
     def test_rule_tooltip_dynamic_text(self, app):
         """tooltip 文本必须跟随当前选中的解析规则动态变化。"""
+        from log_ai_compressor.gui.app import RULE_DESCRIPTIONS, RULE_DISPLAY
         tip = app._rule_help_tooltip
-        for rule, expected in RULE_TOOLTIPS.items():
-            app._rule_menu.set(rule)
+        for key, expected in RULE_DESCRIPTIONS.items():
+            app._on_rule_changed(RULE_DISPLAY[key])
             assert tip._current_text() == expected, \
-                f"规则 {rule} 的悬停说明不正确"
+                f"规则 {key} 的悬停说明不正确"
 
     def test_rule_tooltip_shows_current_rule_text(self, app):
         """显示中的 tooltip 内容与当前规则一致。"""
+        from log_ai_compressor.gui.app import RULE_DESCRIPTIONS
         tip = app._rule_help_tooltip
-        app._rule_menu.set("embedded")
+        app._on_rule_changed("嵌入式 embedded")
         tip._show()
         app.update()
         assert tip._tip is not None
         canvas = tip._tip.winfo_children()[0]
         item = canvas.find_withtag("text")[0]
-        assert canvas.itemcget(item, "text") == RULE_TOOLTIPS["embedded"]
+        assert canvas.itemcget(item, "text") == \
+            RULE_DESCRIPTIONS["embedded"]
         tip._hide_now()
 
     def test_all_rules_have_descriptions(self):
-        """三个内置规则都必须有说明文本。"""
-        from log_ai_compressor.gui.app import RULE_DESCRIPTIONS, RULE_NAMES
-        for name in RULE_NAMES:
-            assert name in RULE_DESCRIPTIONS
+        """全部规则键（含 auto）都必须有说明文本。"""
+        from log_ai_compressor.gui.app import RULE_DESCRIPTIONS, RULE_KEYS
+        assert set(RULE_KEYS) == set(RULE_DESCRIPTIONS)
+        for name in RULE_KEYS:
             assert len(RULE_DESCRIPTIONS[name]) >= 10
 
     def test_rule_change_updates_status_bar(self, app):
         """切换规则时状态栏即时展示适用场景说明。"""
-        app._on_rule_changed("generic")
-        assert "通用系统日志格式" in app._status_label.cget("text")
-        app._on_rule_changed("jenkins")
+        app._on_rule_changed("通用 generic")
+        assert "大多数日志首选" in app._status_label.cget("text")
+        app._on_rule_changed("CI构建 jenkins")
         assert "Jenkins" in app._status_label.cget("text")
 
-    def test_unknown_rule_tooltip_empty(self, app):
-        """未知规则名时 tooltip 文本为空（不显示误导信息）。"""
+    def test_unknown_rule_ignored(self, app):
+        """未知显示名不破坏当前状态（键与 tooltip 均不变）。"""
         tip = app._rule_help_tooltip
-        app._rule_menu.set("nonexistent-rule")
-        assert tip._current_text() == ""
+        before = tip._current_text()
+        app._on_rule_changed("不存在的规则")
+        assert app._rule_key == "auto"
+        assert tip._current_text() == before
 
 
 # ---------------------------------------------------------------------------
@@ -4282,6 +4281,52 @@ class TestCharts:
             assert app._displayed[app._selected_row].level == level
         finally:
             self._close(app)
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R71：规则自动识别（默认自动识别 + 选中项消失 + 体检提示）
+# ---------------------------------------------------------------------------
+class TestRuleAutoDetect:
+    def test_dropdown_defaults_to_auto(self, app):
+        """默认选中「自动识别（推荐）」，下拉列表只剩另外三个。"""
+        assert app._rule_key == "auto"
+        assert app._rule_menu.get() == "自动识别（推荐）"
+        values = list(app._rule_menu.cget("values"))
+        assert "自动识别（推荐）" not in values, \
+            "选中项不应出现在下拉列表"
+        assert len(values) == 3
+
+    def test_switch_hides_selected_from_list(self, app):
+        """切换到「嵌入式 embedded」：键更新 + 该项从列表消失。"""
+        app._on_rule_changed("嵌入式 embedded")
+        assert app._rule_key == "embedded"
+        values = list(app._rule_menu.cget("values"))
+        assert "嵌入式 embedded" not in values
+        assert "自动识别（推荐）" in values
+        assert app._current_config_dict()["rule"] == "embedded"
+
+    def test_health_hint_on_mismatched_rule(self, app):
+        """选错规则（embedded 解析 ISO 日志）→ 状态栏可点击提示。"""
+        app._on_rule_changed("嵌入式 embedded")
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        text = str(app._status_label.cget("text"))
+        assert "可能规则不匹配" in text, f"应给出换规则提示，实际: {text}"
+        assert "通用 generic" in text
+
+    def test_apply_suggested_rule_switches_and_reruns(self, app):
+        """点击提示：切换到建议规则并重跑（提示随之清除）。"""
+        app._on_rule_changed("嵌入式 embedded")
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._apply_suggested_rule("generic")
+        assert app._rule_key == "generic"
+        deadline = time.time() + 60
+        while time.time() < deadline and app._result is None:
+            app.update()
+            time.sleep(0.02)
+        assert app._result is not None, "重跑应完成"
+        assert "可能规则不匹配" not in str(app._status_label.cget("text"))
 
 
 # ---------------------------------------------------------------------------

@@ -212,6 +212,65 @@ class RuleSet:
 
 
 # ---------------------------------------------------------------------------
+# 规则自动识别（优化缺陷R71：「自动识别（推荐）」模式的核心打分器）
+# ---------------------------------------------------------------------------
+AUTO_RULE = "auto"
+RULE_CANDIDATES = ("generic", "embedded", "jenkins")
+# 分层采样规模（头/中/尾三段；日志格式可能随构建阶段变化）
+DETECT_SAMPLE_LINES = 150
+
+
+def stratified_sample(lines: List[str],
+                      total: int = DETECT_SAMPLE_LINES) -> List[str]:
+    """头/中/尾三段分层采样（格式在日志前中后期可能不同）。"""
+    n = len(lines)
+    if n <= total:
+        return list(lines)
+    third = total // 3
+    mid_start = max(0, (n - third) // 2)
+    return (list(lines[:third])
+            + list(lines[mid_start:mid_start + third])
+            + list(lines[n - third:]))
+
+
+def detect_rule(lines: List[str],
+                candidates=RULE_CANDIDATES) -> str:
+    """对采样行打分选最优规则（优化缺陷R71）。
+
+    评分维度按字典序比较：结构化命中率 → 时间戳识别率 → 模块
+    提取率（jenkins 式「每行都命中」不会凭命中率虚高获胜，时间
+    戳/模块才是区分度）；完全同分按 candidates 顺序兜底（generic
+    最泛用排首位）。
+    """
+    best_name, best_score = candidates[0], None
+    n = max(1, len(lines))
+    for name in candidates:
+        rs = load_ruleset(name)
+        hits = ts = mod = 0
+        for line in lines:
+            if not line.strip():
+                continue
+            m = rs.match_line(line)
+            if m is None:
+                continue
+            groups = m.groupdict()
+            # 纯消息整吞不算结构化命中（jenkins 通吃模式对任意行
+            # 都"命中"，不剔除会在全 0 分场景虚假获胜）
+            if not (groups.get("timestamp") or groups.get("level")
+                    or groups.get("module")):
+                continue
+            hits += 1
+            if groups.get("timestamp"):
+                ts += 1
+            if groups.get("module"):
+                mod += 1
+        score = (hits / n, ts / n, mod / n)
+        if best_score is None or score > best_score:
+            best_name, best_score = name, score
+    return best_name
+
+
+# ---------------------------------------------------------------------------
 # 兜底规则集（等价 generic.yaml，包数据缺失时使用）
 # ---------------------------------------------------------------------------
 _TS_ISO = (

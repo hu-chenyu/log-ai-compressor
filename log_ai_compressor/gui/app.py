@@ -42,6 +42,7 @@ from log_ai_compressor.core.models import (
     format_timestamp,
 )
 from log_ai_compressor.core.pipeline import analyze_file, analyze_text
+from log_ai_compressor.rules.engine import detect_rule, stratified_sample
 from log_ai_compressor.export.reporters import (
     SECTIONS_ALL,
     brief_summary,
@@ -86,7 +87,15 @@ def _make_app_base():
 # gcc fatal error 经 LEVEL_ALIASES 归一为 ERROR（最高严重级，
 # 由 ERROR 复选框统一控制）。剩余五级别自然前移补齐。
 LEVEL_CHECKS = ("ERROR", "FAIL", "WARN", "INFO", "DEBUG")
-RULE_NAMES = ("generic", "embedded", "jenkins")
+# 优化缺陷R71：解析规则三件套（自动识别默认 + 中文显示名映射）
+RULE_KEYS = ("auto", "generic", "embedded", "jenkins")
+RULE_DISPLAY = {
+    "auto": "自动识别（推荐）",
+    "generic": "通用 generic",
+    "embedded": "嵌入式 embedded",
+    "jenkins": "CI构建 jenkins",
+}
+_RULE_BY_DISPLAY = {v: k for k, v in RULE_DISPLAY.items()}
 _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
 
 # 优化：五个级别复选框旁的 ⓘ 悬停说明（每个级别对应自己的解释）
@@ -250,11 +259,16 @@ _DETAIL_TAG_COLORS = {"kw": "#ff6b6b", "bstack": "#fbbf24",
                       "meta": "#8fa4b8", "fold": "#a78bfa",
                       "header": "#4dd0e1"}
 
-# 解析规则说明（悬停提示，修复缺陷#8）
+# 解析规则说明（悬停提示，修复缺陷#8；优化缺陷R71：附真实样例行）
 RULE_DESCRIPTIONS = {
-    "generic": "通用系统日志格式，适用于大多数标准应用日志、服务日志",
-    "embedded": "嵌入式/UT测试日志格式，适用于嵌入式设备、单元测试输出、编译日志",
-    "jenkins": "Jenkins控制台输出格式，适用于CI/CD流水线日志、构建日志",
+    "auto": "自动识别（推荐）：分析前取 150 行分层采样，按命中率→"
+            "时间戳→模块给三套规则打分，自动选最优（无需懂规则）",
+    "generic": "通用（大多数日志首选）\n"
+               "样例: 2024-01-01 10:00:00 ERROR [db] connection refused",
+    "embedded": "嵌入式/UT测试（串口、单测、编译输出）\n"
+                "样例: [  123.456] [ERR ] [im_pll] clk config failed",
+    "jenkins": "CI构建（Jenkins/流水线控制台）\n"
+               "样例: [2024-01-01T12:00:00Z] [err] compile failed",
 }
 
 
@@ -2077,11 +2091,14 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R10：级别复选框容器跨列 1~6，解析规则右移至列 7~9
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=7, padx=(6, 2),
                                                   sticky="e")
-        # 优化缺陷R47：下拉宽度 130→100（最长选项 embedded 右侧仍有
-        # 大量空白，实测余量充足）；为搜索计数标签腾出行内需求空间
-        self._rule_menu = ctk.CTkOptionMenu(panel, values=list(RULE_NAMES),
-                                            width=100,
-                                            command=self._on_rule_changed)
+        # 优化缺陷R71：下拉显示中文名，默认「自动识别（推荐）」；
+        # 当前选中项不出现在下拉列表（与主题选择器同款交互）
+        self._rule_key = "auto"
+        self._rule_menu = ctk.CTkOptionMenu(
+            panel, width=150,
+            values=[RULE_DISPLAY[k] for k in RULE_KEYS if k != "auto"],
+            command=self._on_rule_changed)
+        self._rule_menu.set(RULE_DISPLAY["auto"])
         self._rule_menu.grid(row=0, column=8, padx=(2, 0), sticky="w")
         # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
         rule_help = ctk.CTkLabel(
@@ -2090,7 +2107,7 @@ class LogCompressorApp(_make_app_base()):
         rule_help.grid(row=0, column=9, padx=(4, 12), sticky="w")
         self._rule_help_tooltip = Tooltip(
             rule_help,
-            lambda: RULE_DESCRIPTIONS.get(self._rule_menu.get(), ""))
+            lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
 
     def _build_action_panel(self) -> None:
         panel = ctk.CTkFrame(self)
@@ -3195,8 +3212,10 @@ class LogCompressorApp(_make_app_base()):
         if isinstance(cfg.get("context_lines"), int):
             self._ctx_entry.delete(0, "end")
             self._ctx_entry.insert(0, str(cfg["context_lines"]))
-        if cfg.get("rule") in RULE_NAMES:
-            self._rule_menu.set(cfg["rule"])
+        if cfg.get("rule") in RULE_KEYS:
+            # 优化缺陷R71：配置存规则键（旧配置 generic 等键直接兼容），
+            # 下拉显示中文名且选中项移出列表
+            self._on_rule_changed(RULE_DISPLAY[cfg["rule"]])
         # 修复缺陷R10：字体大小档位恢复（__init__ 已按档位建字体，
         # 此处仅同步选择器显示；字号一致时回调为空操作）
         if cfg.get("font_size") in FONT_SIZE_SCALE:
@@ -3212,7 +3231,7 @@ class LogCompressorApp(_make_app_base()):
         return {
             "levels": [lv for lv, var in self._level_vars.items() if var.get()],
             "context_lines": self._current_context_lines(),
-            "rule": self._rule_menu.get(),
+            "rule": self._rule_key,
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
             # 修复缺陷R10：字体大小档位持久化（下次启动自动恢复）
@@ -3247,10 +3266,20 @@ class LogCompressorApp(_make_app_base()):
 
         修复缺陷#8：与悬停 tooltip 互补——切换规则时无需悬停
         即可看到当前规则的含义。
+        优化缺陷R71：选项为中文显示名（内部映射规则键）；当前
+        选中项从下拉列表移除（与主题选择器同款交互）。
         """
-        desc = RULE_DESCRIPTIONS.get(choice)
+        key = _RULE_BY_DISPLAY.get(choice)
+        if key is None:
+            return
+        self._rule_key = key
+        self._rule_menu.set(RULE_DISPLAY[key])
+        self._rule_menu.configure(
+            values=[RULE_DISPLAY[k] for k in RULE_KEYS if k != key])
+        desc = RULE_DESCRIPTIONS.get(key)
         if desc:
-            self._status_label.configure(text=f"解析规则 {choice}：{desc}")
+            self._status_label.configure(
+                text=f"解析规则 {RULE_DISPLAY[key]}：{desc}")
 
     # ==================================================================
     # 文件选择 / 拖拽
@@ -3681,7 +3710,7 @@ class LogCompressorApp(_make_app_base()):
         payload["common"] = dict(
             levels=[lv for lv, var in self._level_vars.items() if var.get()],
             context_lines=self._current_context_lines(),
-            rule=self._rule_menu.get(),
+            rule=self._rule_key,
         )
         if mode == "文件导入":
             path = self._file_entry.get().strip()
@@ -3713,6 +3742,7 @@ class LogCompressorApp(_make_app_base()):
         self._result = None
         self._compare_results = []
         self._displayed = []
+        self._reset_rule_hint()     # 优化缺陷R71：新分析清除旧体检提示
         self._clear_list()
         self._detail_box.configure(state="normal")
         self._detail_box.delete("1.0", "end")
@@ -3824,6 +3854,8 @@ class LogCompressorApp(_make_app_base()):
                  f"{s.analysis_cost * 1000:.0f}ms")
         self._render_cluster_list()
         self._save_config()
+        # 优化缺陷R71：规则体检（疑似不匹配时覆盖状态栏为可点击提示）
+        self._check_rule_health(result)
         if self._displayed:
             # 优化缺陷R45：搜索框有残留关键字时选中首个【可见】簇
             # （原固定选 0，簇 0 被过滤时会选中不可见行）
@@ -3831,6 +3863,73 @@ class LogCompressorApp(_make_app_base()):
                           if self._cluster_matches(c)), None)
             if first is not None:
                 self._select_cluster(first)
+
+    # ------------------------------------------------------------------
+    # 优化缺陷R71：规则体检（错误 0 行 / 时间戳识别率 <50% 提示换规则）
+    # ------------------------------------------------------------------
+    def _check_rule_health(self, result: AnalysisResult) -> None:
+        """分析后体检：疑似规则不匹配时状态栏给可点击换规则提示。"""
+        self._reset_rule_hint()
+        s = result.stats
+        ts_rate = s.ts_entries / max(1, s.entry_lines)
+        if s.error_lines > 0 and ts_rate >= 0.5:
+            return                              # 体检通过
+        sample = self._current_input_sample()
+        if not sample:
+            return
+        try:
+            suggested = detect_rule(sample)
+        except Exception:
+            return
+        if suggested == self._rule_key:
+            return      # 已是最优（日志本身无错误/无时间戳，不打扰）
+        reason = ("未识别到错误" if s.error_lines == 0
+                  else f"时间戳识别率仅 {ts_rate:.0%}")
+        self._status_label.configure(
+            text=f"⚠ 可能规则不匹配（{reason}）→ 试试 "
+                 f"{RULE_DISPLAY[suggested]}（点击切换并重跑）",
+            text_color="#ffb300", cursor="hand2")
+        self._status_label.bind(
+            "<Button-1>",
+            lambda e: self._apply_suggested_rule(suggested))
+
+    def _reset_rule_hint(self) -> None:
+        """清除体检提示的可点击态（新分析/新结果回填前调用）。"""
+        try:
+            self._status_label.unbind("<Button-1>")
+            self._status_label.configure(
+                cursor="", text_color=self._palette()["muted"])
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _current_input_sample(self) -> list:
+        """当前输入的分层采样（体检重新打分用；对比模式不适用）。"""
+        try:
+            mode = self._tabview.get()
+            if mode == "文件导入":
+                path = self._file_entry.get().strip()
+                if not path or not os.path.isfile(path):
+                    return []
+                from pathlib import Path as _P
+                from log_ai_compressor.core.encoding import (
+                    detect_encoding)
+                from log_ai_compressor.core.pipeline import (
+                    _sample_log_file)
+                p = _P(path)
+                return _sample_log_file(p, detect_encoding(p))
+            if mode == "文本粘贴":
+                text = self._paste_box.get("1.0", "end").strip()
+                text = text.lstrip("\ufeff")
+                return stratified_sample(text.splitlines()) if text else []
+        except (tk.TclError, OSError):
+            pass
+        return []
+
+    def _apply_suggested_rule(self, key: str) -> None:
+        """采纳体检建议：切换到建议规则并立即重跑（缺陷R71）。"""
+        self._reset_rule_hint()
+        self._on_rule_changed(RULE_DISPLAY[key])
+        self._on_start()
 
     def _clear_list(self) -> None:
         """清空左侧列表（销毁虚拟模式 / 经典行，恢复经典滚动容器）。"""
