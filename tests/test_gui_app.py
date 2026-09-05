@@ -1987,7 +1987,8 @@ class TestFullscreenView:
         assert any("搜索" in t for t in texts), "应有搜索框"
 
     def test_list_fullscreen_search_filters(self, app):
-        """全屏搜索：关键字过滤行数。"""
+        """全屏搜索：关键字过滤行数（修复缺陷R69：「显示 x/y 簇」
+        过滤计数标签已删除，改断言视图行数口径）。"""
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         app._open_list_fullscreen()
         app.update()
@@ -2001,12 +2002,9 @@ class TestFullscreenView:
         # 输入 fatal：仅 FATAL"short fatal" 行匹配（trace 实时过滤）
         search.insert(0, "fatal")
         app.update()
-        labels = [w for w in _all_widgets(win)
-                  if isinstance(w, ctk.CTkLabel)
-                  and "显示" in str(w.cget("text"))]
-        assert labels, "应有过滤计数标签"
-        assert "1 /" in str(labels[0].cget("text")), \
-            f"过滤后应只剩 1 行，实际: {labels[0].cget('text')}"
+        cluster_rows = [r for r in app._fs_view_rows() if r[0] == "c"]
+        assert len(cluster_rows) == 1, \
+            f"过滤后应只剩 1 簇，实际: {len(cluster_rows)}"
 
     # ------------------------------------------------------------------
     # 优化缺陷R53：全屏搜索计数导航（与主窗口 x/y 条完全同款）

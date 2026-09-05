@@ -5738,8 +5738,8 @@ class LogCompressorApp(_make_app_base()):
                     lambda e: self._on_fs_search_enter(True))
         search.bind("<Shift-Return>",
                     lambda e: self._on_fs_search_enter(False))
-        count_label = ctk.CTkLabel(bar, text="", text_color="#8fa4b8")
-        count_label.pack(side="right", padx=12)
+        # 修复缺陷R69：删除「显示 x/y 簇」过滤计数标签 —— 与导航
+        # 计数（x/y 条）并排双计数器语义重叠，用户误读为新 bug
         ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
                       command=hide).pack(side="right", padx=(0, 12))
 
@@ -5804,9 +5804,7 @@ class LogCompressorApp(_make_app_base()):
             # 定位态，与主窗口 _apply_search_filter 同语义）
             self._fs_search_nav = 0
             rows = self._fs_view_rows()
-            total = sum(1 for r in rows if r[0] == "c")
-            count_label.configure(
-                text=f"显示 {total} / {len(self._displayed)} 簇")
+            # 修复缺陷R69：「显示 x/y 簇」标签已删除（见构建处注释）
             self._fs_vl.set_data(rows)
             # 优化缺陷R53：计数影子框 + 详情关键字高亮即时刷新
             self._update_fs_search_count()
