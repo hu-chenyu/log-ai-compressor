@@ -4213,6 +4213,54 @@ class TestCharts:
         finally:
             self._close(app)
 
+    def test_pick_scrolls_lifts_and_clears_keyword(self, app, monkeypatch):
+        """修复缺陷R65：条形点击全链路 —— 滚入视口 + 主窗口前置 +
+        遮挡目标簇的搜索关键字自动清空（原仅染蓝：视口外/窗口被
+        图表遮挡/关键字过滤三处叠加导致用户看不见跳转）。"""
+        panel = self._open_charts(app)
+        try:
+            seen, lifted = [], []
+            monkeypatch.setattr(app, "_see_cluster_row",
+                                lambda i: seen.append(i))
+            monkeypatch.setattr(app, "lift", lambda: lifted.append(True))
+            # 搜索关键字把目标簇滤出视图（zzz 不匹配任何簇）
+            app._search_var.set("zzz")
+            app._apply_search_filter()
+            assert app._search_kw == "zzz"
+            panel._show_tab("种类 Top 10")
+            top = max(app._result.clusters, key=lambda c: c.count)
+            bar = next(b for b in panel._ax.patches
+                       if b.get_gid() == f"cluster:{top.cluster_id}")
+            panel._on_pick(SimpleNamespace(artist=bar))
+            app.update()
+            idx = next(i for i, c in enumerate(app._displayed)
+                       if c.cluster_id == top.cluster_id)
+            assert app._selected_row == idx, "应选中目标簇"
+            assert seen == [idx], "选中后应滚入视口"
+            assert lifted, "主窗口应前置到图表窗口之上"
+            assert app._search_var.get() == "", "遮挡关键字应被清空"
+            assert app._search_kw == ""
+        finally:
+            self._close(app)
+
+    def test_pie_pick_level_selects_first_of_level(self, app):
+        """修复缺陷R65：饼图扇区点击 → 选中该级别在列表中的首个簇。"""
+        panel = self._open_charts(app)
+        try:
+            panel._show_tab("级别占比")
+            wedge = panel._ax.patches[0]
+            gid = wedge.get_gid()
+            assert gid.startswith("level:")
+            level = gid.split(":", 1)[1]
+            panel._on_pick(SimpleNamespace(artist=wedge))
+            app.update()
+            expected = next(i for i, c in enumerate(app._displayed)
+                            if c.level == level)
+            assert app._selected_row == expected
+            assert app._displayed[app._selected_row].level == level
+        finally:
+            self._close(app)
+
 
 # ---------------------------------------------------------------------------
 # 修复11：文本粘贴模式排查（大文本 / 中文特殊字符 / Tab 切换 / 编码）

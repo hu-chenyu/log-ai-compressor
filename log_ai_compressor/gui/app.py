@@ -5585,7 +5585,7 @@ class LogCompressorApp(_make_app_base()):
     def _select_by_level(self, level: str) -> None:
         for i, c in enumerate(self._displayed):
             if c.level == level:
-                self._select_cluster(i)
+                self._focus_cluster_from_chart(i)
                 return
 
     def _select_by_cluster_id(self, cluster_id: str) -> None:
@@ -5597,8 +5597,31 @@ class LogCompressorApp(_make_app_base()):
             return
         for i, c in enumerate(self._displayed):
             if c.cluster_id == cid:
-                self._select_cluster(i)
+                self._focus_cluster_from_chart(i)
                 return
+
+    def _focus_cluster_from_chart(self, idx: int) -> None:
+        """修复缺陷R65：图表点击定位三处失灵补救 ——
+        1) 搜索关键字把目标簇滤出视图时自动清空搜索框（视图过滤仅
+           作用于显示，清空即恢复可见）；
+        2) 选中后滚入视口（原只染蓝不滚动，视口外看不见高亮）；
+        3) 主窗口 deiconify+lift 前置（图表 Toplevel 盖住主窗口时，
+           选中/详情更新全部发生在被遮挡窗口里，用户误以为没跳转）。
+        """
+        if not (0 <= idx < len(self._displayed)):
+            return
+        if self._search_kw and not self._cluster_matches(
+                self._displayed[idx]):
+            self._search_var.set("")
+            self._apply_search_filter()     # 立即生效（取消防抖）
+        self._select_cluster(idx)
+        self._see_cluster_row(idx)
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass
 
     # ==================================================================
     # 全屏查看（修复缺陷#7：列表 / 详情独立最大化窗口）
