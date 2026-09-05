@@ -3980,8 +3980,10 @@ class LogCompressorApp(_make_app_base()):
             return
         # 优化缺陷R50：计数 = 导航序号 / 匹配总数（y 随关键字动态
         # 变化；输入后未导航为 0/y，Enter/Shift+Enter 循环定位）
+        # 优化缺陷R55：单位「簇」—— 列表侧按错误簇计数/跳转，与详情
+        # 全屏文内查找的「处」（出现次数）语义区分，避免混淆
         total = sum(1 for c in self._displayed if self._cluster_matches(c))
-        label.configure(text=f"{self._search_nav} / {total} 条")
+        label.configure(text=f"{self._search_nav} / {total} 簇")
 
     def _on_fs_search_enter(self, forward: bool = True):
         """全屏搜索 Enter（Shift+Enter 反向）：定位下/上一个匹配簇。
@@ -4037,7 +4039,7 @@ class LogCompressorApp(_make_app_base()):
             return
         total = sum(1 for c in self._displayed
                     if self._fs_cluster_matches(c))
-        label.configure(text=f"{self._fs_search_nav} / {total} 条")
+        label.configure(text=f"{self._fs_search_nav} / {total} 簇")
 
     def _apply_fd_search(self) -> None:
         """详情全屏文内查找（优化缺陷R54）。
@@ -4123,7 +4125,7 @@ class LogCompressorApp(_make_app_base()):
             label.configure(text="")
             return
         label.configure(
-            text=f"{self._fd_search_nav} / {len(self._fd_matches)} 条")
+            text=f"{self._fd_search_nav} / {len(self._fd_matches)} 处")
 
     def _render_cluster_list(self, preserve_state: bool = False) -> None:
         """左侧错误列表：全部错误行（图标/优先级/次数行 + 单行摘要）。
@@ -5481,7 +5483,7 @@ class LogCompressorApp(_make_app_base()):
             rows = self._fs_view_rows()
             total = sum(1 for r in rows if r[0] == "c")
             count_label.configure(
-                text=f"显示 {total} / {len(self._displayed)} 条")
+                text=f"显示 {total} / {len(self._displayed)} 簇")
             self._fs_vl.set_data(rows)
             # 优化缺陷R53：计数影子框 + 详情关键字高亮即时刷新
             self._update_fs_search_count()
