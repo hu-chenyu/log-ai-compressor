@@ -2888,9 +2888,9 @@ class TestMainWindowSearch:
         info = app._search_entry.master.grid_info()
         assert str(info["row"]) == "0", "搜索框应与级别过滤同行"
         assert str(info["column"]) == "3", "搜索框应在复选框右侧空白区"
-        # 优化缺陷R50：搜索输入框与上下文行数输入框同宽（60）
-        assert app._search_entry.cget("width") == \
-            app._ctx_entry.cget("width") == 60
+        # 优化缺陷R52：搜索输入框加宽 1.5 倍（60→90；上下文行数框仍 60）
+        assert app._search_entry.cget("width") == 90
+        assert app._ctx_entry.cget("width") == 60
         # 优化缺陷R51：输入框脱离弹性列 —— sticky 去 ew、weight 移至
         # 尾部空列，否则整行宽度不足时压缩量全压输入框，width 失效
         entry_info = app._search_entry.grid_info()
