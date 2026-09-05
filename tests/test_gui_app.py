@@ -2887,7 +2887,7 @@ class TestMainWindowSearch:
         assert "过滤列表" in app._search_entry.cget("placeholder_text")
         info = app._search_entry.master.grid_info()
         assert str(info["row"]) == "0", "搜索框应与级别过滤同行"
-        assert str(info["column"]) == "3", "搜索框应在复选框右侧空白区"
+        assert str(info["column"]) == "2", "搜索框应在复选框右侧空白区"
 
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
@@ -3123,6 +3123,50 @@ class TestMainWindowSearch:
         app.update()
         assert app._rule_menu.winfo_width() >= \
             app._rule_menu.winfo_reqwidth() - 2, "解析规则下拉不得裁字"
+
+    def test_filter_bar_fixed_and_gaps_equal(self, app):
+        """优化缺陷R48：计数出现时整行位置固定；两区间等距。
+
+        计数标签「X / Y 条」悬浮在输入框内部右端（place overlay，
+        不占网格需求）—— 出现/消失时级别复选框组、搜索框组、
+        上下文行数标签的位置完全不动；DEBUG→搜索框 与
+        搜索框→上下文行数 两区间距离相等（容差 4px，grid 取整）。
+        """
+        app.geometry("1600x900")
+        app.update()
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        panel = app._ctx_entry.master
+        level_box = panel.grid_slaves(row=0, column=1)[0]
+        search_box = app._search_entry.master
+        ctx_lbl = panel.grid_slaves(row=0, column=5)[0]
+
+        def gaps():
+            app.update()
+            debug_cb = level_box.winfo_children()[-1]
+            debug_right = (level_box.winfo_x() + debug_cb.winfo_x()
+                           + debug_cb.winfo_width())
+            a = search_box.winfo_x() - debug_right
+            b = ctx_lbl.winfo_x() - (search_box.winfo_x()
+                                     + search_box.winfo_width())
+            return a, b
+
+        pos0 = (level_box.winfo_x(), search_box.winfo_x(),
+                ctx_lbl.winfo_x())
+        a0, b0 = gaps()
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        assert app._search_count.cget("text"), "计数标签应已出现"
+        pos1 = (level_box.winfo_x(), search_box.winfo_x(),
+                ctx_lbl.winfo_x())
+        assert pos0 == pos1, "计数出现时整行位置应完全固定"
+        # 计数悬浮在输入框内部（不占网格需求）
+        assert app._search_count.winfo_manager() == "place"
+        a1, b1 = gaps()
+        assert abs(a1 - b1) <= 4, \
+            f"两区间应等距（A={a1}, B={b1}）"
+        assert abs(a0 - b0) <= 4, "计数隐藏时两区间同样等距"
 
 
 class TestFullscreenReuse:

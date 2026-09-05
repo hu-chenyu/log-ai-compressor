@@ -1950,8 +1950,10 @@ class LogCompressorApp(_make_app_base()):
         self._level_vars: Dict[str, tk.BooleanVar] = {}
         self._level_tooltips: Dict[str, Tooltip] = {}
         level_box = ctk.CTkFrame(panel, fg_color="transparent")
-        # 优化缺陷R45：复选框容器缩至列 1~2，列 3~4 让给结果搜索框
-        level_box.grid(row=0, column=1, columnspan=2, sticky="w")
+        # 优化缺陷R48：复选框容器只占列 1（原跨列 1~2 时区间A=2E/6、
+        # 区间B=E/6 恒不等）；搜索框组跨列 2~4 后区间A=区间B=E/6，
+        # 任意窗口宽度两区间恒等距
+        level_box.grid(row=0, column=1, sticky="w")
         col = 0
         for level in LEVEL_CHECKS:
             # 默认勾选 ERROR/FAIL（DEFAULT_SELECTED_LEVELS）
@@ -1976,12 +1978,16 @@ class LogCompressorApp(_make_app_base()):
                 info, lambda lv=level: _LEVEL_HELP[lv])
 
         # 优化缺陷R45：结果搜索框 —— 置于级别过滤与上下文行数之间的
-        # 空白区（列 3~4 拉伸填充）；即时过滤左侧错误分类列表的
+        # 空白区（列 2~4 拉伸填充）；即时过滤左侧错误分类列表的
         # 【显示】（摘要/模块/级别/优先级档匹配，不触发重新分析），
         # 与已删除的「包含/排除关键字」（分析前过滤输入）职责不同
+        # 优化缺陷R48：左移跨列 2~4（原 3~4），DEBUG→搜索框与
+        # 搜索框→上下文行数两区间恒等距
         search_box = ctk.CTkFrame(panel, fg_color="transparent")
-        search_box.grid(row=0, column=3, columnspan=2, sticky="ew",
-                        padx=(8, 2))
+        # 优化缺陷R48：左 padx 8→1 —— 抵消 padx 不对称造成的 11px
+        # 区间差（实测），DEBUG→搜索框 与 搜索框→上下文行数严格等距
+        search_box.grid(row=0, column=2, columnspan=3, sticky="ew",
+                        padx=(1, 2))
         search_box.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(search_box, text="搜索").grid(row=0, column=0,
                                                    padx=(0, 4))
@@ -1993,9 +1999,15 @@ class LogCompressorApp(_make_app_base()):
             search_box, textvariable=self._search_var, width=80,
             placeholder_text="按摘要 / 模块 / 级别过滤列表…")
         self._search_entry.grid(row=0, column=1, sticky="ew")
-        self._search_count = ctk.CTkLabel(search_box, text="",
-                                          text_color="#8fa4b8")
-        self._search_count.grid(row=0, column=2, padx=(6, 2))
+        # 优化缺陷R48：计数标签改为悬浮在输入框内部右端（place
+        # overlay，不占网格需求）—— 计数出现/消失整行位置完全固定；
+        # 点击计数区域透传聚焦输入框
+        self._search_count = ctk.CTkLabel(
+            self._search_entry, text="", text_color="#8fa4b8",
+            fg_color="transparent")
+        self._search_count.place(relx=1.0, x=-8, rely=0.5, anchor="e")
+        self._search_count.bind(
+            "<Button-1>", lambda e: self._search_entry.focus_set())
         # trace 不依赖键盘事件（粘贴/清空/程序赋值均可靠触发）
         self._search_var.trace_add("write", self._on_search_changed)
         # 优化缺陷R46：Enter 跳下一个匹配 / Shift+Enter 跳上一个
