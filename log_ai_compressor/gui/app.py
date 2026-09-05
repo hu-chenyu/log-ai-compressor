@@ -5563,18 +5563,23 @@ class LogCompressorApp(_make_app_base()):
             CompareChartsPanel,
         )
         self._chart_window = ctk.CTkToplevel(self)
+        # 优化缺陷R63：高 DPI 适配（2x 屏图表文字不再缩半）+ 窗口放大
+        dpi_scale = max(1.0, getattr(self, "_font_scale", 1.0))
         if self._compare_results:
             # 修复缺陷#10：对比模式展示两文件错误对比图表
             self._chart_window.title("错误对比图表")
-            self._chart_window.geometry("1150x460")
-            CompareChartsPanel(self._chart_window, self._compare_results)
+            self._chart_window.geometry("1250x500")
+            CompareChartsPanel(self._chart_window, self._compare_results,
+                               dpi_scale=dpi_scale)
         else:
             self._chart_window.title("错误统计图表")
-            self._chart_window.geometry("1150x430")
-            ChartsPanel(
+            self._chart_window.geometry("1280x500")
+            # 优化缺陷R63：面板实例留存（测试可检视图表内容）
+            self._chart_panel = ChartsPanel(
                 self._chart_window, self._result,
                 on_select_level=self._select_by_level,
-                on_select_module=self._select_by_module)
+                on_select_cluster=self._select_by_cluster_id,
+                dpi_scale=dpi_scale)
 
     def _select_by_level(self, level: str) -> None:
         for i, c in enumerate(self._displayed):
@@ -5582,9 +5587,15 @@ class LogCompressorApp(_make_app_base()):
                 self._select_cluster(i)
                 return
 
-    def _select_by_module(self, module: str) -> None:
+    def _select_by_cluster_id(self, cluster_id: str) -> None:
+        """图表点击联动：按 cluster_id 定位簇（优化缺陷R63：错误
+        种类 Top 10 条形点击 → 主列表选中该簇）。"""
+        try:
+            cid = int(cluster_id)
+        except (TypeError, ValueError):
+            return
         for i, c in enumerate(self._displayed):
-            if c.module == module or (module == "(未知)" and not c.module):
+            if c.cluster_id == cid:
                 self._select_cluster(i)
                 return
 

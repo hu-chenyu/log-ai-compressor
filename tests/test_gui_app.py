@@ -4124,6 +4124,75 @@ class TestExportReport:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R63：统计图表（高 DPI 适配 + 错误种类 Top10 + 点击联动）
+# ---------------------------------------------------------------------------
+class TestCharts:
+    def _open_charts(self, app):
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._show_charts()
+        app.update()
+        assert app._chart_window is not None
+        return app._chart_panel
+
+    def teardown_method(self):
+        pass
+
+    def _close(self, app):
+        if app._chart_window is not None and app._chart_window.winfo_exists():
+            app._chart_window.destroy()
+        app._chart_window = None
+        app.update()
+
+    def test_top_clusters_bar_content(self, app):
+        """第三图 = 错误种类 Top10（级别着色 + 摘要标签 + gid 联动）。"""
+        panel = self._open_charts(app)
+        try:
+            assert "Top 10" in panel._ax_bar.get_title()
+            bars = panel._ax_bar.patches
+            assert bars, "Top10 图应有条形"
+            top = max(app._result.clusters, key=lambda c: c.count)
+            assert bars[0].get_gid() == f"cluster:{top.cluster_id}", \
+                "首个条形应对应次数最多的簇"
+            labels = [t.get_text() for t in panel._ax_bar.get_yticklabels()]
+            assert any(top.summary[:10] in lb for lb in labels), \
+                "y 轴标签应含簇摘要"
+        finally:
+            self._close(app)
+
+    def test_pick_cluster_selects_row(self, app):
+        """点击 Top10 条形 → 主列表选中对应簇（cluster_id 联动）。"""
+        panel = self._open_charts(app)
+        try:
+            top = max(app._result.clusters, key=lambda c: c.count)
+            bar = panel._ax_bar.patches[0]
+            panel._on_pick(SimpleNamespace(artist=bar))
+            app.update()
+            assert app._displayed[app._selected_row].cluster_id == \
+                top.cluster_id
+        finally:
+            self._close(app)
+
+    def test_dpi_scale_applied(self, app):
+        """图表 dpi 随窗口缩放（高 DPI 下文字不缩半）。"""
+        panel = self._open_charts(app)
+        try:
+            expected = int(round(96 * max(1.0, app._font_scale)))
+            assert panel.figure.get_dpi() == expected
+        finally:
+            self._close(app)
+
+    def test_pie_has_autopct(self, app):
+        """饼图含百分比标注（优化缺陷R63 可读性）。"""
+        panel = self._open_charts(app)
+        try:
+            texts = [t.get_text() for t in panel._ax_pie.texts]
+            assert any("%" in t for t in texts), "饼图应有百分比标注"
+        finally:
+            self._close(app)
+
+
+# ---------------------------------------------------------------------------
 # 修复11：文本粘贴模式排查（大文本 / 中文特殊字符 / Tab 切换 / 编码）
 # ---------------------------------------------------------------------------
 PASTE_CN_LOG = "\n".join([
