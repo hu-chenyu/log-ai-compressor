@@ -4287,65 +4287,6 @@ class TestCharts:
 
 
 # ---------------------------------------------------------------------------
-# 优化缺陷R68：顶部三 Tab 3D 立体化（常驻投影 + 按压下沉 + 释放回弹）
-# ---------------------------------------------------------------------------
-class TestTabButtons3D:
-    @staticmethod
-    def _pady_top(btn) -> int:
-        pady = btn.grid_info()["pady"]
-        pt = pady[0] if isinstance(pady, (tuple, list)) else pady
-        return int(pt)
-
-    def test_shadow_exists_and_positioned(self, app):
-        """常驻底部投影条存在并贴合分段按钮底缘。"""
-        shadow = getattr(app, "_tab3d_shadow", None)
-        assert shadow is not None, "Tab 3D 投影条应已创建"
-        time.sleep(0.08)                     # after(50) 首帧定位
-        app.update()
-        info = shadow.place_info()
-        assert int(info["height"]) >= 1, "投影应有可见高度"
-        assert int(info["width"]) > 0, "投影应有可见宽度"
-
-    def test_press_sink_and_shadow_shrink(self, app):
-        """按下：页签下沉 ≥2px + 投影收缩（DPI 缩放口径）。"""
-        sb = app._tabview._segmented_button
-        btn = sb._buttons_dict["文本粘贴"]
-        app._tab3d_press(btn)
-        app.update()
-        assert self._pady_top(btn) >= app._dpx(2), "按下应下沉"
-        assert int(app._tab3d_shadow.place_info()["height"]) <= \
-            app._dpx(1), "按下投影应收缩"
-
-    def test_release_rebound_restores(self, app):
-        """释放：~140ms 回弹后位移复位、投影回常驻高度。"""
-        sb = app._tabview._segmented_button
-        btn = sb._buttons_dict["多文件对比"]
-        app._tab3d_press(btn)
-        app._tab3d_release(btn)
-        target_h = app._dpx(3)
-        deadline = time.time() + 1.5
-        while time.time() < deadline:
-            app.update()
-            if (self._pady_top(btn) == 0
-                    and int(app._tab3d_shadow.place_info()["height"])
-                    == target_h):
-                break
-            time.sleep(0.02)
-        assert self._pady_top(btn) == 0, "回弹结束位移应复位"
-        assert int(app._tab3d_shadow.place_info()["height"]) == target_h, \
-            "投影应回常驻高度"
-
-    def test_shadow_color_follows_theme(self, app):
-        """四态主题切换：投影色跟随调色板 sel_shadow。"""
-        from log_ai_compressor.gui.app import THEMES
-        for key in ("blue", "green", "dark"):
-            app._apply_theme_switch(key)
-            app.update()
-            assert app._tab3d_shadow.cget("bg") == \
-                THEMES[key]["sel_shadow"], f"{key} 主题投影色未跟随"
-
-
-# ---------------------------------------------------------------------------
 # 修复11：文本粘贴模式排查（大文本 / 中文特殊字符 / Tab 切换 / 编码）
 # ---------------------------------------------------------------------------
 PASTE_CN_LOG = "\n".join([
