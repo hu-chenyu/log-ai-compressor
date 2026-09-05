@@ -5107,11 +5107,15 @@ class LogCompressorApp(_make_app_base()):
                 else:
                     box.insert("end", line + "\n", "bstack")
 
+        # 修复缺陷R67：后上下文区块固定显示 —— 空则明确标注原因
+        # （错误位于文件末尾时 after 为空，整块隐藏会被误认为功能缺失）
+        plain()
+        header("──── 后上下文 ────")
         if sample.after:
-            plain()
-            header("──── 后上下文 ────")
             for line in sample.after:
                 plain(line)
+        else:
+            meta("（已到文件末尾，无后续日志行）")
         box.configure(state="disabled")
         self._highlight_keywords(box)
 
@@ -5159,11 +5163,14 @@ class LogCompressorApp(_make_app_base()):
                     box.insert("end", line + "\n", "bstack")
         # 修复缺陷R44：实例后上下文渲染（此前实例无 after 数据，
         # 点击实例后详情面板缺失后上下文）
+        # 修复缺陷R67：后上下文区块固定显示，空则标注已到文件末尾
+        plain()
+        header("──── 后上下文 ────")
         if instance.after:
-            plain()
-            header("──── 后上下文 ────")
             for line in instance.after:
                 plain(line)
+        else:
+            meta("（已到文件末尾，无后续日志行）")
         box.configure(state="disabled")
         self._highlight_keywords(box)
 

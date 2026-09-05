@@ -2985,6 +2985,30 @@ class TestClusterExpandMain:
         assert "后上下文" in detail, "实例详情应显示后上下文区域"
         assert "INFO post-0" in detail, "实例详情应含实例之后的原始行"
 
+    def test_detail_after_context_eof_placeholder(self, app):
+        """修复缺陷R67：错误位于文件末尾（after 为空）时，后上下文
+        区块仍固定显示并标注原因（原空则整块隐藏，看似功能缺失）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        # SAMPLE_PASTE 末行（out of memory）位于文件末尾 → after 为空
+        idx = next(i for i, c in enumerate(app._displayed)
+                   if "memory" in c.summary)
+        app._select_cluster(idx)
+        app.update()
+        detail = app._detail_box.get("1.0", "end")
+        assert "后上下文" in detail, "簇详情应固定显示后上下文区块"
+        assert "已到文件末尾" in detail, "空后上下文应标注原因"
+        # 实例详情同口径
+        app._toggle_cluster_expand(idx)
+        app.update()
+        state = app._classic_expanded[idx]
+        state["labels"][0]["label"]._label.event_generate(
+            "<Button-1>", x=3, y=2)
+        app.update()
+        detail = app._detail_box.get("1.0", "end")
+        assert "后上下文" in detail, "实例详情应固定显示后上下文区块"
+        assert "已到文件末尾" in detail
+
     def test_expand_classic_head_alignment_stable(self, app):
         """修复缺陷R34：展开/收起 ▶/▼ 切换，头部内容起始 x 不变。
 
