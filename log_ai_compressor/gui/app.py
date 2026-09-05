@@ -1947,7 +1947,11 @@ class LogCompressorApp(_make_app_base()):
         # 行数 两区间与窗口大小无关、永远完全相等（原加权列剩余空间
         # 形成的区间随窗口宽度漂移，无法恒定等距）
         panel.grid_columnconfigure(3, weight=1)
-        _filter_gap = self._dpx(30)
+        # 优化缺陷R52：间隔 30→12 —— 整行请求宽（2553px）超出最大化
+        # 可用宽（~2540px）约 13px，压缩量穿过弹性列把计数框右缘切掉
+        # （输入关键字计数框显形才暴露）；复选框区左移收紧 + 间隔列
+        # 收窄为搜索框加宽 1.5 倍腾空间（两间隔列仍等宽，等距不变）
+        _filter_gap = self._dpx(12)
         panel.grid_columnconfigure(2, minsize=_filter_gap)
         panel.grid_columnconfigure(4, minsize=_filter_gap)
 
@@ -1973,7 +1977,8 @@ class LogCompressorApp(_make_app_base()):
                 level_box, text="ⓘ", text_color="#3B82F6",
                 font=ctk.CTkFont(size=13, weight="bold"),
                 cursor="hand2")
-            info.grid(row=0, column=col, padx=(5, 2), sticky="e")
+            # 优化缺陷R52：ⓘ 左 padx 5→3、右 2→1 —— 复选框组左移收紧
+            info.grid(row=0, column=col, padx=(3, 1), sticky="e")
             info.bind("<Enter>", lambda e, w=info: w.configure(
                 text_color="#2563EB"))
             info.bind("<Leave>", lambda e, w=info: w.configure(
@@ -1982,10 +1987,11 @@ class LogCompressorApp(_make_app_base()):
             # 优化缺陷R49：末位复选框右 padx 6→0 —— 拖尾间距会使
             # DEBUG 右侧区间比搜索框右侧区间多出 12px（2x DPI），
             # 破坏两区间严格等距；间隔统一由固定间隔列提供
-            cb_pad_r = 0 if level == LEVEL_CHECKS[-1] else 6
+            # 优化缺陷R52：复选框 padx (2,6)→(1,4) —— 组区左移收紧
+            cb_pad_r = 0 if level == LEVEL_CHECKS[-1] else 4
             ctk.CTkCheckBox(level_box, text=level, variable=var,
                             checkbox_width=18, checkbox_height=18).grid(
-                row=0, column=col, padx=(2, cb_pad_r), sticky="w")
+                row=0, column=col, padx=(1, cb_pad_r), sticky="w")
             col += 1
             self._level_tooltips[level] = Tooltip(
                 info, lambda lv=level: _LEVEL_HELP[lv])
@@ -2004,11 +2010,10 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkLabel(search_box, text="搜索").grid(row=0, column=0,
                                                    padx=(0, 4))
         self._search_var = tk.StringVar()
-        # 优化缺陷R50：输入框请求宽与上下文行数输入框一致（60）
-        # 优化缺陷R51：sticky 去 ew —— 输入框按请求宽固定渲染，不再
-        # 随弹性列拉伸/压缩，视觉宽与上下文行数框严格一致
+        # 优化缺陷R52：输入框宽 60→90（用户决策：加 1.5 倍，便于
+        # 输入时右侧计数框完整显形）；sticky 保持 w 固定宽渲染
         self._search_entry = ctk.CTkEntry(
-            search_box, textvariable=self._search_var, width=60,
+            search_box, textvariable=self._search_var, width=90,
             placeholder_text="按摘要 / 模块 / 级别过滤列表…")
         self._search_entry.grid(row=0, column=1, sticky="w")
         # 优化缺陷R49：计数影子显示框 —— 输入框右侧独立圆角框，
