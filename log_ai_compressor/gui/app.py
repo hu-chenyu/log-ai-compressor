@@ -1831,11 +1831,13 @@ class LogCompressorApp(_make_app_base()):
     # ==================================================================
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
+        # 修复缺陷R72：新增实时筛选行（row=3），结果区 weight 行 4→5
+        self.grid_rowconfigure(5, weight=1)
 
         self._build_header()
         self._build_tabs()
         self._build_config_panel()
+        self._build_search_panel()
         self._build_action_panel()
         self._build_result_panel()
         self._build_status_bar()
@@ -1979,18 +1981,12 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R9：顶部区域压缩（pady 4→3）
         panel.grid(row=2, column=0, sticky="ew", padx=10, pady=3)
         self._bg_widgets.append((panel, "card"))
-        # 优化缺陷R49：仅搜索框列（列3）弹性吸收窗口剩余宽度；
-        # 列2/列4 为固定宽间隔列 —— DEBUG→搜索框 与 搜索框→上下文
-        # 行数 两区间与窗口大小无关、永远完全相等（原加权列剩余空间
-        # 形成的区间随窗口宽度漂移，无法恒定等距）
-        panel.grid_columnconfigure(3, weight=1)
-        # 优化缺陷R52：间隔 30→12 —— 整行请求宽（2553px）超出最大化
-        # 可用宽（~2540px）约 13px，压缩量穿过弹性列把计数框右缘切掉
-        # （输入关键字计数框显形才暴露）；复选框区左移收紧 + 间隔列
-        # 收窄为搜索框加宽 1.5 倍腾空间（两间隔列仍等宽，等距不变）
-        _filter_gap = self._dpx(12)
-        panel.grid_columnconfigure(2, minsize=_filter_gap)
-        panel.grid_columnconfigure(4, minsize=_filter_gap)
+        # 修复缺陷R72：搜索组迁出至独立「实时筛选行」—— 本行只剩
+        # 「按开始分析才生效」的控件（级别/上下文行数/解析规则），
+        # 整行请求宽远低于可用宽，超宽切边问题根除；列 2 弹性空白
+        # 吸收窗口余量（原 R49/R51/R52 的搜索框等距/防切机制随搜索
+        # 组一并迁出，不再适用本行）
+        panel.grid_columnconfigure(2, weight=1, minsize=self._dpx(12))
 
         ctk.CTkLabel(panel, text="级别过滤", font=ctk.CTkFont(weight="bold")
                      ).grid(row=0, column=0, padx=(12, 4), sticky="w")
@@ -2033,63 +2029,18 @@ class LogCompressorApp(_make_app_base()):
             self._level_tooltips[level] = Tooltip(
                 info, lambda lv=level: _LEVEL_HELP[lv])
 
-        # 优化缺陷R45：结果搜索框 —— 置于级别过滤与上下文行数之间的
-        # 空白区（列 3 弹性填充）；即时过滤左侧错误分类列表的
-        # 【显示】（摘要/模块/级别/优先级档匹配，不触发重新分析），
-        # 与已删除的「包含/排除关键字」（分析前过滤输入）职责不同
-        # 优化缺陷R49：搜索框独占弹性列 3（两侧固定间隔列等距）
-        search_box = ctk.CTkFrame(panel, fg_color="transparent")
-        search_box.grid(row=0, column=3, sticky="ew")
-        # 优化缺陷R51：弹性位移至尾部空列 3 —— 整行宽度不足时 Tk 把
-        # 压缩量全压到唯一 weight 列；此前 weight 挂在输入框列上，
-        # 输入框被挤到远小于请求宽（width 参数失效），现由空列吸收
-        search_box.grid_columnconfigure(3, weight=1)
-        ctk.CTkLabel(search_box, text="搜索").grid(row=0, column=0,
-                                                   padx=(0, 4))
-        self._search_var = tk.StringVar()
-        # 优化缺陷R52：输入框宽 60→90（用户决策：加 1.5 倍，便于
-        # 输入时右侧计数框完整显形）；sticky 保持 w 固定宽渲染
-        self._search_entry = ctk.CTkEntry(
-            search_box, textvariable=self._search_var, width=90,
-            placeholder_text="按摘要 / 模块 / 级别过滤列表…")
-        self._search_entry.grid(row=0, column=1, sticky="w")
-        # 优化缺陷R49：计数影子显示框 —— 输入框右侧独立圆角框，
-        # 与输入框同底色（fg_color 元组随主题自适应）；恒定占位
-        # （grid_propagate(False) 固定尺寸），有计数时显形、无计数
-        # 时透明隐形 —— 出现/消失对整行布局零影响（位置完全固定）
-        # 注：width/height 传逻辑值即可（CTk 内部自动 DPI 缩放，
-        # 预乘 _dpx 会双重放大挤压整行）
-        self._search_count_box = ctk.CTkFrame(
-            search_box, width=88, height=24,
-            corner_radius=6, fg_color="transparent")
-        self._search_count_box.grid(row=0, column=2, padx=(4, 0))
-        self._search_count_box.grid_propagate(False)
-        self._search_count = ctk.CTkLabel(
-            self._search_count_box, text="", text_color="#8fa4b8",
-            fg_color="transparent")
-        self._search_count.place(relx=0.5, rely=0.5, anchor="c")
-        # trace 不依赖键盘事件（粘贴/清空/程序赋值均可靠触发）
-        self._search_var.trace_add("write", self._on_search_changed)
-        # 优化缺陷R46：Enter 跳下一个匹配 / Shift+Enter 跳上一个
-        # （CTkEntry.bind 转发到内部 tk.Entry，键盘事件可可靠触发）
-        self._search_entry.bind(
-            "<Return>", lambda e: self._on_search_enter(True))
-        self._search_entry.bind(
-            "<Shift-Return>", lambda e: self._on_search_enter(False))
-
+        # 修复缺陷R72：搜索组（搜索标签/输入框/计数影子框/导航按钮）
+        # 迁至 _build_search_panel 的独立实时筛选行
         # 优化缺陷R43：包含/排除关键字、Top N 输入区删除（用户决策）
         # 优化缺陷R44：上下文行数输入框回归 —— 置于级别过滤与解析
         # 规则之间的空白区（≥0 有效，负数按 0 行处理）
-        # 优化缺陷R49：label 左 padx 6→0 —— 左间隔已由固定间隔列
-        # 提供，否则两区间不等距
         ctk.CTkLabel(panel, text="上下文行数").grid(
-            row=0, column=5, padx=(0, 2), sticky="e")
+            row=0, column=3, padx=(0, 2), sticky="e")
         self._ctx_entry = ctk.CTkEntry(panel, width=60)
         self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
-        self._ctx_entry.grid(row=0, column=6, padx=(2, 12), sticky="w")
+        self._ctx_entry.grid(row=0, column=4, padx=(2, 12), sticky="w")
 
-        # 修复缺陷R10：级别复选框容器跨列 1~6，解析规则右移至列 7~9
-        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=7, padx=(6, 2),
+        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=5, padx=(6, 2),
                                                   sticky="e")
         # 优化缺陷R71：下拉显示中文名，默认「自动识别（推荐）」；
         # 当前选中项不出现在下拉列表（与主题选择器同款交互）
@@ -2099,20 +2050,83 @@ class LogCompressorApp(_make_app_base()):
             values=[RULE_DISPLAY[k] for k in RULE_KEYS if k != "auto"],
             command=self._on_rule_changed)
         self._rule_menu.set(RULE_DISPLAY["auto"])
-        self._rule_menu.grid(row=0, column=8, padx=(2, 0), sticky="w")
+        self._rule_menu.grid(row=0, column=6, padx=(2, 0), sticky="w")
         # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
         rule_help = ctk.CTkLabel(
             panel, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        rule_help.grid(row=0, column=9, padx=(4, 12), sticky="w")
+        rule_help.grid(row=0, column=7, padx=(4, 12), sticky="w")
         self._rule_help_tooltip = Tooltip(
             rule_help,
             lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
 
+    # ------------------------------------------------------------------
+    # 修复缺陷R72：实时筛选行（搜索组从级别过滤行迁出）
+    # ------------------------------------------------------------------
+    def _build_search_panel(self) -> None:
+        """实时筛选行：输入即时过滤列表显示，无需按「开始分析」。
+
+        修复缺陷R72：级别过滤行的其余控件（级别/上下文行数/解析
+        规则）都要按「开始分析」才生效，唯一实时生效的搜索组混在
+        其中语义不符，且整行超宽时计数框被切边 —— 迁出至过滤行与
+        按钮行之间的独立行（此处曾是已删除的包含/排除关键字行），
+        输入框顺势加宽 90→200，并补 ▲/▼ 导航按钮（与 Enter /
+        Shift+Enter 同语义），搜索行为（防抖过滤/导航/计数显隐）
+        完全不变。
+        """
+        panel = ctk.CTkFrame(self)
+        panel.grid(row=3, column=0, sticky="ew", padx=10, pady=3)
+        self._bg_widgets.append((panel, "card"))
+
+        ctk.CTkLabel(panel, text="搜索").grid(row=0, column=0,
+                                              padx=(12, 4), pady=4)
+        self._search_var = tk.StringVar()
+        # 优化缺陷R45：结果搜索 —— 即时过滤左侧错误分类列表的
+        # 【显示】（摘要/模块/级别/优先级档匹配，不触发重新分析）
+        self._search_entry = ctk.CTkEntry(
+            panel, textvariable=self._search_var, width=200,
+            placeholder_text="按摘要 / 模块 / 级别过滤列表…")
+        self._search_entry.grid(row=0, column=1, pady=4, sticky="w")
+        # 优化缺陷R49：计数影子显示框 —— 与输入框同底色（fg_color
+        # 元组随主题自适应）；恒定占位（grid_propagate(False) 固定
+        # 尺寸），有计数时显形、无计数时透明隐形，显隐零布局影响
+        # 注：width/height 传逻辑值即可（CTk 内部自动 DPI 缩放，
+        # 预乘 _dpx 会双重放大）
+        self._search_count_box = ctk.CTkFrame(
+            panel, width=88, height=24,
+            corner_radius=6, fg_color="transparent")
+        self._search_count_box.grid(row=0, column=2, padx=(4, 0))
+        self._search_count_box.grid_propagate(False)
+        self._search_count = ctk.CTkLabel(
+            self._search_count_box, text="", text_color="#8fa4b8",
+            fg_color="transparent")
+        self._search_count.place(relx=0.5, rely=0.5, anchor="c")
+        # 修复缺陷R72：▲/▼ 导航按钮 —— 与 Enter（下一个）/
+        # Shift+Enter（上一个）同语义，鼠标可直接点击
+        self._search_prev_btn = ctk.CTkButton(
+            panel, text="▲", width=28, height=24,
+            command=lambda: self._on_search_enter(False))
+        self._search_prev_btn.grid(row=0, column=3, padx=(8, 2))
+        self._search_next_btn = ctk.CTkButton(
+            panel, text="▼", width=28, height=24,
+            command=lambda: self._on_search_enter(True))
+        self._search_next_btn.grid(row=0, column=4, padx=(2, 12))
+        self._accent_buttons.append((self._search_prev_btn, "accent"))
+        self._accent_buttons.append((self._search_next_btn, "accent"))
+        # trace 不依赖键盘事件（粘贴/清空/程序赋值均可靠触发）
+        self._search_var.trace_add("write", self._on_search_changed)
+        # 优化缺陷R46：Enter 跳下一个匹配 / Shift+Enter 跳上一个
+        # （CTkEntry.bind 转发到内部 tk.Entry，键盘事件可可靠触发）
+        self._search_entry.bind(
+            "<Return>", lambda e: self._on_search_enter(True))
+        self._search_entry.bind(
+            "<Shift-Return>", lambda e: self._on_search_enter(False))
+
     def _build_action_panel(self) -> None:
         panel = ctk.CTkFrame(self)
         # 修复缺陷R9：顶部区域压缩（pady 4→3，按钮高度 34→30）
-        panel.grid(row=3, column=0, sticky="ew", padx=10, pady=3)
+        # 修复缺陷R72：实时筛选行插入后行号 3→4
+        panel.grid(row=4, column=0, sticky="ew", padx=10, pady=3)
         self._bg_widgets.append((panel, "card"))
         for col in range(7):
             panel.grid_columnconfigure(col, weight=1)
@@ -2157,7 +2171,8 @@ class LogCompressorApp(_make_app_base()):
     def _build_result_panel(self) -> None:
         panel = ctk.CTkFrame(self)
         # 修复缺陷R9：结果区上下留白压缩（列表/详情获得更大高度）
-        panel.grid(row=4, column=0, sticky="nsew", padx=10, pady=(2, 2))
+        # 修复缺陷R72：实时筛选行插入后行号 4→5
+        panel.grid(row=5, column=0, sticky="nsew", padx=10, pady=(2, 2))
         self._bg_widgets.append((panel, "card"))
         # 修复缺陷R12：左右分栏改为 place 比例布局 —— panel 内三个并列
         # 子部件（列表列 / 分隔条 / 详情列），宽度由 _splitter_ratio
@@ -3188,7 +3203,8 @@ class LogCompressorApp(_make_app_base()):
 
     def _build_status_bar(self) -> None:
         bar = ctk.CTkFrame(self, corner_radius=0)
-        bar.grid(row=5, column=0, sticky="ew")
+        # 修复缺陷R72：实时筛选行插入后行号 5→6
+        bar.grid(row=6, column=0, sticky="ew")
         self._bg_widgets.append((bar, "header"))
         bar.grid_columnconfigure(0, weight=1)
         self._status_label = ctk.CTkLabel(bar, text="就绪 · 支持文件导入 / 文本粘贴 / 多文件对比",

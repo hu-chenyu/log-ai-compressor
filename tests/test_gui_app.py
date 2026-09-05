@@ -3061,24 +3061,50 @@ class TestMainWindowSearch:
                 f"2024-01-01 09:01:0{i} ERROR [db] filesystem journal corrupted")
         return "\n".join(lines)
 
-    def test_search_entry_in_filter_bar(self, app):
-        """搜索框位于级别过滤行（DEBUG 与上下文行数之间的空白区）。"""
+    def test_search_entry_in_live_filter_row(self, app):
+        """修复缺陷R72：搜索组迁至过滤行与按钮行之间的实时筛选行。"""
         assert app._search_entry is not None
         assert "过滤列表" in app._search_entry.cget("placeholder_text")
-        info = app._search_entry.master.grid_info()
-        assert str(info["row"]) == "0", "搜索框应与级别过滤同行"
-        assert str(info["column"]) == "3", "搜索框应在复选框右侧空白区"
-        # 优化缺陷R52：搜索输入框加宽 1.5 倍（60→90；上下文行数框仍 60）
-        assert app._search_entry.cget("width") == 90
+        panel = app._search_entry.master
+        info = panel.grid_info()
+        assert str(info["row"]) == "3", \
+            "实时筛选行应在过滤行(row=2)与按钮行(row=4)之间"
+        assert panel is not app._ctx_entry.master, \
+            "搜索组不得留在级别过滤行"
+        # 修复缺陷R72：独立行空间充裕，输入框加宽 90→200（上下文行数框仍 60）
+        assert app._search_entry.cget("width") == 200
         assert app._ctx_entry.cget("width") == 60
-        # 优化缺陷R51：输入框脱离弹性列 —— sticky 去 ew、weight 移至
-        # 尾部空列，否则整行宽度不足时压缩量全压输入框，width 失效
+        # 输入框固定宽渲染（sticky 不含 e），不随窗口拉伸/压缩
         entry_info = app._search_entry.grid_info()
-        assert "e" not in str(entry_info["sticky"]), \
-            "搜索输入框不得随弹性列横向拉伸/压缩"
-        sbox = app._search_entry.master
-        assert sbox.grid_columnconfigure(1)["weight"] == 0
-        assert sbox.grid_columnconfigure(3)["weight"] == 1
+        assert "e" not in str(entry_info["sticky"])
+        # 计数影子框与 ▲/▼ 导航按钮与输入框同行
+        assert app._search_count_box.master is panel
+        assert app._search_prev_btn.master is panel
+        assert app._search_next_btn.master is panel
+        # 行号顺移：按钮行 4、结果区 5、状态栏 6
+        assert str(app._start_btn.master.grid_info()["row"]) == "4"
+        assert str(app._result_panel.grid_info()["row"]) == "5"
+        assert str(app._status_label.master.grid_info()["row"]) == "6"
+
+    def test_search_nav_buttons(self, app):
+        """修复缺陷R72：▲/▼ 按钮与 Enter / Shift+Enter 同语义。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        assert app._search_count.cget("text") == "0 / 3 条"
+        app._search_next_btn.invoke()
+        app.update()
+        assert app._search_nav == 1, "▼ 应跳到下一个命中实例"
+        assert app._search_count.cget("text") == "1 / 3 条"
+        app._search_next_btn.invoke()
+        app.update()
+        assert app._search_nav == 2
+        app._search_prev_btn.invoke()
+        app.update()
+        assert app._search_nav == 1, "▲ 应回上一个命中实例"
+        assert app._search_count.cget("text") == "1 / 3 条"
 
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
@@ -3389,9 +3415,9 @@ class TestMainWindowSearch:
     def test_filter_bar_no_overlap_when_count_appears(self, app):
         """优化缺陷R47：计数标签「X / Y 条」出现时过滤栏不左移挤压。
 
-        收窄了解析规则下拉（130→100）与搜索框请求宽（140→80），
-        计数标签出现时整行需求仍有分配余量 —— 级别过滤/上下文行数
-        标签不被遮挡，解析规则下拉最长选项不被裁切。
+        修复缺陷R72：搜索组迁出后过滤行只剩 级别过滤/上下文行数/
+        解析规则 三组控件，整行请求宽远低于可用宽 —— 标签不被遮挡，
+        解析规则下拉最长选项不被裁切。
         """
         app.geometry("1600x900")
         app.update()
@@ -3404,10 +3430,9 @@ class TestMainWindowSearch:
         assert app._search_count.cget("text"), "计数标签应已出现"
         widgets = [panel.grid_slaves(row=0, column=0)[0],   # 级别过滤
                    panel.grid_slaves(row=0, column=1)[0],   # 复选框组
-                   app._search_entry.master,                # 搜索框组
-                   panel.grid_slaves(row=0, column=5)[0],   # 上下文行数
+                   panel.grid_slaves(row=0, column=3)[0],   # 上下文行数
                    app._ctx_entry,
-                   panel.grid_slaves(row=0, column=7)[0],   # 解析规则
+                   panel.grid_slaves(row=0, column=5)[0],   # 解析规则
                    app._rule_menu]
         prev_right = None
         for w in widgets:
@@ -3418,7 +3443,7 @@ class TestMainWindowSearch:
         lbl = widgets[0]
         assert lbl.winfo_width() >= lbl.winfo_reqwidth() - 2, \
             "级别过滤标签不得被裁切"
-        ctx_lbl = widgets[3]
+        ctx_lbl = widgets[2]
         assert ctx_lbl.winfo_width() >= ctx_lbl.winfo_reqwidth() - 2, \
             "上下文行数标签不得被裁切"
         # 最长选项 embedded 时下拉不被裁切
@@ -3427,57 +3452,43 @@ class TestMainWindowSearch:
         assert app._rule_menu.winfo_width() >= \
             app._rule_menu.winfo_reqwidth() - 2, "解析规则下拉不得裁字"
 
-    def test_filter_bar_fixed_and_gaps_equal(self, app):
-        """优化缺陷R49：计数出现时整行位置固定；两区间严格等距。
+    def test_count_box_fixed_in_live_filter_row(self, app):
+        """修复缺陷R72：计数影子框在实时筛选行恒定占位，显隐零布局影响。
 
-        计数显示在输入框右侧恒定占位的影子框内（有计数显形、无
-        计数透明，不改变布局需求）；DEBUG→搜索框 与 搜索框→上下文
-        行数 两区间由等宽固定间隔列提供，与窗口大小无关、严格相等。
+        搜索组迁出后，计数显形/隐形只改影子框底色（恒定尺寸占位），
+        实时筛选行与级别过滤行的位置、高度均不变；过滤行不再有
+        超宽切边风险（R49 两区间等距要求随搜索组迁出废止）。
         """
         app.geometry("1600x900")
         app.update()
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
-        panel = app._ctx_entry.master
-        level_box = panel.grid_slaves(row=0, column=1)[0]
-        search_box = app._search_entry.master
-        ctx_lbl = panel.grid_slaves(row=0, column=5)[0]
+        panel = app._search_entry.master            # 实时筛选行
+        filter_panel = app._ctx_entry.master        # 级别过滤行
 
-        def gaps():
+        def snapshot():
             app.update()
-            debug_cb = level_box.winfo_children()[-1]
-            debug_right = (level_box.winfo_x() + debug_cb.winfo_x()
-                           + debug_cb.winfo_width())
-            a = search_box.winfo_x() - debug_right
-            b = ctx_lbl.winfo_x() - (search_box.winfo_x()
-                                     + search_box.winfo_width())
-            return a, b
+            return (panel.winfo_y(), panel.winfo_height(),
+                    filter_panel.winfo_y(), filter_panel.winfo_height(),
+                    app._rule_menu.winfo_x())
 
-        pos0 = (level_box.winfo_x(), search_box.winfo_x(),
-                ctx_lbl.winfo_x())
-        a0, b0 = gaps()
+        pos0 = snapshot()
         app._search_var.set("kernel")
         app._apply_search_filter()
         app.update()
         assert app._search_count.cget("text"), "计数标签应已出现"
-        pos1 = (level_box.winfo_x(), search_box.winfo_x(),
-                ctx_lbl.winfo_x())
-        assert pos0 == pos1, "计数出现时整行位置应完全固定"
-        # 计数影子框：有计数时显形（与输入框同底色）、隐藏时透明
+        # 计数影子框：有计数时显形（与输入框同底色）
         assert app._search_count_box.cget("fg_color") == \
             app._search_entry.cget("fg_color"), "计数框应与输入框同底色"
-        a1, b1 = gaps()
-        assert abs(a1 - b1) <= 4, \
-            f"两区间应等距（A={a1}, B={b1}）"
-        assert abs(a0 - b0) <= 4, "计数隐藏时两区间同样等距"
+        pos1 = snapshot()
+        assert pos0 == pos1, "计数出现时两行位置/高度应完全固定"
         # 清空计数 → 影子框透明隐形，位置仍不动
         app._search_var.set("")
         app._apply_search_filter()
         app.update()
         assert app._search_count_box.cget("fg_color") == "transparent"
-        pos2 = (level_box.winfo_x(), search_box.winfo_x(),
-                ctx_lbl.winfo_x())
-        assert pos0 == pos2, "计数消失后整行位置仍应固定"
+        pos2 = snapshot()
+        assert pos0 == pos2, "计数消失后两行位置仍应固定"
 
 
 class TestFullscreenReuse:
