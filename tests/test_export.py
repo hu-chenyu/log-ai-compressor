@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -249,6 +250,32 @@ class TestBracketIsoEndToEnd:
         assert "时间范围: 2026-09-04" in txt, "时间范围不应再为 -"
         assert "[典型样例详情]" in txt
         assert "could not apply 84b4dc4" in txt
+
+    def test_json_timestamps_iso_readable(self):
+        """修复缺陷R60：JSON 时间戳全部输出 ISO 可读字符串（UTC）。"""
+        r = analyze_text(self._LOG, rule="generic")
+        payload = json.loads(to_json(r))
+        ts = payload["meta"]["time_start"]
+        assert isinstance(ts, str) and ts.startswith("2026-09-04T06:12:11"), \
+            f"time_start 应为 ISO 字符串，实际 {ts!r}"
+        # ISO 字符串仍可被标准库机器解析（人/脚本两用）
+        datetime.fromisoformat(ts)
+        assert payload["time_series"][0][0].startswith("2026-09-04")
+        for c in payload["clusters"]:
+            assert c["sample"]["timestamp"].startswith("2026-09-04")
+            assert c["first_seen"].startswith("2026-09-04")
+            for inst in c["instances"]:
+                assert inst["timestamp"].startswith("2026-09-04")
+
+    def test_json_null_timestamp_stays_null(self):
+        """无时间戳日志：timestamp 字段保持 null（而非 'None' 串）。"""
+        r = analyze_text("plain unstructured failure line\n")
+        payload = json.loads(to_json(r))
+        assert payload["meta"]["time_start"] is None
+        for c in payload["clusters"]:
+            assert c["sample"]["timestamp"] is None
+            for inst in c["instances"]:
+                assert inst["timestamp"] is None
 
 
 # ---------------------------------------------------------------------------

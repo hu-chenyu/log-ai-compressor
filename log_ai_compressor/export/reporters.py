@@ -10,7 +10,7 @@ Markdown 格式专为「投喂大模型」优化：
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from log_ai_compressor import __version__
@@ -40,6 +40,21 @@ def _instances_line(c: ErrorCluster) -> str:
         return ""
     refs = ", ".join(f"L{i.line_no}" for i in c.instances)
     return f"实例行号（{len(c.instances)}）：{refs}"
+
+
+def _iso_ts(t: Optional[float]) -> Optional[str]:
+    """epoch 秒 → ISO 8601 可读字符串（UTC，与日志原始 Z 时间一致）。
+
+    修复缺陷R60：JSON 导出时间戳可读化（原始 epoch 浮点人不可读；
+    ISO 字符串仍可被 datetime.fromisoformat 机器解析，人/脚本两用）；
+    None 原样保留，异常值退化为原字符串。
+    """
+    if t is None:
+        return None
+    try:
+        return datetime.fromtimestamp(t, tz=timezone.utc).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return str(t)
 
 
 # ---------------------------------------------------------------------------
@@ -258,8 +273,9 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True) -> dict:
         "anomaly": c.anomaly,
         "first_line": c.first_line,
         "last_line": c.last_line,
-        "first_seen": c.first_seen,
-        "last_seen": c.last_seen,
+        # 修复缺陷R60：时间戳 ISO 可读化（原 epoch 浮点人不可读）
+        "first_seen": _iso_ts(c.first_seen),
+        "last_seen": _iso_ts(c.last_seen),
     }
     if with_sample and c.sample is not None:
         entry = c.sample.entry
@@ -270,7 +286,7 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True) -> dict:
             "message": entry.full_message,
             "level": entry.level,
             "module": entry.module,
-            "timestamp": entry.timestamp,
+            "timestamp": _iso_ts(entry.timestamp),
             "stack": entry.stack,
             "stack_simplified": simplified.lines if simplified else [],
             "stack_noise_folded": simplified.noise_count if simplified else 0,
@@ -280,23 +296,31 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True) -> dict:
     # 优化缺陷R58：实例行号索引（JSON 结构化全量携带，便于脚本定位）
     d["instances"] = [
         {"line_no": i.line_no, "last_line_no": i.last_line_no,
-         "timestamp": i.timestamp, "summary": i.summary}
+         "timestamp": _iso_ts(i.timestamp), "summary": i.summary}
         for i in c.instances
     ]
     return d
 
 
 def to_json(result: AnalysisResult, top_n: Optional[int] = None) -> str:
-    """导出 JSON 格式（结构化，适配脚本二次处理）。"""
+    """导出 JSON 格式（结构化，适配脚本二次处理）。
+
+    修复缺陷R60：全部时间戳字段输出 ISO 8601 可读字符串（UTC），
+    替代原始 epoch 浮点（人不可读）；None 保持 null。
+    """
     n = top_n or DEFAULT_TOP_N
+    meta = result.stats.as_dict()
+    meta["time_start"] = _iso_ts(meta.get("time_start"))
+    meta["time_end"] = _iso_ts(meta.get("time_end"))
     payload = {
         "generator": f"log-ai-compressor v{__version__}",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "meta": result.stats.as_dict(),
+        "meta": meta,
         "root_cause_summary": _root_summary(result),
         "error_kinds": len(result.clusters),
         "clusters": [_cluster_dict(c) for c in result.clusters[:n]],
-        "time_series": [[t, c] for t, c in result.global_hist.series()],
+        "time_series": [[_iso_ts(t), c]
+                        for t, c in result.global_hist.series()],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
 
