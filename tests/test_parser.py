@@ -329,3 +329,15 @@ class TestEmbeddedRuleset:
         assert e.level == "FAIL"
         assert e.module == "im_clk_a400.c"
         assert "mismatch" in e.message
+
+    def test_module_line_failed_not_truncated(self, emb_parser):
+        """修复缺陷R70：FAILED:/FAILURE: 不被 FAIL 前缀吃掉（摘要
+        曾残留断词 "ED: xxx"）。"""
+        for word in ("FAILED", "FAILURE"):
+            p = LogParser(load_ruleset("embedded"))
+            p.feed(f"im_pll.c:42: {word}: clk config broken", 1)
+            e = p.flush()
+            assert e.level == "FAIL"
+            assert e.module == "im_pll.c"
+            assert e.message == "clk config broken", \
+                f"{word} 不得残留断词（实际 {e.message!r}）"

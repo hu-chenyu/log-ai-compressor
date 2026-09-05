@@ -14,7 +14,9 @@ patterns:
 
   - name: gcc_style
     # im_pll.c:253: FAIL: clock rate mismatch（含 gcc 风格小写 error/warning）
-    regex: '^(?P<module>\S+\.(?:c|h|cc|cpp|cxx|hpp|hh)):(?P<lineno>\d+)(?::\d+)?\s*:\s*(?:(?P<level>fatal error|error|warning|note|FAIL|ASSERT)\s*[:\s]*)?(?P<message>.*)$'
+    # 修复缺陷R70：FAIL 需允许 FAILED/FAILURE 后缀（此前 "FAILED:" 被
+    # FAIL 前缀吃掉，摘要残留断词 "ED: xxx"）
+    regex: '^(?P<module>\S+\.(?:c|h|cc|cpp|cxx|hpp|hh)):(?P<lineno>\d+)(?::\d+)?\s*:\s*(?:(?P<level>fatal error|error|warning|note|FAIL(?:ED|URE)?|ASSERT)\s*[:\s]*)?(?P<message>.*)$'
     flags: [i]
 
   - name: module_level_colon
