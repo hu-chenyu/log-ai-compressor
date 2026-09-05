@@ -95,6 +95,22 @@ class TestMatchLine:
         assert m.group("module") == "db"
         assert "Connection refused" in m.group("message")
 
+    def test_bracket_iso_timestamp(self, generic):
+        """修复缺陷R59：方括号 ISO 时间戳（Jenkins/CI 构建日志）。"""
+        m = generic.match_line(
+            "[2026-09-04T06:12:12.244Z] error: could not apply 84b4dc4")
+        assert m is not None, "方括号 ISO 时间戳行应命中 bracket_iso 模式"
+        assert m.group("timestamp") == "2026-09-04T06:12:12.244Z"
+        assert m.group("level").upper() == "ERROR"
+        assert "could not apply" in m.group("message")
+
+    def test_bracket_iso_without_level(self, generic):
+        """方括号时间戳 + 无级别消息：级别缺省（关键词推断兜底）。"""
+        m = generic.match_line("[2026-09-04T06:12:12.244Z] + git fetch ssh://x")
+        assert m is not None
+        assert m.group("timestamp") == "2026-09-04T06:12:12.244Z"
+        assert (m.groupdict().get("level") or "") == ""
+
     def test_iso_with_module_token(self, generic):
         m = generic.match_line("2024-01-01T10:00:00 INFO auth - user login ok")
         assert m.group("level") == "INFO"

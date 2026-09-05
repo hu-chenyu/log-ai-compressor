@@ -202,6 +202,17 @@ class TestTextAndBrief:
         assert "====" in txt
         assert "根因" in txt
 
+    def test_text_full_detail(self, result):
+        """优化缺陷R59：纯文本与 MD 同内容（样例/上下文/降噪堆栈）。"""
+        txt = to_text(result)
+        assert "[概览统计]" in txt
+        assert "[错误清单]" in txt
+        assert "[典型样例详情]" in txt
+        assert "典型样例:" in txt
+        assert "前上下文:" in txt
+        assert "堆栈（已降噪" in txt
+        assert "connection refused" in txt
+
     def test_brief_summary(self, result):
         brief = brief_summary(result, top_n=5)
         assert brief.startswith("【日志分析摘要】")
@@ -209,6 +220,35 @@ class TestTextAndBrief:
         assert "初步根因" in brief
         # 简要摘要应显著短于完整报告（压缩比）
         assert len(brief) < len(to_markdown(result)) / 2
+
+
+# ---------------------------------------------------------------------------
+# 修复缺陷R59：方括号 ISO 时间戳日志的端到端解析与导出
+# ---------------------------------------------------------------------------
+class TestBracketIsoEndToEnd:
+    _LOG = "\n".join([
+        "[2026-09-04T06:12:11.988Z] + git fetch ssh://imv-ci@gerrit.imv.local/x",
+        "[2026-09-04T06:12:12.244Z] error: could not apply 84b4dc4 FIX: camera",
+        "[2026-09-04T06:12:12.244Z] hint: after resolving the conflicts",
+        "[2026-09-04T06:12:16.697Z] Finished: FAILURE",
+    ])
+
+    def test_timestamps_parsed(self):
+        r = analyze_text(self._LOG, rule="generic")
+        assert r.stats.time_start is not None, "方括号 ISO 时间戳应被解析"
+        assert r.stats.time_end > r.stats.time_start
+        payload = json.loads(to_json(r))
+        assert payload["meta"]["time_start"] is not None
+        assert payload["time_series"], "时间直方图应有数据（此前为空）"
+        for c in payload["clusters"]:
+            assert c["sample"]["timestamp"] is not None
+
+    def test_txt_time_range_and_detail(self):
+        r = analyze_text(self._LOG, rule="generic")
+        txt = to_text(r)
+        assert "时间范围: 2026-09-04" in txt, "时间范围不应再为 -"
+        assert "[典型样例详情]" in txt
+        assert "could not apply 84b4dc4" in txt
 
 
 # ---------------------------------------------------------------------------

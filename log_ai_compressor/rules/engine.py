@@ -224,6 +224,16 @@ BUILTIN_RULESET = {
     "description": "内置兜底规则（等价 generic.yaml）",
     "patterns": [
         {
+            "name": "bracket_iso",
+            # [2026-09-04T06:12:12.244Z] error: xxx（方括号 ISO 时间戳，
+            # 修复缺陷R59，与 generic.yaml 同步）
+            "regex": (
+                r"^\[(?P<timestamp>%s)\]\s*"
+                r"(?:(?P<level>{LEVEL})\s*[:\-]\s+)?(?P<message>.*)$" % _TS_ISO
+            ),
+            "flags": ["i"],
+        },
+        {
             "name": "iso_level_module",
             # ISO 时间戳 + 级别(可带括号) + [模块] + 分隔符 + 内容
             "regex": (
