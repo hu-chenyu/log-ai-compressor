@@ -5573,7 +5573,8 @@ class LogCompressorApp(_make_app_base()):
                                dpi_scale=dpi_scale)
         else:
             self._chart_window.title("错误统计图表")
-            self._chart_window.geometry("1280x500")
+            # 优化缺陷R64：分页单图切换（每图独占窗口，适当加高）
+            self._chart_window.geometry("1200x560")
             # 优化缺陷R63：面板实例留存（测试可检视图表内容）
             self._chart_panel = ChartsPanel(
                 self._chart_window, self._result,

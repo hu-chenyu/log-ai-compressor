@@ -4145,16 +4145,17 @@ class TestCharts:
         app.update()
 
     def test_top_clusters_bar_content(self, app):
-        """第三图 = 错误种类 Top10（级别着色 + 摘要标签 + gid 联动）。"""
+        """分页「种类 Top10」：级别着色 + 摘要标签 + gid 联动（R64）。"""
         panel = self._open_charts(app)
         try:
-            assert "Top 10" in panel._ax_bar.get_title()
-            bars = panel._ax_bar.patches
+            panel._show_tab("种类 Top 10")
+            assert "Top 10" in panel._ax.get_title()
+            bars = panel._ax.patches
             assert bars, "Top10 图应有条形"
             top = max(app._result.clusters, key=lambda c: c.count)
             assert bars[0].get_gid() == f"cluster:{top.cluster_id}", \
                 "首个条形应对应次数最多的簇"
-            labels = [t.get_text() for t in panel._ax_bar.get_yticklabels()]
+            labels = [t.get_text() for t in panel._ax.get_yticklabels()]
             assert any(top.summary[:10] in lb for lb in labels), \
                 "y 轴标签应含簇摘要"
         finally:
@@ -4164,8 +4165,9 @@ class TestCharts:
         """点击 Top10 条形 → 主列表选中对应簇（cluster_id 联动）。"""
         panel = self._open_charts(app)
         try:
+            panel._show_tab("种类 Top 10")
             top = max(app._result.clusters, key=lambda c: c.count)
-            bar = panel._ax_bar.patches[0]
+            bar = panel._ax.patches[0]
             panel._on_pick(SimpleNamespace(artist=bar))
             app.update()
             assert app._displayed[app._selected_row].cluster_id == \
@@ -4182,12 +4184,32 @@ class TestCharts:
         finally:
             self._close(app)
 
-    def test_pie_has_autopct(self, app):
-        """饼图含百分比标注（优化缺陷R63 可读性）。"""
+    def test_pie_legend_and_threshold(self, app):
+        """优化缺陷R64：饼图小扇区不叠字 —— 右侧图例 + 阈值标注。"""
         panel = self._open_charts(app)
         try:
-            texts = [t.get_text() for t in panel._ax_pie.texts]
-            assert any("%" in t for t in texts), "饼图应有百分比标注"
+            panel._show_tab("级别占比")
+            legend = panel._ax.get_legend()
+            assert legend is not None, "级别信息应以图例呈现（防叠字）"
+            legend_text = "\n".join(t.get_text()
+                                    for t in legend.get_texts())
+            assert "%" in legend_text, "图例应含百分比"
+            # 扇内百分比仅大扇区显示（小扇区空串不叠字）
+            inner = [t.get_text() for t in panel._ax.texts if "%" in t.get_text()]
+            assert all(t for t in inner), "扇内不得出现空标注占位"
+        finally:
+            self._close(app)
+
+    def test_tab_switcher_defaults_and_switch(self, app):
+        """优化缺陷R64：分页切换栏存在，默认时间趋势，切换重建单轴。"""
+        panel = self._open_charts(app)
+        try:
+            assert panel._switch.get() == "时间趋势"
+            assert panel._tab == "时间趋势"
+            old_ax = panel._ax
+            panel._on_tab("级别占比")
+            assert panel._tab == "级别占比"
+            assert panel._ax is not old_ax, "切换应重建单轴大图"
         finally:
             self._close(app)
 
