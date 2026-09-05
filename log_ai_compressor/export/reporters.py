@@ -25,6 +25,22 @@ from log_ai_compressor.core.models import (
 
 _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常", "": ""}
 
+# 优化缺陷R58：导出内容板块（选项对话框勾选 → 各格式按板块生成）
+SECTIONS_ALL = ("overview", "list", "detail", "instances")
+
+
+def _sections(sections) -> set:
+    """板块集合归一化（None = 全量）。"""
+    return set(sections) if sections else set(SECTIONS_ALL)
+
+
+def _instances_line(c: ErrorCluster) -> str:
+    """实例行号索引（紧凑单行：L266, L315, …；优化缺陷R58）。"""
+    if not c.instances:
+        return ""
+    refs = ", ".join(f"L{i.line_no}" for i in c.instances)
+    return f"实例行号（{len(c.instances)}）：{refs}"
+
 
 # ---------------------------------------------------------------------------
 # 内部工具
@@ -64,11 +80,12 @@ def _rate_text(lps: float) -> str:
 # Markdown 报告
 # ---------------------------------------------------------------------------
 def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
-                title: Optional[str] = None) -> str:
+                title: Optional[str] = None, sections=None) -> str:
     """生成适配大模型输入的 Markdown 结构化报告。"""
     n = top_n or DEFAULT_TOP_N
     clusters = result.clusters[:n]
     s = result.stats
+    secs = _sections(sections)
     title = title or f"日志AI压缩报告：{s.source}"
 
     lines: List[str] = []
@@ -82,49 +99,55 @@ def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
     lines.append("")
 
     # 一、概览统计
-    lines.append("## 一、概览统计")
-    lines.append("")
-    lines.append("| 指标 | 数值 |")
-    lines.append("| --- | --- |")
-    lines.append(f"| 日志来源 | {_md_escape(s.source)} |")
-    lines.append(f"| 编码 | {s.encoding} |")
-    lines.append(f"| 总行数 | {s.total_lines} |")
-    lines.append(f"| 错误行数（FATAL/ERROR/FAIL） | {s.error_lines} |")
-    lines.append(f"| 错误种类数（去重后） | {len(result.clusters)} |")
-    lines.append(f"| 错误总次数（过滤后） | {s.error_entries} |")
-    lines.append(f"| 日志时间范围 | {_ts_range(result)} |")
-    if s.truncated:
-        lines.append(f"| 处理状态 | 用户取消，已处理前 {s.total_lines} 行 |")
-    lines.append("")
-    level_parts = [f"{k}={v}" for k, v in sorted(s.level_counts.items())]
-    lines.append(f"级别分布：{', '.join(level_parts) if level_parts else '-'}")
-    lines.append("")
+    if "overview" in secs:
+        lines.append("## 一、概览统计")
+        lines.append("")
+        lines.append("| 指标 | 数值 |")
+        lines.append("| --- | --- |")
+        lines.append(f"| 日志来源 | {_md_escape(s.source)} |")
+        lines.append(f"| 编码 | {s.encoding} |")
+        lines.append(f"| 总行数 | {s.total_lines} |")
+        lines.append(f"| 错误行数（FATAL/ERROR/FAIL） | {s.error_lines} |")
+        lines.append(f"| 错误种类数（去重后） | {len(result.clusters)} |")
+        lines.append(f"| 错误总次数（过滤后） | {s.error_entries} |")
+        lines.append(f"| 日志时间范围 | {_ts_range(result)} |")
+        if s.truncated:
+            lines.append(f"| 处理状态 | 用户取消，已处理前 {s.total_lines} 行 |")
+        lines.append("")
+        level_parts = [f"{k}={v}" for k, v in sorted(s.level_counts.items())]
+        lines.append(f"级别分布：{', '.join(level_parts) if level_parts else '-'}")
+        lines.append("")
 
     # 二、Top 错误清单
-    lines.append(f"## 二、Top {len(clusters)} 错误清单（按优先级排序）")
-    lines.append("")
-    if not clusters:
-        lines.append("未发现符合条件的错误。")
-        return "\n".join(lines) + "\n"
-    lines.append("| # | 优先级 | 级别 | 次数 | 模块 | 根因 | 异常 | 错误摘要 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
-    for i, c in enumerate(clusters, 1):
-        root = f"✔ {_md_escape(c.root_cause_reason[:16])}" if c.is_root_cause else "—"
-        lines.append(
-            f"| {i} | {c.priority_label} | {c.level} | {c.count} | "
-            f"{_md_escape(c.module) or '-'} | {root} | "
-            f"{_anomaly_label(c) or '—'} | {_md_escape(c.summary)} |")
-    lines.append("")
+    if "list" in secs:
+        lines.append(f"## 二、Top {len(clusters)} 错误清单（按优先级排序）")
+        lines.append("")
+        if not clusters:
+            lines.append("未发现符合条件的错误。")
+            return "\n".join(lines) + "\n"
+        lines.append("| # | 优先级 | 级别 | 次数 | 模块 | 根因 | 异常 | 错误摘要 |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        for i, c in enumerate(clusters, 1):
+            root = (f"✔ {_md_escape(c.root_cause_reason[:16])}"
+                    if c.is_root_cause else "—")
+            lines.append(
+                f"| {i} | {c.priority_label} | {c.level} | {c.count} | "
+                f"{_md_escape(c.module) or '-'} | {root} | "
+                f"{_anomaly_label(c) or '—'} | {_md_escape(c.summary)} |")
+        lines.append("")
 
     # 三、典型样例详情
-    lines.append("## 三、典型样例详情（每错误一份，含上下文与降噪堆栈）")
-    lines.append("")
-    for i, c in enumerate(clusters, 1):
-        lines.extend(_cluster_detail_md(i, c))
+    if "detail" in secs:
+        lines.append("## 三、典型样例详情（每错误一份，含上下文与降噪堆栈）")
+        lines.append("")
+        for i, c in enumerate(clusters, 1):
+            lines.extend(_cluster_detail_md(
+                i, c, include_instances="instances" in secs))
     return "\n".join(lines) + "\n"
 
 
-def _cluster_detail_md(index: int, c: ErrorCluster) -> List[str]:
+def _cluster_detail_md(index: int, c: ErrorCluster,
+                       include_instances: bool = False) -> List[str]:
     """单个错误簇的详情段落。"""
     out: List[str] = []
     out.append(f"### {index}. [{c.priority_label}][{c.level}] "
@@ -146,6 +169,11 @@ def _cluster_detail_md(index: int, c: ErrorCluster) -> List[str]:
         notes.append(f"异常：{_anomaly_label(c)}")
     if notes:
         out.append(f"- 智能分析：{'；'.join(notes)}")
+    # 优化缺陷R58：实例行号索引（板块勾选时随详情输出）
+    if include_instances:
+        inst_line = _instances_line(c)
+        if inst_line:
+            out.append(f"- {inst_line}")
     out.append("")
 
     sample = c.sample
@@ -249,6 +277,12 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True) -> dict:
             "context_before": c.sample.before,
             "context_after": c.sample.after,
         }
+    # 优化缺陷R58：实例行号索引（JSON 结构化全量携带，便于脚本定位）
+    d["instances"] = [
+        {"line_no": i.line_no, "last_line_no": i.last_line_no,
+         "timestamp": i.timestamp, "summary": i.summary}
+        for i in c.instances
+    ]
     return d
 
 
@@ -270,31 +304,255 @@ def to_json(result: AnalysisResult, top_n: Optional[int] = None) -> str:
 # ---------------------------------------------------------------------------
 # 纯文本导出
 # ---------------------------------------------------------------------------
-def to_text(result: AnalysisResult, top_n: Optional[int] = None) -> str:
+def to_text(result: AnalysisResult, top_n: Optional[int] = None,
+            sections=None) -> str:
     """导出纯文本报告（无 Markdown 标记，适配任意阅读环境）。"""
     n = top_n or DEFAULT_TOP_N
+    clusters = result.clusters[:n]
     s = result.stats
+    secs = _sections(sections)
     out: List[str] = []
     out.append("=" * 60)
     out.append(f"日志AI压缩报告：{s.source}")
     out.append("=" * 60)
-    out.append(f"总行数: {s.total_lines}  错误行: {s.error_lines}  "
-               f"错误种类: {len(result.clusters)}  耗时: {s.duration:.2f}s")
-    out.append(f"时间范围: {_ts_range(result)}")
+    if "overview" in secs:
+        out.append(f"总行数: {s.total_lines}  错误行: {s.error_lines}  "
+                   f"错误种类: {len(result.clusters)}  耗时: {s.duration:.2f}s")
+        out.append(f"时间范围: {_ts_range(result)}")
     out.append(f"初步根因: {_root_summary(result)}")
     out.append("-" * 60)
-    for i, c in enumerate(result.clusters[:n], 1):
+    # 优化缺陷R58：清单/详情/实例索引任一勾选即遍历簇（实例索引
+    # 依附簇行输出，单独勾选也能拿到行号清单）
+    if not ({"list", "detail", "instances"} & secs):
+        return "\n".join(out) + "\n"
+    for i, c in enumerate(clusters, 1):
+        if "list" not in secs and "detail" not in secs:
+            # 仅实例索引：紧凑行（级别 ×次数 + 行号索引）
+            out.append(f"[{i}] {c.priority_label} {c.level} ×{c.count}  "
+                       f"{c.summary}")
+            inst_line = _instances_line(c)
+            if inst_line:
+                out.append(f"     {inst_line}")
+            out.append("")
+            continue
         out.append(f"[{i}] {c.priority_label} {c.level} ×{c.count}  "
                    f"{c.summary}  (行 {c.first_line}~{c.last_line})")
         if c.is_root_cause:
             out.append(f"     根因: {c.root_cause_reason}")
         if c.anomaly:
             out.append(f"     异常: {_anomaly_label(c)}")
-        if c.sample is not None and c.sample.entry.stack:
+        # 优化缺陷R58：实例行号索引（板块勾选时输出）
+        if "instances" in secs:
+            inst_line = _instances_line(c)
+            if inst_line:
+                out.append(f"     {inst_line}")
+        if ("detail" in secs and c.sample is not None
+                and c.sample.entry.stack):
             simplified = simplify_stack(c.sample.entry.stack)
             for line in simplified.lines[:8]:
                 out.append(f"     {line}")
         out.append("")
+    return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# HTML 报告（优化缺陷R58：自包含单文件，内联样式，浏览器直接打开）
+# ---------------------------------------------------------------------------
+_LEVEL_BADGE = {
+    "ERROR": "#ef4444", "FAIL": "#f97316", "WARN": "#eab308",
+    "INFO": "#3b82f6", "DEBUG": "#6b7280",
+}
+
+_HTML_CSS = """
+:root{color-scheme:light}
+*{box-sizing:border-box}
+body{font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+margin:0;background:#f1f5f9;color:#1f2937}
+.wrap{max-width:1120px;margin:0 auto;padding:24px 20px 60px}
+header.band{background:linear-gradient(135deg,#1e3a8a,#3b82f6);color:#fff;
+border-radius:14px;padding:22px 26px;box-shadow:0 4px 14px rgba(30,58,138,.25)}
+header.band h1{margin:0 0 6px;font-size:22px}
+header.band .meta{opacity:.85;font-size:13px}
+.root{margin:16px 0;background:#fff7ed;border:1px solid #fdba74;
+border-left:6px solid #f97316;border-radius:10px;padding:12px 16px;font-size:14px}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;
+padding:16px 20px;margin:16px 0;box-shadow:0 1px 3px rgba(15,23,42,.06)}
+h2{font-size:17px;margin:4px 0 12px;color:#1e40af;
+border-bottom:2px solid #dbeafe;padding-bottom:6px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border:1px solid #e2e8f0;padding:6px 10px;text-align:left;vertical-align:top}
+th{background:#eff6ff;color:#1e3a8a}
+tr:nth-child(even) td{background:#f8fafc}
+.badge{display:inline-block;color:#fff;border-radius:6px;padding:1px 8px;
+font-size:12px;font-weight:600;white-space:nowrap}
+.prio{color:#6d28d9;font-weight:600;white-space:nowrap}
+pre{background:#0f172a;color:#e2e8f0;border-radius:8px;padding:10px 14px;
+overflow-x:auto;font-size:12px;line-height:1.55;
+font-family:Consolas,"Courier New",monospace}
+pre.ctx{background:#1e293b;color:#94a3b8}
+details{margin:6px 0}
+summary{cursor:pointer;color:#2563eb;font-weight:600;font-size:13px}
+.cmeta{color:#475569;font-size:13px;margin:4px 0}
+.notes{color:#7c2d12;font-size:13px}
+.insts{font-size:12px;color:#334155;background:#f1f5f9;border-radius:8px;
+padding:6px 10px;margin:6px 0;word-break:break-all}
+a.anchor{color:#2563eb;text-decoration:none}
+a.anchor:hover{text-decoration:underline}
+.toc{font-size:13px;line-height:1.9;column-count:2;column-gap:32px}
+footer{color:#94a3b8;font-size:12px;text-align:center;margin-top:24px}
+h3{font-size:15px;margin:18px 0 6px}
+"""
+
+
+def _badge(level: str) -> str:
+    color = _LEVEL_BADGE.get(level, "#6b7280")
+    return f'<span class="badge" style="background:{color}">{level}</span>'
+
+
+def to_html(result: AnalysisResult, top_n: Optional[int] = None,
+            title: Optional[str] = None, sections=None) -> str:
+    """生成自包含 HTML 结构化报告（优化缺陷R58）。
+
+    单文件内联样式：头部横幅 + 根因横幅 + 概览/清单/详情（锚点目录
+    跳转、级别着色徽章、上下文与堆栈 <pre> 横向滚动）；实例行号索
+    引随详情板块输出。
+    """
+    import html as _html
+
+    def esc(t) -> str:
+        return _html.escape(str(t), quote=True)
+
+    n = top_n or DEFAULT_TOP_N
+    clusters = result.clusters[:n]
+    s = result.stats
+    secs = _sections(sections)
+    title = title or f"日志AI压缩报告：{s.source}"
+    level_parts = ", ".join(f"{k}={v}" for k, v in sorted(s.level_counts.items()))
+
+    out: List[str] = []
+    out.append("<!DOCTYPE html>")
+    out.append('<html lang="zh-CN"><head><meta charset="utf-8">')
+    out.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
+    out.append(f"<title>{esc(title)}</title>")
+    out.append(f"<style>{_HTML_CSS}</style></head><body><div class=\"wrap\">")
+
+    # 头部横幅 + 根因横幅
+    out.append('<header class="band">')
+    out.append(f"<h1>{esc(title)}</h1>")
+    out.append(f'<div class="meta">log-ai-compressor v{__version__} | '
+               f"处理 {s.total_lines} 行 | 耗时 {s.duration:.2f}s | "
+               f"{esc(_rate_text(s.lines_per_second))} | 规则 {esc(s.rule_name)}"
+               f" | 时间范围 {esc(_ts_range(result))}</div>")
+    out.append("</header>")
+    out.append(f'<div class="root"><b>初步定位根因：</b>'
+               f"{esc(_root_summary(result))}</div>")
+
+    # 目录锚点
+    if "detail" in secs and clusters:
+        out.append('<div class="card"><h2>目录</h2><div class="toc">')
+        for i, c in enumerate(clusters, 1):
+            out.append(f'<div><a class="anchor" href="#c{i}">{i}. '
+                       f"{esc(c.priority_label)} {_badge(c.level)} "
+                       f"×{c.count} {esc(c.summary[:60])}</a></div>")
+        out.append("</div></div>")
+
+    # 一、概览统计
+    if "overview" in secs:
+        out.append('<div class="card"><h2>一、概览统计</h2><table>')
+        out.append("<tr><th>指标</th><th>数值</th></tr>")
+        rows = (("日志来源", s.source), ("编码", s.encoding),
+                ("总行数", s.total_lines),
+                ("错误行数（FATAL/ERROR/FAIL）", s.error_lines),
+                ("错误种类数（去重后）", len(result.clusters)),
+                ("错误总次数（过滤后）", s.error_entries),
+                ("日志时间范围", _ts_range(result)),
+                ("级别分布", level_parts or "-"))
+        for k, v in rows:
+            out.append(f"<tr><td>{esc(k)}</td><td>{esc(v)}</td></tr>")
+        if s.truncated:
+            out.append(f"<tr><td>处理状态</td><td>用户取消，已处理前 "
+                       f"{s.total_lines} 行</td></tr>")
+        out.append("</table></div>")
+
+    # 二、错误清单
+    if "list" in secs:
+        out.append(f'<div class="card"><h2>二、Top {len(clusters)} '
+                   "错误清单（按优先级排序）</h2>")
+        if not clusters:
+            out.append("<p>未发现符合条件的错误。</p>")
+        else:
+            out.append("<table><tr><th>#</th><th>优先级</th><th>级别</th>"
+                       "<th>次数</th><th>模块</th><th>根因</th><th>异常</th>"
+                       "<th>错误摘要</th></tr>")
+            for i, c in enumerate(clusters, 1):
+                root = (f"✔ {esc(c.root_cause_reason[:16])}"
+                        if c.is_root_cause else "—")
+                out.append(
+                    f'<tr><td>{i}</td><td class="prio">{esc(c.priority_label)}'
+                    f"</td><td>{_badge(c.level)}</td><td>{c.count}</td>"
+                    f"<td>{esc(c.module) or '-'}</td><td>{root}</td>"
+                    f"<td>{esc(_anomaly_label(c)) or '—'}</td>"
+                    f"<td>{esc(c.summary)}</td></tr>")
+            out.append("</table>")
+        out.append("</div>")
+
+    # 三、典型样例详情
+    if "detail" in secs:
+        for i, c in enumerate(clusters, 1):
+            out.append(f'<div class="card" id="c{i}">')
+            out.append(f"<h3>{i}. [{esc(c.priority_label)}] {_badge(c.level)} "
+                       f"{esc(c.summary)}</h3>")
+            meta = [f"出现 {c.count} 次", f"行 {c.first_line}~{c.last_line}"]
+            if c.first_seen is not None:
+                meta.append(f"首末时间 {format_timestamp(c.first_seen)}"
+                            f" ~ {format_timestamp(c.last_seen)}")
+            if c.module:
+                meta.append(f"模块 {c.module}")
+            out.append(f'<p class="cmeta">{esc(" | ".join(meta))}</p>')
+            notes = []
+            if c.is_root_cause:
+                notes.append(f"根因：{c.root_cause_reason}")
+            elif c.root_cause_reason:
+                notes.append(c.root_cause_reason)
+            if c.anomaly:
+                notes.append(f"异常：{_anomaly_label(c)}")
+            if notes:
+                out.append(f'<p class="notes"><b>智能分析：</b>'
+                           f"{esc('；'.join(notes))}</p>")
+            if "instances" in secs and c.instances:
+                refs = " ".join(f"L{inst.line_no}" for inst in c.instances)
+                out.append(f'<div class="insts"><b>实例行号'
+                           f"（{len(c.instances)}）：</b>{esc(refs)}</div>")
+            sample = c.sample
+            if sample is None:
+                out.append("<p>（无典型样例）</p>")
+            else:
+                entry = sample.entry
+                if sample.before:
+                    out.append("<details><summary>前上下文"
+                               f"（{len(sample.before)} 行）</summary>"
+                               f'<pre class="ctx">{esc(chr(10).join(sample.before))}'
+                               "</pre></details>")
+                body = entry.raw + (
+                    "\n" + "\n".join(entry.message_extra)
+                    if entry.message_extra else "")
+                out.append(f"<p><b>典型样例</b></p><pre>{esc(body)}</pre>")
+                if entry.stack:
+                    simplified = simplify_stack(entry.stack)
+                    out.append(f"<p><b>堆栈（已降噪：业务帧 "
+                               f"{simplified.business_count} 行，折叠系统/"
+                               f"第三方帧 {simplified.noise_count} 行）</b></p>"
+                               f"<pre>{esc(chr(10).join(simplified.lines))}</pre>")
+                if sample.after:
+                    out.append("<details><summary>后上下文"
+                               f"（{len(sample.after)} 行）</summary>"
+                               f'<pre class="ctx">{esc(chr(10).join(sample.after))}'
+                               "</pre></details>")
+            out.append("</div>")
+
+    out.append(f"<footer>由 log-ai-compressor v{__version__} 生成 · "
+               f"{esc(datetime.now().isoformat(timespec='seconds'))}</footer>")
+    out.append("</div></body></html>")
     return "\n".join(out) + "\n"
 
 
