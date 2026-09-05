@@ -259,7 +259,8 @@ def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
 # ---------------------------------------------------------------------------
 # JSON 导出
 # ---------------------------------------------------------------------------
-def _cluster_dict(c: ErrorCluster, with_sample: bool = True) -> dict:
+def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
+                  full: bool = True) -> dict:
     d = {
         "id": c.cluster_id,
         "level": c.level,
@@ -277,6 +278,11 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True) -> dict:
         "first_seen": _iso_ts(c.first_seen),
         "last_seen": _iso_ts(c.last_seen),
     }
+    # 修复缺陷R61：精简模式 —— 仅核心字段 + 实例行号列表（不含
+    # 上下文/堆栈/样例原文），人可通读；full 模式供脚本二次处理
+    if not full:
+        d["instance_lines"] = [i.line_no for i in c.instances]
+        return d
     if with_sample and c.sample is not None:
         entry = c.sample.entry
         simplified = simplify_stack(entry.stack) if entry.stack else None
@@ -302,11 +308,15 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True) -> dict:
     return d
 
 
-def to_json(result: AnalysisResult, top_n: Optional[int] = None) -> str:
+def to_json(result: AnalysisResult, top_n: Optional[int] = None,
+            full: bool = True) -> str:
     """导出 JSON 格式（结构化，适配脚本二次处理）。
 
     修复缺陷R60：全部时间戳字段输出 ISO 8601 可读字符串（UTC），
     替代原始 epoch 浮点（人不可读）；None 保持 null。
+    修复缺陷R61：full=False 精简输出 —— 簇仅核心字段 + 实例行号
+    列表（不含上下文/堆栈/样例原文；261 簇 × 完整上下文 >1MB、
+    3 万余行人不可读），GUI 导出默认精简，完整结构为对话框勾选项。
     """
     n = top_n or DEFAULT_TOP_N
     meta = result.stats.as_dict()
@@ -318,7 +328,8 @@ def to_json(result: AnalysisResult, top_n: Optional[int] = None) -> str:
         "meta": meta,
         "root_cause_summary": _root_summary(result),
         "error_kinds": len(result.clusters),
-        "clusters": [_cluster_dict(c) for c in result.clusters[:n]],
+        "clusters": [_cluster_dict(c, full=full)
+                     for c in result.clusters[:n]],
         "time_series": [[_iso_ts(t), c]
                         for t, c in result.global_hist.series()],
     }

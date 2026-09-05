@@ -4062,8 +4062,25 @@ class TestExportReport:
         assert app._export_fmt_vars["html"].get() is True
         assert app._export_fmt_vars["md"].get() is False
         assert all(v.get() for v in app._export_sec_vars.values())
+        # 修复缺陷R61：JSON 完整上下文默认不勾（默认精简可读）
+        assert app._export_json_full_var.get() is False
         dlg.destroy()
         app.update()
+
+    def test_export_json_lean_by_default(self, app, tmp_path):
+        """修复缺陷R61：执行器默认精简 JSON（无上下文/样例原文）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._export_with_options(str(tmp_path / "r"), {"json"}, set())
+        payload = json.loads((tmp_path / "r.json").read_text("utf-8"))
+        first = payload["clusters"][0]
+        assert "sample" not in first
+        assert first["instance_lines"]
+        # 显式完整模式
+        app._export_with_options(str(tmp_path / "rf"), {"json"}, set(),
+                                 json_full=True)
+        full_payload = json.loads((tmp_path / "rf.json").read_text("utf-8"))
+        assert "sample" in full_payload["clusters"][0]
 
     def test_export_confirmed_requires_format(self, app, monkeypatch):
         """未勾选任何格式确认 → 警告且不弹保存框。"""
