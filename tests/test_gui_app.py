@@ -2037,7 +2037,7 @@ class TestFullscreenView:
         self._open_fs_with_two_clusters(app)
         app._fs_search_entry.insert(0, "error")
         app.update()
-        assert app._fs_count.cget("text") == "0 / 2 条", \
+        assert app._fs_count.cget("text") == "0 / 2 簇", \
             "输入后未导航应为 0/y"
         # 影子框显形（与输入框同底色）
         assert app._fs_count_box.cget("fg_color") == \
@@ -2045,20 +2045,20 @@ class TestFullscreenView:
         app._on_fs_search_enter(True)
         app.update()
         assert app._selected_row == 0
-        assert app._fs_count.cget("text") == "1 / 2 条"
+        assert app._fs_count.cget("text") == "1 / 2 簇"
         app._on_fs_search_enter(True)
         app.update()
         assert app._selected_row == 1
-        assert app._fs_count.cget("text") == "2 / 2 条"
+        assert app._fs_count.cget("text") == "2 / 2 簇"
         app._on_fs_search_enter(True)
         app.update()
         assert app._selected_row == 0
-        assert app._fs_count.cget("text") == "1 / 2 条", \
+        assert app._fs_count.cget("text") == "1 / 2 簇", \
             "到 y/y 后应按回绕到 1/y"
         app._on_fs_search_enter(False)
         app.update()
         assert app._selected_row == 1
-        assert app._fs_count.cget("text") == "2 / 2 条", \
+        assert app._fs_count.cget("text") == "2 / 2 簇", \
             "Shift+Enter 应从 1/y 反向到 y/y"
 
     def test_fs_click_row_syncs_nav(self, app):
@@ -2066,7 +2066,7 @@ class TestFullscreenView:
         self._open_fs_with_two_clusters(app)
         app._fs_search_entry.insert(0, "error")
         app.update()
-        assert app._fs_count.cget("text") == "0 / 2 条"
+        assert app._fs_count.cget("text") == "0 / 2 簇"
         vl = app._fs_vl
         slot = next(
             s for s in vl.slots
@@ -2075,7 +2075,7 @@ class TestFullscreenView:
         slot["summary"].event_generate("<Button-1>")
         app.update()
         assert app._selected_row == 1
-        assert app._fs_count.cget("text") == "2 / 2 条", \
+        assert app._fs_count.cget("text") == "2 / 2 簇", \
             "点选第 2 个匹配簇计数应为 2/y"
 
     def test_fs_count_box_hidden_when_empty(self, app):
@@ -2085,7 +2085,7 @@ class TestFullscreenView:
         assert app._fs_count_box.cget("fg_color") == "transparent"
         app._fs_search_entry.insert(0, "kernel")
         app.update()
-        assert app._fs_count.cget("text") == "0 / 1 条"
+        assert app._fs_count.cget("text") == "0 / 1 簇"
         app._fs_search_entry.delete(0, "end")
         app.update()
         assert app._fs_count.cget("text") == ""
@@ -2111,7 +2111,7 @@ class TestFullscreenView:
         app.update()
         expected = box.get("1.0", "end").lower().count("kernel")
         assert expected > 0, "详情文本应含关键字 kernel"
-        assert app._fd_count.cget("text") == f"0 / {expected} 条"
+        assert app._fd_count.cget("text") == f"0 / {expected} 处"
         assert len(box.tag_ranges("searchkw")) == expected * 2, \
             "全部匹配处应有 searchkw 高亮"
         # 影子框显形（与输入框同底色）
@@ -2128,7 +2128,7 @@ class TestFullscreenView:
         app._on_fd_search_enter(True)
         app.update()
         assert app._fd_search_nav == 1
-        assert app._fd_count.cget("text") == f"1 / {n} 条"
+        assert app._fd_count.cget("text") == f"1 / {n} 处"
         assert box.tag_ranges("fdcur"), "定位后当前匹配应有橙底高亮"
         app._on_fd_search_enter(True)
         app.update()
@@ -2142,7 +2142,7 @@ class TestFullscreenView:
         app._on_fd_search_enter(False)
         app.update()
         assert app._fd_search_nav == n
-        assert app._fd_count.cget("text") == f"{n} / {n} 条"
+        assert app._fd_count.cget("text") == f"{n} / {n} 处"
 
     def test_fd_clear_hides_count_box(self, app):
         """清空关键字 → 高亮移除 + 影子框透明隐形。"""
@@ -3064,7 +3064,7 @@ class TestMainWindowSearch:
         row = app._cluster_rows[0]
         assert "kernel" in app._displayed[row["idx"]].summary
         # 优化缺陷R50：输入后未导航，计数为 0/匹配数（kernel 仅 1 簇命中）
-        assert app._search_count.cget("text") == "0 / 1 条"
+        assert app._search_count.cget("text") == "0 / 1 簇"
 
     def test_search_clear_restores_all(self, app):
         """清空关键字 → 全部簇恢复显示，计数标签隐藏。"""
@@ -3130,7 +3130,7 @@ class TestMainWindowSearch:
         # 展开状态保留（命中过滤的展开簇其实例行仍在视图中）
         assert kidx in app._expanded_clusters
         assert any(r[0] == "i" and r[1] == kidx for r in vl._data)
-        assert app._search_count.cget("text") == f"0 / {expected} 条"
+        assert app._search_count.cget("text") == f"0 / {expected} 簇"
 
     def test_search_debounce_schedules_job(self, app):
         """输入经 trace 调度防抖任务（200ms 合并连续输入）。"""
@@ -3151,21 +3151,21 @@ class TestMainWindowSearch:
         app._search_var.set("error")     # 级别 ERROR，两簇均命中
         app._apply_search_filter()
         app.update()
-        assert app._search_count.cget("text") == "0 / 2 条", \
+        assert app._search_count.cget("text") == "0 / 2 簇", \
             "输入后未导航应为 0/y"
         app._on_search_enter(True)
         app.update()
         assert app._selected_row == 0
-        assert app._search_count.cget("text") == "1 / 2 条", \
+        assert app._search_count.cget("text") == "1 / 2 簇", \
             "首次 Enter 定位第 1 个匹配"
         app._on_search_enter(True)
         app.update()
         assert app._selected_row == 1
-        assert app._search_count.cget("text") == "2 / 2 条"
+        assert app._search_count.cget("text") == "2 / 2 簇"
         app._on_search_enter(True)
         app.update()
         assert app._selected_row == 0
-        assert app._search_count.cget("text") == "1 / 2 条", \
+        assert app._search_count.cget("text") == "1 / 2 簇", \
             "到 y/y 后再按回绕到 1/y"
 
     def test_shift_enter_jumps_back(self, app):
@@ -3178,11 +3178,11 @@ class TestMainWindowSearch:
         app._on_search_enter(False)
         app.update()
         assert app._selected_row == 1, "Shift+Enter 应反向定位到末尾匹配"
-        assert app._search_count.cget("text") == "2 / 2 条"
+        assert app._search_count.cget("text") == "2 / 2 簇"
         app._on_search_enter(False)
         app.update()
         assert app._selected_row == 0
-        assert app._search_count.cget("text") == "1 / 2 条"
+        assert app._search_count.cget("text") == "1 / 2 簇"
 
     def test_enter_flushes_pending_debounce(self, app):
         """Enter 先冲刷挂起的防抖过滤再跳转（关键字立即生效）。"""
@@ -3252,19 +3252,19 @@ class TestMainWindowSearch:
         app._search_var.set("error")     # 两簇均命中
         app._apply_search_filter()
         app.update()
-        assert app._search_count.cget("text") == "0 / 2 条"
+        assert app._search_count.cget("text") == "0 / 2 簇"
         # 点选第 2 个匹配簇（经典行）
         row = next(r for r in app._cluster_rows if r.get("idx") == 1)
         row["summary"].event_generate("<Button-1>", x=3, y=2)
         app.update()
         assert app._selected_row == 1
-        assert app._search_count.cget("text") == "2 / 2 条", \
+        assert app._search_count.cget("text") == "2 / 2 簇", \
             "点选第 2 个匹配计数应为 2/y"
         # 点选回第 1 个
         row0 = next(r for r in app._cluster_rows if r.get("idx") == 0)
         row0["summary"].event_generate("<Button-1>", x=3, y=2)
         app.update()
-        assert app._search_count.cget("text") == "1 / 2 条"
+        assert app._search_count.cget("text") == "1 / 2 簇"
 
     def test_filtered_out_selection_auto_moves_to_first_match(self, app):
         """当前选中簇被过滤掉时自动选中首个匹配簇（详情不滞留陈旧内容）。"""
