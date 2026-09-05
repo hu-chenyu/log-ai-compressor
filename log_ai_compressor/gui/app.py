@@ -1894,7 +1894,7 @@ class LogCompressorApp(_make_app_base()):
         # 文件导入页仍留大片空白 —— 建完全部页后关闭传播，显式
         # height 才生效（_set_dimensions 会同步 tk.Frame height 选项）
         self._tabview.grid_propagate(False)
-        # 优化缺陷R68：顶部三 Tab 长方体化（选中页签豆腐块凸起）
+        # 优化缺陷R68：顶部三 Tab 3D 立体化（常驻投影 + 按压回弹）
         self._make_tab_buttons_3d()
 
     def _fit_tab_height(self) -> None:
@@ -1908,69 +1908,88 @@ class LogCompressorApp(_make_app_base()):
         h = _TAB_PAGE_HEIGHTS.get(self._tabview.get())
         if h:
             self._tabview.configure(height=h)
-        # 优化缺陷R68：选中页签切换 → 豆腐块棱条移到新选中按钮
-        self._tab3d_sync()
 
     # ------------------------------------------------------------------
-    # 优化缺陷R68：顶部三 Tab 长方体化 —— 选中页签豆腐块凸起
+    # 优化缺陷R68：顶部三 Tab 3D 立体化（常驻投影 + 按压下沉 + 释放回弹）
     # ------------------------------------------------------------------
     def _make_tab_buttons_3d(self) -> None:
-        """顶部三 Tab 长方体立体化（优化缺陷R68）。
+        """顶部三 Tab 3D 立体化（优化缺陷R68）。
 
-        三个页签默认是平面长方形；【当前选中】的那个叠加四边棱条
-        变成凸起的豆腐块：
-        - 顶/左棱 = 受光高光（sel_hi，2px）；
-        - 底/右棱 = 背光投影（sel_shadow，3px）；
-        棱条为 place 在分段按钮内的原生 tk.Frame（创建晚于页签按
-        钮，自然浮在其表面）；选中切换/几何变化/主题切换时重排。
+        - 常驻：分段按钮底部投影条（sel_shadow 主题色，place 跟随分段
+          按钮几何，随 <Configure> 同步）→ 整体浮起感；
+        - 按下：页签 pady 下沉 2px + 投影收缩 3→1px（物理按压感）；
+        - 释放：~140ms 回弹 —— 位移复位 + 投影 1→4→3 过冲加深后定稿
+          （与列表行 R23 的立体语言一致）。
         """
         sb = self._tabview._segmented_button
-        # 顶、底、左、右四条棱
-        self._tab3d_edges = {
-            k: tk.Frame(sb, highlightthickness=0, bd=0)
-            for k in ("top", "bottom", "left", "right")
-        }
-        self._tab3d_sync()
-        # CTk 控件 bind() 禁用（NotImplementedError），绑内部 tk 画布
-        self._tabview._canvas.bind(
-            "<Configure>", lambda e: self._tab3d_sync(), add="+")
-        self.after(50, self._tab3d_sync)    # 首帧布局完成后定位
+        self._tab3d_shadow = tk.Frame(
+            self._tabview, bg=self._palette()["sel_shadow"],
+            highlightthickness=0, bd=0)
+        self._tab3d_jobs = []
 
-    def _tab3d_sync(self) -> None:
-        """把四边棱条贴到当前选中页签上（豆腐块凸起，缺陷R68）。"""
-        edges = getattr(self, "_tab3d_edges", None)
-        if not edges:
-            return
+        def _sync(_event=None):
+            try:
+                inset = self._dpx(6)
+                x = sb.winfo_x() + inset
+                y = sb.winfo_y() + sb.winfo_height() - 1
+                w = max(1, sb.winfo_width() - inset * 2)
+                self._tab3d_shadow.place(
+                    x=x, y=y, width=w, height=self._dpx(3))
+            except (tk.TclError, AttributeError):
+                pass
+        # CTk 控件 bind() 禁用（NotImplementedError），一律绑内部
+        # tk 画布：tabview._canvas 跟踪容器尺寸（分段按钮几何随之变）
+        self._tabview._canvas.bind("<Configure>", _sync, add="+")
+        self.after(50, _sync)               # 首帧布局完成后定位
+
+        for btn in sb._buttons_dict.values():
+            btn._canvas.bind("<ButtonPress-1>",
+                             lambda e, b=btn: self._tab3d_press(b), add="+")
+            btn._canvas.bind("<ButtonRelease-1>",
+                             lambda e, b=btn: self._tab3d_release(b), add="+")
+
+    def _tab3d_press(self, btn) -> None:
+        """按下：页签下沉 + 投影收缩（优化缺陷R68）。"""
+        self._tab3d_cancel()
         try:
-            sb = self._tabview._segmented_button
-            btn = sb._buttons_dict.get(sb.get())
-            if btn is None:
-                return
-            p = self._palette()
-            hi, sh = p["sel_hi"], p["sel_shadow"]
-            t, s = self._dpx(2), self._dpx(3)      # 高光 / 投影厚度
-            r = self._dpx(6)                        # 圆角让位内缩
-            x, y = btn.winfo_x(), btn.winfo_y()
-            w, h = btn.winfo_width(), btn.winfo_height()
-            if w <= 1 or h <= 1:                    # 布局未完成，下帧再来
-                self.after(50, self._tab3d_sync)
-                return
-            edges["top"].configure(bg=hi)
-            edges["left"].configure(bg=hi)
-            edges["bottom"].configure(bg=sh)
-            edges["right"].configure(bg=sh)
-            edges["top"].place(x=x + r, y=y,
-                               width=max(1, w - 2 * r), height=t)
-            edges["left"].place(x=x, y=y + r,
-                                width=t, height=max(1, h - 2 * r))
-            edges["bottom"].place(x=x + r, y=y + h - s,
-                                  width=max(1, w - 2 * r), height=s)
-            edges["right"].place(x=x + w - s, y=y + r,
-                                 width=s, height=max(1, h - 2 * r))
-            for f in edges.values():
-                f.lift()
+            # 连点不同页签时，先复位上一个仍处于动画中的页签
+            for b in self._tabview._segmented_button._buttons_dict.values():
+                if b is not btn:
+                    b.grid_configure(pady=(0, 0))
+            btn.grid_configure(pady=(self._dpx(2), 0))
+            self._tab3d_shadow.place_configure(height=self._dpx(1))
         except (tk.TclError, AttributeError):
             pass
+
+    def _tab3d_release(self, btn) -> None:
+        """释放：~140ms 回弹（位移复位 + 投影过冲加深后定稿）。"""
+        self._tab3d_cancel()
+        # (延时ms, pady_top, 投影高度)：回升 → 到位+投影过冲 → 回落常驻
+        frames = ((0, 1, 2), (60, 0, 4), (140, 0, 3))
+        for ms, pt, sh in frames:
+            try:
+                job = self.after(
+                    ms, lambda pt=pt, sh=sh: self._tab3d_frame(btn, pt, sh))
+                self._tab3d_jobs.append(job)
+            except tk.TclError:
+                return
+
+    def _tab3d_frame(self, btn, pt: int, sh: int) -> None:
+        """回弹动画单帧：页签位移 + 投影高度。"""
+        try:
+            btn.grid_configure(pady=(self._dpx(pt), 0))
+            self._tab3d_shadow.place_configure(height=self._dpx(sh))
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _tab3d_cancel(self) -> None:
+        """取消挂起的回弹帧（连点/再次按下打断前一次动画）。"""
+        for job in getattr(self, "_tab3d_jobs", None) or []:
+            try:
+                self.after_cancel(job)
+            except (tk.TclError, ValueError):
+                pass
+        self._tab3d_jobs = []
 
     def _build_file_tab(self) -> None:
         tab = self._tabview.tab("文件导入")
@@ -3618,8 +3637,13 @@ class LogCompressorApp(_make_app_base()):
             self._splitter.configure(fg_color=p["splitter"])
         except (tk.TclError, ValueError, AttributeError):
             pass
-        # 优化缺陷R68：Tab 豆腐块棱条主题色刷新（四态循环跟随）
-        self._tab3d_sync()
+        # 优化缺陷R68：Tab 3D 投影主题色刷新（四态循环跟随）
+        shadow = getattr(self, "_tab3d_shadow", None)
+        if shadow is not None:
+            try:
+                shadow.configure(bg=p["sel_shadow"])
+            except (tk.TclError, ValueError):
+                pass
         for dot in getattr(self, "_splitter_dots", []):
             try:
                 dot.configure(bg=p["splitter_grip"])
