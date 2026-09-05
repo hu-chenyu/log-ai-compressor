@@ -2021,9 +2021,15 @@ class LogCompressorApp(_make_app_base()):
             # DEBUG 右侧区间比搜索框右侧区间多出 12px（2x DPI），
             # 破坏两区间严格等距；间隔统一由固定间隔列提供
             # 优化缺陷R52：复选框 padx (2,6)→(1,4) —— 组区左移收紧
+            # 修复缺陷R73：CTkCheckBox 默认 width=100（固定值，不随
+            # 文本自适应）—— 五个复选框各空耗约 32px，DEBUG 右缘
+            # 越过分隔条竖线 104px（用户机实测）；按文本实测宽度
+            # 紧凑化 width=68（DEBUG 文本 83px@2x + 复选框 36px +
+            # 余量），组体整体左移且各框等宽、间距（padx）不变
             cb_pad_r = 0 if level == LEVEL_CHECKS[-1] else 4
             ctk.CTkCheckBox(level_box, text=level, variable=var,
-                            checkbox_width=18, checkbox_height=18).grid(
+                            checkbox_width=18, checkbox_height=18,
+                            width=68).grid(
                 row=0, column=col, padx=(1, cb_pad_r), sticky="w")
             col += 1
             self._level_tooltips[level] = Tooltip(
@@ -2087,32 +2093,31 @@ class LogCompressorApp(_make_app_base()):
             panel, textvariable=self._search_var, width=200,
             placeholder_text="按摘要 / 模块 / 级别过滤列表…")
         self._search_entry.grid(row=0, column=1, pady=4, sticky="w")
-        # 优化缺陷R49：计数影子显示框 —— 与输入框同底色（fg_color
-        # 元组随主题自适应）；恒定占位（grid_propagate(False) 固定
-        # 尺寸），有计数时显形、无计数时透明隐形，显隐零布局影响
-        # 注：width/height 传逻辑值即可（CTk 内部自动 DPI 缩放，
-        # 预乘 _dpx 会双重放大）
-        self._search_count_box = ctk.CTkFrame(
-            panel, width=88, height=24,
-            corner_radius=6, fg_color="transparent")
-        self._search_count_box.grid(row=0, column=2, padx=(4, 0))
-        self._search_count_box.grid_propagate(False)
-        self._search_count = ctk.CTkLabel(
-            self._search_count_box, text="", text_color="#8fa4b8",
-            fg_color="transparent")
-        self._search_count.place(relx=0.5, rely=0.5, anchor="c")
-        # 修复缺陷R72：▲/▼ 导航按钮 —— 与 Enter（下一个）/
-        # Shift+Enter（上一个）同语义，鼠标可直接点击
+        # 修复缺陷R73：▲/▼ 导航按钮与计数框换位 —— 按钮紧随输入框
+        # （与 Enter（下一个）/ Shift+Enter（上一个）同语义），计数
+        # 框退居行尾：其宽度随文本自适应变化时只影响行尾空白，不
+        # 再挤压任何控件
         self._search_prev_btn = ctk.CTkButton(
             panel, text="▲", width=28, height=24,
             command=lambda: self._on_search_enter(False))
-        self._search_prev_btn.grid(row=0, column=3, padx=(8, 2))
+        self._search_prev_btn.grid(row=0, column=2, padx=(8, 2))
         self._search_next_btn = ctk.CTkButton(
             panel, text="▼", width=28, height=24,
             command=lambda: self._on_search_enter(True))
-        self._search_next_btn.grid(row=0, column=4, padx=(2, 12))
+        self._search_next_btn.grid(row=0, column=3, padx=(2, 4))
         self._accent_buttons.append((self._search_prev_btn, "accent"))
         self._accent_buttons.append((self._search_next_btn, "accent"))
+        # 修复缺陷R73：计数框宽度随文本自适应 —— 取消固定 88px 与
+        # grid_propagate(False)，错误种类多时数字变长（如 12/135 条）
+        # 框体同步变宽，不裁切不顶出；无计数时透明收缩隐形
+        # （显隐仍零布局影响：行尾空白吸收）
+        self._search_count_box = ctk.CTkFrame(
+            panel, corner_radius=6, fg_color="transparent")
+        self._search_count_box.grid(row=0, column=4, padx=(4, 12))
+        self._search_count = ctk.CTkLabel(
+            self._search_count_box, text="", text_color="#8fa4b8",
+            fg_color="transparent")
+        self._search_count.grid(row=0, column=0, padx=8, pady=1)
         # trace 不依赖键盘事件（粘贴/清空/程序赋值均可靠触发）
         self._search_var.trace_add("write", self._on_search_changed)
         # 优化缺陷R46：Enter 跳下一个匹配 / Shift+Enter 跳上一个

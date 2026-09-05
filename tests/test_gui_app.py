@@ -3077,10 +3077,16 @@ class TestMainWindowSearch:
         # 输入框固定宽渲染（sticky 不含 e），不随窗口拉伸/压缩
         entry_info = app._search_entry.grid_info()
         assert "e" not in str(entry_info["sticky"])
-        # 计数影子框与 ▲/▼ 导航按钮与输入框同行
+        # 修复缺陷R73：▲/▼ 导航按钮紧随输入框（列2/3），计数影子框
+        # 退居行尾（列4）且宽度随文本自适应（不再固定 88px）
         assert app._search_count_box.master is panel
         assert app._search_prev_btn.master is panel
         assert app._search_next_btn.master is panel
+        assert str(app._search_prev_btn.grid_info()["column"]) == "2"
+        assert str(app._search_next_btn.grid_info()["column"]) == "3"
+        assert str(app._search_count_box.grid_info()["column"]) == "4"
+        assert app._search_count_box.grid_propagate() != 0, \
+            "计数框应内容自适应变宽（数字变长不顶出边框）"
         # 行号顺移：按钮行 4、结果区 5、状态栏 6
         assert str(app._start_btn.master.grid_info()["row"]) == "4"
         assert str(app._result_panel.grid_info()["row"]) == "5"
@@ -3105,6 +3111,65 @@ class TestMainWindowSearch:
         app.update()
         assert app._search_nav == 1, "▲ 应回上一个命中实例"
         assert app._search_count.cget("text") == "1 / 3 条"
+
+    def test_count_box_auto_width(self, app):
+        """修复缺陷R73：计数框宽度随文本自适应，完整容纳不裁切。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        assert app._search_count.cget("text") == "0 / 3 条"
+        assert app._search_count_box.winfo_width() >= \
+            app._search_count.winfo_reqwidth(), "计数框应完整容纳文本"
+        # 导航后文本变化，框体仍完整容纳
+        app._search_next_btn.invoke()
+        app.update()
+        assert app._search_count.cget("text") == "1 / 3 条"
+        assert app._search_count_box.winfo_width() >= \
+            app._search_count.winfo_reqwidth()
+        # 清空 → 透明收缩
+        app._search_var.set("")
+        app._apply_search_filter()
+        app.update()
+        assert app._search_count_box.cget("fg_color") == "transparent"
+
+    def test_level_checkboxes_compact_width(self, app):
+        """修复缺陷R73：复选框紧凑宽（100→68），DEBUG 不越分隔条。
+
+        CTkCheckBox 默认 width=100 固定值（不随文本自适应），五个
+        复选框各空耗约 32px，DEBUG 右缘越过分隔条竖线；紧凑化后
+        组体整体左移、文本不裁切、各项间距仍严格相同。
+        """
+        app.geometry("2560x1475")
+        app.update()
+        panel = app._ctx_entry.master
+        level_box = panel.grid_slaves(row=0, column=1)[0]
+        children = level_box.winfo_children()
+        cbs = [w for w in children
+               if hasattr(w, "_text_label") and w._text_label is not None]
+        assert len(cbs) == 5
+        for cb in cbs:
+            assert cb.cget("width") == 68, "复选框应按文本紧凑定宽"
+            tl = cb._text_label
+            assert tl.winfo_x() + tl.winfo_reqwidth() <= \
+                cb.winfo_width() + 2, f"{cb.cget('text')} 文本不得裁切"
+        # 间距仍相同：相邻（复选框→下一个ⓘ）间隔一致
+        gaps = []
+        for i in range(0, len(children) - 2, 2):
+            cur_cb, next_info = children[i + 1], children[i + 2]
+            gaps.append(next_info.winfo_x()
+                        - (cur_cb.winfo_x() + cur_cb.winfo_width()))
+        assert max(gaps) - min(gaps) <= 2, \
+            f"复选框间距应保持相同（实测 {gaps}）"
+        # 用户实际分隔条比例（0.4929）下 DEBUG 右缘不越分隔条左缘
+        app._splitter_ratio = 0.4928571428571429
+        app._layout_splitter()
+        app.update()
+        debug_right = (level_box.winfo_x() + cbs[-1].winfo_x()
+                       + cbs[-1].winfo_width())
+        assert debug_right <= app._splitter.winfo_x() + 2, \
+            "DEBUG 右缘不得越过分隔条竖线"
 
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
