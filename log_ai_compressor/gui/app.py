@@ -2021,16 +2021,19 @@ class LogCompressorApp(_make_app_base()):
             # DEBUG 右侧区间比搜索框右侧区间多出 12px（2x DPI），
             # 破坏两区间严格等距；间隔统一由固定间隔列提供
             # 优化缺陷R52：复选框 padx (2,6)→(1,4) —— 组区左移收紧
-            # 修复缺陷R73：CTkCheckBox 默认 width=100（固定值，不随
-            # 文本自适应）—— 五个复选框各空耗约 32px，DEBUG 右缘
-            # 越过分隔条竖线 104px（用户机实测）；按文本实测宽度
-            # 紧凑化 width=68（DEBUG 文本 83px@2x + 复选框 36px +
-            # 余量），组体整体左移且各框等宽、间距（padx）不变
+            # 修复缺陷R74：复选框按各自文本实测宽紧凑定宽 ——
+            # CTkCheckBox 默认 width=100 是固定值（不随文本自适应），
+            # 统一 68 又让短文本框尾部余量偏大，五个可视区间长短
+            # 不一；紧凑化后各框尾部余量一致（+4 逻辑 px），可视
+            # 区间天然相等。28 = 复选框 18 + 内部间隔 6 + 尾部 4
             cb_pad_r = 0 if level == LEVEL_CHECKS[-1] else 4
-            ctk.CTkCheckBox(level_box, text=level, variable=var,
-                            checkbox_width=18, checkbox_height=18,
-                            width=68).grid(
-                row=0, column=col, padx=(1, cb_pad_r), sticky="w")
+            cb = ctk.CTkCheckBox(level_box, text=level, variable=var,
+                                 checkbox_width=18, checkbox_height=18)
+            _tw = tkfont.Font(
+                font=cb._text_label.cget("font")).measure(level)
+            _scale = max(1.0, getattr(self, "_font_scale", 1.0))
+            cb.configure(width=int(_tw / _scale + 0.999) + 28)
+            cb.grid(row=0, column=col, padx=(1, cb_pad_r), sticky="w")
             col += 1
             self._level_tooltips[level] = Tooltip(
                 info, lambda lv=level: _LEVEL_HELP[lv])
@@ -2362,6 +2365,58 @@ class LogCompressorApp(_make_app_base()):
             return _SPLITTER_MIN_LIST * scale, _SPLITTER_MIN_DETAIL * scale
         return lreq + creq + base, rreq + base
 
+    def _sync_level_filter_gaps(self) -> None:
+        """级别过滤组可视区间等距 + DEBUG 文本右缘对齐全屏按钮右缘。
+
+        修复缺陷R74：以对齐线（左列「⛶ 全屏」按钮右缘 = 控件组
+        容器右缘）反解目标可视区间 G = (目标线 - 自然G右缘 + Σ自然
+        区间)/4，四个区间逐框独立设定右 padx 向 G 收敛 —— 吸收复选
+        框宽度取整的 1px 级余量差异（统一 padx 只能到 [24,23,22,21]
+        阶梯）。所有测量基于 update_idletasks 结算后的一致快照、
+        当前 padx 一律读自 grid_info（Tk 几何真值）—— 绝对解算
+        而非增量叠加（增量法在 place/grid 延迟结算下必然累积失真：
+        实测过叠加翻倍与欠补 114px 两种事故）；天然幂等，重复调用
+        零副作用。注意 padx 全程用 Tk 物理 px：CTk 仅 grid()/pack()
+        创建时做 DPI 缩放，grid_configure 不缩放（原生透传），
+        换算会在高 DPI 下打对折。随 _layout_splitter 重入（窗口
+        缩放/分隔条拖动/字体档位，经 after_idle 调度）自动重同步；
+        目标线左于组体自然宽（分隔条拖到极左）时 padx 触底 0，
+        按自然最小宽呈现。
+        """
+        try:
+            panel = self._ctx_entry.master
+            panel.update_idletasks()      # 结算挂起几何（测量一致性前提）
+            level_box = panel.grid_slaves(row=0, column=1)[0]
+            children = level_box.winfo_children()
+            infos, cbs = children[0::2], children[1::2]
+            if len(cbs) != 5:
+                return
+            target = (self._list_ctrl_box.winfo_x()
+                      + self._list_ctrl_box.winfo_width())
+            nat_gaps, pads_tk, lefts_tk = [], [], []
+            for i in range(4):
+                pad_l, pad_r = (int(v) for v in
+                                cbs[i].grid_info()["padx"])   # Tk 几何真值
+                tl = cbs[i]._text_label
+                tr = (cbs[i].winfo_x() + tl.winfo_x()
+                      + tl.winfo_reqwidth())
+                nat_gaps.append(infos[i + 1].winfo_x() - tr - pad_r)
+                pads_tk.append(pad_r)
+                lefts_tk.append(pad_l)
+            tl = cbs[-1]._text_label
+            text_right = (level_box.winfo_x() + cbs[-1].winfo_x()
+                          + tl.winfo_x() + tl.winfo_reqwidth())
+            nat_right = text_right - sum(pads_tk)
+            want = (target - nat_right + sum(nat_gaps)) / 4.0
+            for i in range(4):
+                new_tk = max(0, int(round(want - nat_gaps[i])))
+                if new_tk != pads_tk[i]:
+                    # grid_configure 为原生透传（不经 CTk 缩放），
+                    # 直接写 Tk 物理 px，左 pad 原样保留
+                    cbs[i].grid_configure(padx=(lefts_tk[i], new_tk))
+        except (tk.TclError, AttributeError, IndexError):
+            pass
+
     def _layout_splitter(self) -> None:
         """按比例布局左右列与分隔条（全部 relx/relwidth 比例参数）。
 
@@ -2397,6 +2452,9 @@ class LogCompressorApp(_make_app_base()):
                                    relwidth=max(0.0, 1 - r - sp_r),
                                    relheight=1)
             self._place_list_ctrl(r, pw)
+            # 修复缺陷R74：place 几何变更在 Tk 空闲时才结算，
+            # 同步读到的控件组位置是旧值 —— 延迟到空闲再同步
+            self.after_idle(self._sync_level_filter_gaps)
             return
         # 最小宽度换算为比例钳制（左≥标题栏实测宽 / 右≥标题栏实测宽）
         lo_r = left_min / pw
@@ -2410,6 +2468,9 @@ class LogCompressorApp(_make_app_base()):
                                relwidth=max(0.0, 1 - r - sp_r),
                                relheight=1)
         self._place_list_ctrl(r, pw)
+        # 修复缺陷R74：place 几何变更在 Tk 空闲时才结算，
+        # 同步读到的控件组位置是旧值 —— 延迟到空闲再同步
+        self.after_idle(self._sync_level_filter_gaps)
 
     def _place_list_ctrl(self, r: float, pw: int) -> None:
         """标题栏控件组贴左列右缘（修复缺陷R14：正常/拖动同一跟随）。
