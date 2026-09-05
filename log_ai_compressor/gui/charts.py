@@ -16,6 +16,8 @@ from typing import Callable, List, Optional, Tuple
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+import customtkinter as ctk
+
 # 中文字体回退链（Windows/macOS/Linux 常见中文字体优先，缺字警告消除）
 from matplotlib import rcParams
 rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "PingFang SC",
@@ -52,14 +54,16 @@ def _clip(text: str, width: int) -> str:
 
 
 class ChartsPanel:
-    """三联统计图表面板（错误趋势折线 / 级别占比饼图 / 错误种类 Top10）。
+    """统计图表面板（优化缺陷R64：分页单图切换）。
 
-    优化缺陷R63：
-    - dpi_scale 适配高 DPI（2x 屏按 192dpi 建图，文字不再缩半）；
-    - 字号整体上移（全屏窗口可读）；
-    - 第三图由「模块分布」改为「错误种类 Top 10」（无模块字段的
-      日志也有信息量；按次数排序、级别着色、点击定位簇）。
+    顶部 CTkSegmentedButton 切换「时间趋势 / 级别占比 / 种类
+    Top10」，每张图独占整个窗口 —— 三图并排时饼图小扇区标签全
+    部叠字、条形图 y 轴摘要挤在一起的布局缺陷彻底消除；
+    饼图小扇区改右侧图例（级别+次数+百分比），扇内仅 ≥4% 显示
+    百分比（99%/1% 同样清晰）。
     """
+
+    TABS = ("时间趋势", "级别占比", "种类 Top 10")
 
     def __init__(self, parent, result: AnalysisResult,
                  on_select_level: Optional[Callable[[str], None]] = None,
@@ -69,56 +73,77 @@ class ChartsPanel:
         self._on_level = on_select_level
         self._on_cluster = on_select_cluster
 
+        # 顶部切换栏（蓝色选中段，与应用主题一致）
+        bar = ctk.CTkFrame(parent, fg_color="transparent")
+        bar.pack(fill="x", padx=10, pady=(10, 0))
+        self._switch = ctk.CTkSegmentedButton(
+            bar, values=list(self.TABS), command=self._on_tab)
+        self._switch.set(self.TABS[0])
+        self._switch.pack()
+
+        self._body = ctk.CTkFrame(parent, fg_color="transparent")
+        self._body.pack(fill="both", expand=True)
+
         dpi = int(round(96 * max(1.0, dpi_scale)))
-        self.figure = Figure(figsize=(11.5, 4.0), dpi=dpi,
+        self.figure = Figure(figsize=(10.5, 4.6), dpi=dpi,
                               facecolor="#2b2b30")
-        self.canvas = FigureCanvasTkAgg(self.figure, master=parent)
-        self._build()
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self._body)
         self.canvas.get_tk_widget().pack(fill="both", expand=True,
                                          padx=4, pady=4)
         self.canvas.mpl_connect("pick_event", self._on_pick)
+        self._ax = None
+        self._tab = None
+        self._show_tab(self.TABS[0])
 
     # ------------------------------------------------------------------
-    def _build(self) -> None:
-        gs = self.figure.add_gridspec(
-            1, 3, width_ratios=[1.0, 0.85, 1.25], wspace=0.38,
-            left=0.05, right=0.985, top=0.82, bottom=0.17)
-        self._ax_trend = self.figure.add_subplot(gs[0, 0])
-        self._ax_pie = self.figure.add_subplot(gs[0, 1])
-        self._ax_bar = self.figure.add_subplot(gs[0, 2])
-        self._draw_trend()
-        self._draw_pie()
-        self._draw_top_clusters()
-        self.figure.suptitle("错误统计面板（点击饼图级别 / 条形种类可联动错误列表）",
-                             color="#e0e0e0", fontsize=13)
+    def _on_tab(self, name: str) -> None:
+        self._show_tab(name)
+
+    def _show_tab(self, name: str) -> None:
+        """切换分页：清图重建单轴大图（画布复用，无重复建窗开销）。"""
+        self._tab = name
+        self.figure.clear()
+        self._ax = self.figure.add_subplot(111)
+        self._style_axes(self._ax)
+        if name == "时间趋势":
+            self.figure.subplots_adjust(
+                left=0.08, right=0.97, top=0.90, bottom=0.15)
+            self._draw_trend(self._ax)
+        elif name == "级别占比":
+            self.figure.subplots_adjust(
+                left=0.02, right=0.72, top=0.92, bottom=0.06)
+            self._draw_pie(self._ax)
+        else:
+            self.figure.subplots_adjust(
+                left=0.30, right=0.95, top=0.90, bottom=0.10)
+            self._draw_top_clusters(self._ax)
+        self.canvas.draw_idle()
 
     def _style_axes(self, ax) -> None:
         ax.set_facecolor("#2b2b30")
         for spine in ax.spines.values():
             spine.set_color("#55555c")
-        ax.tick_params(colors="#bdbdbd", labelsize=9)
+        ax.tick_params(colors="#bdbdbd", labelsize=10)
         ax.title.set_color("#e0e0e0")
-        ax.title.set_fontsize(11)
+        ax.title.set_fontsize(13)
 
     # ------------------------------------------------------------------
-    def _draw_trend(self) -> None:
+    def _draw_trend(self, ax) -> None:
         """错误时间趋势折线图（单位时间错误数）+ 爆发点标注。"""
-        ax = self._ax_trend
-        self._style_axes(ax)
         series = self._result.global_hist.series()
         ax.set_title("错误时间趋势")
         if not series:
             ax.text(0.5, 0.5, "无时间戳数据", ha="center", va="center",
-                    color="#9e9e9e", fontsize=10, transform=ax.transAxes)
+                    color="#9e9e9e", fontsize=12, transform=ax.transAxes)
             return
         xs = [_fmt_time(t) for t, _ in series]
         ys = [c for _, c in series]
-        ax.plot(range(len(xs)), ys, color=_ACCENT, linewidth=1.6,
-                marker="o", markersize=4)
-        step = max(1, len(xs) // 6)
+        ax.plot(range(len(xs)), ys, color=_ACCENT, linewidth=1.8,
+                marker="o", markersize=5)
+        step = max(1, len(xs) // 10)
         ax.set_xticks(range(0, len(xs), step))
         ax.set_xticklabels(xs[::step], rotation=30, ha="right")
-        ax.set_ylabel("错误数/单位时间", fontsize=9)
+        ax.set_ylabel("错误数/单位时间", fontsize=10)
         # 集中爆发点标注（红色竖虚线）
         for t, _ in self._result.global_hist.burst_buckets():
             idx = next((i for i, (bt, _) in enumerate(series)
@@ -128,11 +153,14 @@ class ChartsPanel:
                            linewidth=1, alpha=0.7)
         ax.grid(axis="y", color="#3a3a40", linewidth=0.6)
 
-    def _draw_pie(self) -> None:
-        """错误级别占比饼图（按簇次数加权，含百分比标注）。"""
-        ax = self._ax_pie
-        self._style_axes(ax)
-        ax.set_title("错误级别占比")
+    def _draw_pie(self, ax) -> None:
+        """错误级别占比饼图（按簇次数加权）。
+
+        优化缺陷R64：99% 占比场景小扇区标签不再叠字 —— 扇内仅
+        ≥4% 显示百分比，全部级别信息移至右侧图例（级别+次数+
+        百分比，≥1% 保留一位小数）。
+        """
+        ax.set_title("错误级别占比", x=0.85)
         counts: List[Tuple[str, int]] = []
         for level in ("FATAL", "ERROR", "FAIL", "WARN", "INFO", "DEBUG"):
             total = sum(c.count for c in
@@ -141,46 +169,51 @@ class ChartsPanel:
                 counts.append((level, total))
         if not counts:
             ax.text(0.5, 0.5, "无错误数据", ha="center", va="center",
-                    color="#9e9e9e", fontsize=10, transform=ax.transAxes)
+                    color="#9e9e9e", fontsize=12, transform=ax.transAxes)
             return
-        labels = [f"{lv} ({v})" for lv, v in counts]
+        values = [v for _, v in counts]
+        total = sum(values)
         colors = [_LEVEL_COLORS.get(lv, "#78909c") for lv, _ in counts]
-        wedges, texts, autotexts = ax.pie(
-            [v for _, v in counts], labels=labels, colors=colors,
-            autopct="%1.0f%%", pctdistance=0.72, labeldistance=1.12,
-            textprops={"color": "#e0e0e0", "fontsize": 9},
-            startangle=90, counterclock=False,
+        wedges, _, autotexts = ax.pie(
+            values, colors=colors,
+            autopct=lambda p: f"{p:.0f}%" if p >= 4 else "",
+            pctdistance=0.72,
+            textprops={"color": "#e0e0e0", "fontsize": 10},
+            startangle=90, counterclock=False, radius=1.25,
             wedgeprops={"linewidth": 1, "edgecolor": "#2b2b30",
                         "picker": True})
         for t in autotexts:
             t.set_color("#ffffff")
-            t.set_fontsize(9)
+            t.set_fontsize(11)
         for wedge, (lv, _) in zip(wedges, counts):
             wedge.set_gid(f"level:{lv}")
+        legend_labels = [f"{lv} ({v})   {v / total * 100:.1f}%"
+                         for lv, v in counts]
+        ax.legend(wedges, legend_labels, loc="center left",
+                  bbox_to_anchor=(1.02, 0.5), fontsize=11, frameon=False,
+                  labelcolor="#e0e0e0", title="级别（次数）占比",
+                  title_fontsize=11)
 
-    def _draw_top_clusters(self) -> None:
-        """错误种类 Top 10 横向条形（优化缺陷R63：替代模块分布）。
+    def _draw_top_clusters(self, ax) -> None:
+        """错误种类 Top 10 横向条形（按次数降序、级别着色、点击定位）。
 
-        按次数降序、级别着色、摘要截断标签、条端次数标注；条形
-        gid=cluster:<id>，点击经 _on_pick 联动定位该簇（无模块
-        字段的日志同样信息量充足）。
+        优化缺陷R64：独占整页后左侧空间充足，摘要标签放宽到 40 字
+        （不再截断挤叠）；条端次数标注；gid=cluster:<id> 点击联动。
         """
-        ax = self._ax_bar
-        self._style_axes(ax)
         ax.set_title("错误种类 Top 10（点击定位）")
         items = sorted(self._result.clusters, key=lambda c: c.count,
                        reverse=True)[:10]
         if not items:
             ax.text(0.5, 0.5, "无错误数据", ha="center", va="center",
-                    color="#9e9e9e", fontsize=10, transform=ax.transAxes)
+                    color="#9e9e9e", fontsize=12, transform=ax.transAxes)
             return
-        names = [_clip(c.summary, 26) for c in items]
+        names = [_clip(c.summary, 40) for c in items]
         values = [c.count for c in items]
         colors = [_LEVEL_COLORS.get(c.level, "#78909c") for c in items]
         bars = ax.barh(range(len(items)), values, color=colors,
                        height=0.62, picker=True)
         ax.set_yticks(range(len(items)))
-        ax.set_yticklabels(names, fontsize=9)
+        ax.set_yticklabels(names, fontsize=10)
         ax.invert_yaxis()
         for bar, c in zip(bars, items):
             bar.set_gid(f"cluster:{c.cluster_id}")
@@ -188,7 +221,7 @@ class ChartsPanel:
             ax.annotate(str(v), xy=(rect.get_width(), rect.get_y()
                                     + rect.get_height() / 2),
                         xytext=(3, 0), textcoords="offset points",
-                        va="center", fontsize=8, color="#e0e0e0")
+                        va="center", fontsize=9, color="#e0e0e0")
         ax.grid(axis="x", color="#3a3a40", linewidth=0.6)
 
     # ------------------------------------------------------------------
