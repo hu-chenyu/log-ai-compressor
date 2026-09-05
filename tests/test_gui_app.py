@@ -2033,40 +2033,45 @@ class TestFullscreenView:
         return app._fs_list_win
 
     def test_fs_search_count_box_nav_cycles(self, app):
-        """输入关键字 → 0/y；Enter 1/y→2/y→回绕 1/y；Shift+Enter 反向。"""
+        """输入关键字 → 0/y；Enter 实例级下钻循环；Shift+Enter 反向。
+
+        优化缺陷R56：两簇各 ×3 实例 → 序列 6 条；定位自动展开簇、
+        _selected_inst 指向具体实例行。
+        """
         self._open_fs_with_two_clusters(app)
         app._fs_search_entry.insert(0, "error")
         app.update()
-        assert app._fs_count.cget("text") == "0 / 2 簇", \
+        assert app._fs_count.cget("text") == "0 / 6 条", \
             "输入后未导航应为 0/y"
         # 影子框显形（与输入框同底色）
         assert app._fs_count_box.cget("fg_color") == \
             app._fs_search_entry.cget("fg_color")
         app._on_fs_search_enter(True)
         app.update()
-        assert app._selected_row == 0
-        assert app._fs_count.cget("text") == "1 / 2 簇"
+        assert app._selected_inst == (0, 0)
+        assert app._fs_count.cget("text") == "1 / 6 条"
         app._on_fs_search_enter(True)
         app.update()
-        assert app._selected_row == 1
-        assert app._fs_count.cget("text") == "2 / 2 簇"
+        assert app._selected_inst == (0, 1)
+        assert app._fs_count.cget("text") == "2 / 6 条"
+        # 回绕：6/6 后再 Enter 回 1/6
+        app._fs_search_nav = 6
         app._on_fs_search_enter(True)
         app.update()
-        assert app._selected_row == 0
-        assert app._fs_count.cget("text") == "1 / 2 簇", \
-            "到 y/y 后应按回绕到 1/y"
+        assert app._selected_inst == (0, 0)
+        assert app._fs_count.cget("text") == "1 / 6 条"
+        # Shift+Enter：1/6 反向到 6/6
         app._on_fs_search_enter(False)
         app.update()
-        assert app._selected_row == 1
-        assert app._fs_count.cget("text") == "2 / 2 簇", \
-            "Shift+Enter 应从 1/y 反向到 y/y"
+        assert app._selected_inst == (1, 2)
+        assert app._fs_count.cget("text") == "6 / 6 条"
 
     def test_fs_click_row_syncs_nav(self, app):
-        """点击全屏列表簇行 → 全屏计数序号同步（与主窗口同语义）。"""
+        """点击全屏列表簇行 → 序号同步到该簇首个命中实例（R56）。"""
         self._open_fs_with_two_clusters(app)
         app._fs_search_entry.insert(0, "error")
         app.update()
-        assert app._fs_count.cget("text") == "0 / 2 簇"
+        assert app._fs_count.cget("text") == "0 / 6 条"
         vl = app._fs_vl
         slot = next(
             s for s in vl.slots
@@ -2075,8 +2080,8 @@ class TestFullscreenView:
         slot["summary"].event_generate("<Button-1>")
         app.update()
         assert app._selected_row == 1
-        assert app._fs_count.cget("text") == "2 / 2 簇", \
-            "点选第 2 个匹配簇计数应为 2/y"
+        assert app._fs_count.cget("text") == "4 / 6 条", \
+            "点选第 2 簇应对齐其首个命中实例序号（第 4 条）"
 
     def test_fs_count_box_hidden_when_empty(self, app):
         """清空关键字 → 计数影子框透明隐形（布局零扰动）。"""
@@ -2085,7 +2090,7 @@ class TestFullscreenView:
         assert app._fs_count_box.cget("fg_color") == "transparent"
         app._fs_search_entry.insert(0, "kernel")
         app.update()
-        assert app._fs_count.cget("text") == "0 / 1 簇"
+        assert app._fs_count.cget("text") == "0 / 3 条"
         app._fs_search_entry.delete(0, "end")
         app.update()
         assert app._fs_count.cget("text") == ""
@@ -3063,8 +3068,8 @@ class TestMainWindowSearch:
         assert len(app._cluster_rows) == 1
         row = app._cluster_rows[0]
         assert "kernel" in app._displayed[row["idx"]].summary
-        # 优化缺陷R50：输入后未导航，计数为 0/匹配数（kernel 仅 1 簇命中）
-        assert app._search_count.cget("text") == "0 / 1 簇"
+        # 优化缺陷R56：计数 = 命中实例条数（kernel 簇 ×3 实例均含关键字）
+        assert app._search_count.cget("text") == "0 / 3 条"
 
     def test_search_clear_restores_all(self, app):
         """清空关键字 → 全部簇恢复显示，计数标签隐藏。"""
@@ -3130,7 +3135,9 @@ class TestMainWindowSearch:
         # 展开状态保留（命中过滤的展开簇其实例行仍在视图中）
         assert kidx in app._expanded_clusters
         assert any(r[0] == "i" and r[1] == kidx for r in vl._data)
-        assert app._search_count.cget("text") == f"0 / {expected} 簇"
+        # 优化缺陷R56：计数 y = 命中实例总条数（扁平实例导航序列长）
+        nav_total = len(app._search_targets("signal lost"))
+        assert app._search_count.cget("text") == f"0 / {nav_total} 条"
 
     def test_search_debounce_schedules_job(self, app):
         """输入经 trace 调度防抖任务（200ms 合并连续输入）。"""
@@ -3145,31 +3152,43 @@ class TestMainWindowSearch:
     # 优化缺陷R46：Enter 跳下一个匹配 + 详情关键字照亮
     # ------------------------------------------------------------------
     def test_enter_jumps_to_next_match(self, app):
-        """Enter 定位下一个匹配（1/y→2/y→回绕 1/y），计数同步。"""
+        """Enter 定位下一个命中实例（优化缺陷R56：扁平实例导航）。
+
+        两簇各 ×3 实例（摘要均含 error）→ 序列 6 条；Enter 依次
+        下钻：簇自动展开 ▼、_selected_inst 定位到具体实例行。
+        """
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
         app._search_var.set("error")     # 级别 ERROR，两簇均命中
         app._apply_search_filter()
         app.update()
-        assert app._search_count.cget("text") == "0 / 2 簇", \
-            "输入后未导航应为 0/y"
+        assert app._search_count.cget("text") == "0 / 6 条", \
+            "输入后未导航应为 0/y（y=命中实例总条数）"
         app._on_search_enter(True)
         app.update()
-        assert app._selected_row == 0
-        assert app._search_count.cget("text") == "1 / 2 簇", \
-            "首次 Enter 定位第 1 个匹配"
+        assert app._selected_inst == (0, 0)
+        assert 0 in app._expanded_clusters, "定位实例应自动展开所属簇"
+        assert app._search_count.cget("text") == "1 / 6 条"
         app._on_search_enter(True)
         app.update()
-        assert app._selected_row == 1
-        assert app._search_count.cget("text") == "2 / 2 簇"
+        assert app._selected_inst == (0, 1), "同簇内应逐实例下钻"
+        assert app._search_count.cget("text") == "2 / 6 条"
         app._on_search_enter(True)
         app.update()
-        assert app._selected_row == 0
-        assert app._search_count.cget("text") == "1 / 2 簇", \
-            "到 y/y 后再按回绕到 1/y"
+        assert app._selected_inst == (0, 2)
+        app._on_search_enter(True)
+        app.update()
+        assert app._selected_inst == (1, 0), "簇内走完应进下一簇"
+        assert app._search_count.cget("text") == "4 / 6 条"
+        # 回绕：6/6 后再按回 1/6
+        app._search_nav = 6
+        app._on_search_enter(True)
+        app.update()
+        assert app._selected_inst == (0, 0)
+        assert app._search_count.cget("text") == "1 / 6 条"
 
     def test_shift_enter_jumps_back(self, app):
-        """Shift+Enter 反向定位（0/y 直接到 y/y）。"""
+        """Shift+Enter 反向定位（0/y 直接到 y/y，优化缺陷R56）。"""
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
         app._search_var.set("error")
@@ -3177,12 +3196,12 @@ class TestMainWindowSearch:
         app.update()
         app._on_search_enter(False)
         app.update()
-        assert app._selected_row == 1, "Shift+Enter 应反向定位到末尾匹配"
-        assert app._search_count.cget("text") == "2 / 2 簇"
+        assert app._selected_inst == (1, 2), "Shift+Enter 应反向到末尾实例"
+        assert app._search_count.cget("text") == "6 / 6 条"
         app._on_search_enter(False)
         app.update()
-        assert app._selected_row == 0
-        assert app._search_count.cget("text") == "1 / 2 簇"
+        assert app._selected_inst == (1, 1)
+        assert app._search_count.cget("text") == "5 / 6 条"
 
     def test_enter_flushes_pending_debounce(self, app):
         """Enter 先冲刷挂起的防抖过滤再跳转（关键字立即生效）。"""
@@ -3226,45 +3245,60 @@ class TestMainWindowSearch:
         assert first.lower() == "kernel", "照亮文本应为关键字本身"
 
     def test_enter_jumps_in_virtual_mode(self, app):
-        """虚拟模式：Enter 在匹配簇间跳转并滚入视口。"""
+        """虚拟模式：Enter 定位命中实例并滚入视口（优化缺陷R56）。"""
         _run_many_clusters(app)
         app.update()
         assert app._virtual_list is not None
         app._search_var.set("signal lost")
         app._apply_search_filter()
         app.update()
-        matches = [i for i, c in enumerate(app._displayed)
-                   if "signal lost" in c.summary]
-        assert len(matches) >= 2
-        # 模拟真实点击（sync_nav=True）：导航序号同步到第 1 个匹配
-        app._select_cluster(matches[0], sync_nav=True)
+        seq = app._search_targets("signal lost")
+        assert len(seq) >= 2
+        first_ci = seq[0][0]
+        # 模拟真实点击（sync_nav=True）：导航序号同步到该簇首个命中实例
+        app._select_cluster(first_ci, sync_nav=True)
         app.update()
         assert app._search_nav == 1
         app._on_search_enter(True)
         app.update()
-        assert app._selected_row == matches[1]
         assert app._search_nav == 2
+        assert app._selected_inst == seq[1], "Enter 应定位序列第 2 个命中实例"
 
     def test_click_row_syncs_nav_index(self, app):
-        """优化缺陷R50：鼠标点选匹配簇 → 导航序号同步（计数 x/y）。"""
+        """优化缺陷R56：点选簇行 → 序号同步到该簇首个命中实例。"""
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
-        app._search_var.set("error")     # 两簇均命中
+        app._search_var.set("error")     # 两簇均命中（各 ×3 实例 → 6 条）
         app._apply_search_filter()
         app.update()
-        assert app._search_count.cget("text") == "0 / 2 簇"
-        # 点选第 2 个匹配簇（经典行）
+        assert app._search_count.cget("text") == "0 / 6 条"
+        # 点选第 2 个匹配簇（经典行）→ 该簇首个命中实例 = 序列第 4 条
         row = next(r for r in app._cluster_rows if r.get("idx") == 1)
         row["summary"].event_generate("<Button-1>", x=3, y=2)
         app.update()
         assert app._selected_row == 1
-        assert app._search_count.cget("text") == "2 / 2 簇", \
-            "点选第 2 个匹配计数应为 2/y"
-        # 点选回第 1 个
+        assert app._search_count.cget("text") == "4 / 6 条", \
+            "点选第 2 簇应对齐其首个命中实例序号"
+        # 点选回第 1 个 → 序列第 1 条
         row0 = next(r for r in app._cluster_rows if r.get("idx") == 0)
         row0["summary"].event_generate("<Button-1>", x=3, y=2)
         app.update()
-        assert app._search_count.cget("text") == "1 / 2 簇"
+        assert app._search_count.cget("text") == "1 / 6 条"
+
+    def test_click_instance_row_syncs_nav_index(self, app):
+        """优化缺陷R56：点选实例行 → 序号同步到该实例自身。"""
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        app._search_var.set("error")
+        app._apply_search_filter()
+        app.update()
+        # 展开簇 1 并点选其实例 2 → 序列第 6 条
+        app._toggle_cluster_expand(1)
+        app.update()
+        app._select_instance(1, 2)
+        app.update()
+        assert app._search_count.cget("text") == "6 / 6 条", \
+            "点选实例行应对齐该实例自身序号"
 
     def test_filtered_out_selection_auto_moves_to_first_match(self, app):
         """当前选中簇被过滤掉时自动选中首个匹配簇（详情不滞留陈旧内容）。"""
