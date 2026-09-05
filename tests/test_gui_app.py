@@ -2091,6 +2091,72 @@ class TestFullscreenView:
         assert app._fs_count.cget("text") == ""
         assert app._fs_count_box.cget("fg_color") == "transparent"
 
+    # ------------------------------------------------------------------
+    # 优化缺陷R54：详情全屏文内查找（同款 x/y 条 + 循环定位）
+    # ------------------------------------------------------------------
+    def _open_detail_fs(self, app):
+        _run_paste_analysis(app, self._fs_two_cluster_log())
+        app.update()
+        app._open_detail_fullscreen()
+        for _ in range(20):
+            app.update()
+            time.sleep(0.005)
+        assert app._fs_detail_win is not None
+        return app._fs_detail_box
+
+    def test_fd_search_counts_and_highlights(self, app):
+        """输入关键字 → 全部匹配黄底 + 计数 0/y（y=文本内匹配处数）。"""
+        box = self._open_detail_fs(app)
+        app._fd_search_entry.insert(0, "kernel")
+        app.update()
+        expected = box.get("1.0", "end").lower().count("kernel")
+        assert expected > 0, "详情文本应含关键字 kernel"
+        assert app._fd_count.cget("text") == f"0 / {expected} 条"
+        assert len(box.tag_ranges("searchkw")) == expected * 2, \
+            "全部匹配处应有 searchkw 高亮"
+        # 影子框显形（与输入框同底色）
+        assert app._fd_count_box.cget("fg_color") == \
+            app._fd_search_entry.cget("fg_color")
+
+    def test_fd_enter_cycles_matches(self, app):
+        """Enter 1/y→…→y/y→回绕 1/y；Shift+Enter 反向；当前匹配橙底。"""
+        box = self._open_detail_fs(app)
+        app._fd_search_entry.insert(0, "error")
+        app.update()
+        n = len(app._fd_matches)
+        assert n >= 2, "测试日志详情应含多处 error"
+        app._on_fd_search_enter(True)
+        app.update()
+        assert app._fd_search_nav == 1
+        assert app._fd_count.cget("text") == f"1 / {n} 条"
+        assert box.tag_ranges("fdcur"), "定位后当前匹配应有橙底高亮"
+        app._on_fd_search_enter(True)
+        app.update()
+        assert app._fd_search_nav == 2
+        # 回绕：y/y 后再 Enter 回 1/y
+        app._fd_search_nav = n
+        app._on_fd_search_enter(True)
+        app.update()
+        assert app._fd_search_nav == 1
+        # Shift+Enter：1/y 反向到 y/y
+        app._on_fd_search_enter(False)
+        app.update()
+        assert app._fd_search_nav == n
+        assert app._fd_count.cget("text") == f"{n} / {n} 条"
+
+    def test_fd_clear_hides_count_box(self, app):
+        """清空关键字 → 高亮移除 + 影子框透明隐形。"""
+        box = self._open_detail_fs(app)
+        app._fd_search_entry.insert(0, "kernel")
+        app.update()
+        assert box.tag_ranges("searchkw")
+        app._fd_search_entry.delete(0, "end")
+        app.update()
+        assert app._fd_count.cget("text") == ""
+        assert app._fd_count_box.cget("fg_color") == "transparent"
+        assert not box.tag_ranges("searchkw")
+        assert not box.tag_ranges("fdcur")
+
     def test_detail_fullscreen_shows_content(self, app):
         """详情全屏：内容与主面板一致且支持横向滚动。"""
         _run_paste_analysis(app, SAMPLE_PASTE)

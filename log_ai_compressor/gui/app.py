@@ -1669,6 +1669,11 @@ class LogCompressorApp(_make_app_base()):
         # 关键字过滤 + x/y 计数导航 + Enter/Shift+Enter 循环定位）
         self._fs_search_kw = ""
         self._fs_search_nav = 0
+        # 优化缺陷R54：详情全屏窗口文内查找态（关键字 + 导航序号 +
+        # 匹配位置表 [(行,列)…]，与列表搜索同款 x/y 计数语义）
+        self._fd_search_kw = ""
+        self._fd_search_nav = 0
+        self._fd_matches: List[tuple] = []
 
         # 修复缺陷R1：主题调色板登记表（切换时按角色批量刷新）
         self._bg_widgets: List[tuple] = []       # (控件, "window"/"card"/"header")
@@ -4034,6 +4039,92 @@ class LogCompressorApp(_make_app_base()):
                     if self._fs_cluster_matches(c))
         label.configure(text=f"{self._fs_search_nav} / {total} 条")
 
+    def _apply_fd_search(self) -> None:
+        """详情全屏文内查找（优化缺陷R54）。
+
+        输入关键字 → 全部匹配黄底「searchkw」高亮 + 计数 0/y 条
+        （y=匹配处数实时计算）；关键字变化重置导航序号与当前匹配
+        橙底标签；清空关键字移除全部查找高亮、影子框隐形。
+        """
+        box = getattr(self, "_fs_detail_box", None)
+        var = getattr(self, "_fd_search_var", None)
+        if box is None or var is None:
+            return
+        kw = var.get().strip().lower()
+        self._fd_search_kw = kw
+        self._fd_search_nav = 0
+        self._fd_matches = []
+        try:
+            box.tag_remove("searchkw", "1.0", "end")
+            box.tag_remove("fdcur", "1.0", "end")
+        except tk.TclError:
+            pass
+        if kw:
+            lowered = box.get("1.0", "end").lower()
+            start = 0
+            while True:
+                pos = lowered.find(kw, start)
+                if pos < 0:
+                    break
+                idx = self._index_of_offset(box, pos)
+                if idx:
+                    line, col = idx
+                    box.tag_add("searchkw", f"{line}.{col}",
+                                f"{line}.{col + len(kw)}")
+                    self._fd_matches.append((line, col))
+                start = pos + len(kw)
+        self._update_fd_search_count()
+
+    def _on_fd_search_enter(self, forward: bool = True):
+        """详情全屏查找 Enter（Shift+Enter 反向）：定位下/上一个匹配。
+
+        优化缺陷R54：与列表搜索同一导航语义 —— 输入后 0/y（未定位）；
+        Enter 1/y→2/y→…→y/y→回绕 1/y，Shift+Enter 反向；当前匹配
+        橙底「fdcur」高亮并滚动进视口。
+        """
+        box = getattr(self, "_fs_detail_box", None)
+        n = len(self._fd_matches)
+        if box is None or not self._fd_search_kw or n == 0:
+            return "break"
+        nav = self._fd_search_nav
+        if nav == 0:
+            nav = 1 if forward else n
+        elif forward:
+            nav = nav % n + 1
+        else:
+            nav = n if nav == 1 else nav - 1
+        self._fd_search_nav = nav
+        line, col = self._fd_matches[nav - 1]
+        box.tag_remove("fdcur", "1.0", "end")
+        box.tag_add("fdcur", f"{line}.{col}",
+                    f"{line}.{col + len(self._fd_search_kw)}")
+        box.see(f"{line}.{col}")
+        self._update_fd_search_count()
+        return "break"
+
+    def _update_fd_search_count(self) -> None:
+        """详情全屏查找计数影子框（优化缺陷R54：同款 x/y 条）。
+
+        有关键字显形（与输入框同底色）、清空透明隐形；x=定位序号，
+        y=详情文本内关键字匹配处数。
+        """
+        box = getattr(self, "_fd_count_box", None)
+        label = getattr(self, "_fd_count", None)
+        if label is None:
+            return
+        show = bool(self._fd_search_kw)
+        if box is not None:
+            entry = getattr(self, "_fd_search_entry", None)
+            box.configure(
+                fg_color=(entry.cget("fg_color")
+                          if show and entry is not None
+                          else "transparent"))
+        if not show:
+            label.configure(text="")
+            return
+        label.configure(
+            text=f"{self._fd_search_nav} / {len(self._fd_matches)} 条")
+
     def _render_cluster_list(self, preserve_state: bool = False) -> None:
         """左侧错误列表：全部错误行（图标/优先级/次数行 + 单行摘要）。
 
@@ -5993,6 +6084,9 @@ class LogCompressorApp(_make_app_base()):
             except (tk.TclError, AttributeError):
                 pass
         box.configure(state="disabled")
+        # 优化缺陷R54：内容刷新后按输入框当前关键字重扫高亮/计数
+        # （窗口复用时框内文字保留，trace 不会自动重触发）
+        self._apply_fd_search()
         win.after(60, win.focus_set)
 
     def _build_fs_detail_window(self) -> ctk.CTkToplevel:
@@ -6006,6 +6100,35 @@ class LogCompressorApp(_make_app_base()):
         bar.pack(fill="x")
         ctk.CTkLabel(bar, text="错误详情（典型样例 · 上下文 · 降噪堆栈 · "
                                "支持上下左右滚动）").pack(side="left", padx=12)
+        # 优化缺陷R54：详情文内查找 —— 搜索框 + 计数影子框（与列表
+        # 全屏/主窗口同款 x/y 条；Enter/Shift+Enter 循环定位匹配，
+        # 全部匹配黄底、当前定位匹配橙底并滚入视口）
+        ctk.CTkLabel(bar, text="搜索：",
+                     font=ctk.CTkFont(size=15)).pack(side="left",
+                                                     padx=(8, 4))
+        self._fd_search_var = tk.StringVar()
+        fd_entry = ctk.CTkEntry(
+            bar, textvariable=self._fd_search_var,
+            font=ctk.CTkFont(size=15),
+            placeholder_text="在详情中查找…")
+        fd_entry.pack(side="left", fill="x", expand=True,
+                      padx=(0, 8), pady=8)
+        self._fd_search_entry = fd_entry
+        self._fd_count_box = ctk.CTkFrame(
+            bar, width=120, height=32, corner_radius=6,
+            fg_color="transparent")
+        self._fd_count_box.pack(side="left", padx=(0, 8))
+        self._fd_count_box.pack_propagate(False)
+        self._fd_count = ctk.CTkLabel(
+            self._fd_count_box, text="", text_color="#8fa4b8",
+            font=ctk.CTkFont(size=15), fg_color="transparent")
+        self._fd_count.place(relx=0.5, rely=0.5, anchor="c")
+        fd_entry.bind("<Return>",
+                      lambda e: self._on_fd_search_enter(True))
+        fd_entry.bind("<Shift-Return>",
+                      lambda e: self._on_fd_search_enter(False))
+        self._fd_search_var.trace_add(
+            "write", lambda *a: self._apply_fd_search())
         ctk.CTkButton(bar, text="关闭 (ESC)", width=110,
                       command=hide).pack(side="right", padx=12, pady=8)
         # 修复缺陷R10：详情全屏基础字号 13 -> 18（全屏窗口大字体）
@@ -6017,6 +6140,13 @@ class LogCompressorApp(_make_app_base()):
         box.configure(xscrollcommand=xbar.set)
         xbar.pack(side="bottom", fill="x")
         box.pack(fill="both", expand=True, pady=(0, 4))
+        # 优化缺陷R54：文内查找高亮标签 —— searchkw 全部匹配黄底、
+        # fdcur 当前定位匹配橙底（tag_raise 压过 searchkw）
+        box.tag_config("searchkw", background="#fbbf24",
+                       foreground="#1f2937")
+        box.tag_config("fdcur", background="#f97316",
+                       foreground="#1f2937")
+        box.tag_raise("fdcur")
         self._fs_detail_box = box
         return win
 
