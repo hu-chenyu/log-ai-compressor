@@ -4287,62 +4287,54 @@ class TestCharts:
 
 
 # ---------------------------------------------------------------------------
-# 优化缺陷R68：顶部三 Tab 3D 立体化（常驻投影 + 按压下沉 + 释放回弹）
+# 优化缺陷R68：顶部三 Tab 长方体化 —— 选中页签豆腐块凸起（四边棱条）
 # ---------------------------------------------------------------------------
 class TestTabButtons3D:
-    @staticmethod
-    def _pady_top(btn) -> int:
-        pady = btn.grid_info()["pady"]
-        pt = pady[0] if isinstance(pady, (tuple, list)) else pady
-        return int(pt)
-
-    def test_shadow_exists_and_positioned(self, app):
-        """常驻底部投影条存在并贴合分段按钮底缘。"""
-        shadow = getattr(app, "_tab3d_shadow", None)
-        assert shadow is not None, "Tab 3D 投影条应已创建"
-        time.sleep(0.08)                     # after(50) 首帧定位
+    def _settle(self, app):
+        """等首帧 after(50) 定位完成。"""
+        time.sleep(0.08)
         app.update()
-        info = shadow.place_info()
-        assert int(info["height"]) >= 1, "投影应有可见高度"
-        assert int(info["width"]) > 0, "投影应有可见宽度"
 
-    def test_press_sink_and_shadow_shrink(self, app):
-        """按下：页签下沉 ≥2px + 投影收缩（DPI 缩放口径）。"""
+    def test_tofu_edges_on_selected_tab(self, app):
+        """选中页签（默认文件导入）有四边棱条，位置贴按钮四缘。"""
+        edges = getattr(app, "_tab3d_edges", None)
+        assert edges is not None, "豆腐块棱条应已创建"
+        self._settle(app)
         sb = app._tabview._segmented_button
+        btn = sb._buttons_dict[sb.get()]
+        r = app._dpx(6)
+        top = edges["top"].place_info()
+        assert int(top["y"]) == btn.winfo_y(), "顶棱应贴按钮顶缘"
+        assert int(top["x"]) == btn.winfo_x() + r
+        bot = edges["bottom"].place_info()
+        assert int(bot["y"]) == btn.winfo_y() + btn.winfo_height() \
+            - app._dpx(3), "底棱应贴按钮底缘"
+
+    def test_tofu_moves_on_tab_switch(self, app):
+        """点哪个哪个凸起：切换选中页签，棱条移到新按钮。"""
+        self._settle(app)
+        sb = app._tabview._segmented_button
+        # from_button_callback=True 模拟真实点击链路（回调 _fit_tab_height
+        # → _tab3d_sync；CTkTabview.set 程序化切换不走 command 回调）
+        sb.set("文本粘贴", from_button_callback=True)
+        app.update()
+        self._settle(app)
         btn = sb._buttons_dict["文本粘贴"]
-        app._tab3d_press(btn)
-        app.update()
-        assert self._pady_top(btn) >= app._dpx(2), "按下应下沉"
-        assert int(app._tab3d_shadow.place_info()["height"]) <= \
-            app._dpx(1), "按下投影应收缩"
+        edges = app._tab3d_edges
+        assert int(edges["top"].place_info()["x"]) == \
+            btn.winfo_x() + app._dpx(6), "棱条应跟随新选中页签"
+        assert int(edges["left"].place_info()["x"]) == btn.winfo_x()
 
-    def test_release_rebound_restores(self, app):
-        """释放：~140ms 回弹后位移复位、投影回常驻高度。"""
-        sb = app._tabview._segmented_button
-        btn = sb._buttons_dict["多文件对比"]
-        app._tab3d_press(btn)
-        app._tab3d_release(btn)
-        target_h = app._dpx(3)
-        deadline = time.time() + 1.5
-        while time.time() < deadline:
-            app.update()
-            if (self._pady_top(btn) == 0
-                    and int(app._tab3d_shadow.place_info()["height"])
-                    == target_h):
-                break
-            time.sleep(0.02)
-        assert self._pady_top(btn) == 0, "回弹结束位移应复位"
-        assert int(app._tab3d_shadow.place_info()["height"]) == target_h, \
-            "投影应回常驻高度"
-
-    def test_shadow_color_follows_theme(self, app):
-        """四态主题切换：投影色跟随调色板 sel_shadow。"""
+    def test_tofu_colors_follow_theme(self, app):
+        """四态主题切换：高光棱=sel_hi、投影棱=sel_shadow。"""
         from log_ai_compressor.gui.app import THEMES
         for key in ("blue", "green", "dark"):
             app._apply_theme_switch(key)
             app.update()
-            assert app._tab3d_shadow.cget("bg") == \
-                THEMES[key]["sel_shadow"], f"{key} 主题投影色未跟随"
+            edges = app._tab3d_edges
+            assert edges["top"].cget("bg") == THEMES[key]["sel_hi"]
+            assert edges["bottom"].cget("bg") == \
+                THEMES[key]["sel_shadow"], f"{key} 主题棱条色未跟随"
 
 
 # ---------------------------------------------------------------------------
