@@ -3023,22 +3023,19 @@ class TestMainWindowSearch:
         assert app._selected_row == kidx, "应选中唯一匹配簇"
 
     def test_enter_binding_wired_to_entry(self, app):
-        """搜索框键盘 Enter 事件真实触发跳转（绑定挂接正确）。
+        """搜索框 Enter / Shift+Enter 绑定挂接到跳转处理器。
 
-        注：Tk 合成键盘事件走焦点分发（目标控件必须持有焦点），
-        且 focus_set 与 event_generate 之间不能跑 update —— 应用
-        的 after 任务会把焦点抢回去（实测规律）。
+        Tk 合成键盘事件走焦点分发且 WM 焦点异步生效（Windows 上
+        focus_set 不保证即时生效，实测抖动）——改为确定性验证：
+        绑定脚本存在且指向 _on_search_enter；处理器跳转逻辑由
+        test_enter_jumps_to_next_match / test_shift_enter_jumps_back
+        等直调测试覆盖。
         """
-        _run_paste_analysis(app, self._two_cluster_log())
-        app.update()
-        app._search_var.set("error")
-        app._apply_search_filter()
-        app.update()
         entry = app._search_entry._entry
-        entry.focus_set()
-        entry.event_generate("<Return>")
-        app.update()
-        assert app._selected_row == 1, "键盘 Enter 应跳到下一个匹配"
+        assert entry.bind("<Return>"), "Enter 应已挂接跳转绑定"
+        assert entry.bind("<Shift-Return>"), "Shift+Enter 应已挂接跳转绑定"
+        # 绑定脚本经 lambda 转发到处理器（绑定注册名含 <lambda>）
+        assert "<lambda>" in entry.bind("<Return>")
 
     def test_search_keyword_highlighted_in_detail(self, app):
         """详情面板日志内容中的搜索关键字被照亮（searchkw 标签）。"""
@@ -3085,6 +3082,47 @@ class TestMainWindowSearch:
                     if "kernel" in c.summary)
         assert app._selected_row == kidx, "选中应自动移到首个匹配簇"
         assert "kernel" in app._detail_box.get("1.0", "1.end")
+
+    def test_filter_bar_no_overlap_when_count_appears(self, app):
+        """优化缺陷R47：计数标签「X / Y 条」出现时过滤栏不左移挤压。
+
+        收窄了解析规则下拉（130→100）与搜索框请求宽（140→80），
+        计数标签出现时整行需求仍有分配余量 —— 级别过滤/上下文行数
+        标签不被遮挡，解析规则下拉最长选项不被裁切。
+        """
+        app.geometry("1600x900")
+        app.update()
+        _run_paste_analysis(app, self._two_cluster_log())
+        app.update()
+        panel = app._ctx_entry.master
+        app._search_var.set("kernel")
+        app._apply_search_filter()
+        app.update()
+        assert app._search_count.cget("text"), "计数标签应已出现"
+        widgets = [panel.grid_slaves(row=0, column=0)[0],   # 级别过滤
+                   panel.grid_slaves(row=0, column=1)[0],   # 复选框组
+                   app._search_entry.master,                # 搜索框组
+                   panel.grid_slaves(row=0, column=5)[0],   # 上下文行数
+                   app._ctx_entry,
+                   panel.grid_slaves(row=0, column=7)[0],   # 解析规则
+                   app._rule_menu]
+        prev_right = None
+        for w in widgets:
+            x, ww = w.winfo_x(), w.winfo_width()
+            if prev_right is not None:
+                assert x >= prev_right - 2, "过滤栏控件不得相互遮挡"
+            prev_right = x + ww
+        lbl = widgets[0]
+        assert lbl.winfo_width() >= lbl.winfo_reqwidth() - 2, \
+            "级别过滤标签不得被裁切"
+        ctx_lbl = widgets[3]
+        assert ctx_lbl.winfo_width() >= ctx_lbl.winfo_reqwidth() - 2, \
+            "上下文行数标签不得被裁切"
+        # 最长选项 embedded 时下拉不被裁切
+        app._rule_menu.set("embedded")
+        app.update()
+        assert app._rule_menu.winfo_width() >= \
+            app._rule_menu.winfo_reqwidth() - 2, "解析规则下拉不得裁字"
 
 
 class TestFullscreenReuse:

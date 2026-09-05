@@ -1986,8 +1986,11 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkLabel(search_box, text="搜索").grid(row=0, column=0,
                                                    padx=(0, 4))
         self._search_var = tk.StringVar()
+        # 优化缺陷R47：输入框请求宽显式收窄（默认 140 会把整行需求
+        # 撑满 —— 计数标签「X / Y 条」出现时无余量、整行左移挤压
+        # 相邻标签）；sticky=ew 下视觉宽度仍由网格列分配决定
         self._search_entry = ctk.CTkEntry(
-            search_box, textvariable=self._search_var,
+            search_box, textvariable=self._search_var, width=80,
             placeholder_text="按摘要 / 模块 / 级别过滤列表…")
         self._search_entry.grid(row=0, column=1, sticky="ew")
         self._search_count = ctk.CTkLabel(search_box, text="",
@@ -2014,8 +2017,10 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R10：级别复选框容器跨列 1~6，解析规则右移至列 7~9
         ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=7, padx=(6, 2),
                                                   sticky="e")
+        # 优化缺陷R47：下拉宽度 130→100（最长选项 embedded 右侧仍有
+        # 大量空白，实测余量充足）；为搜索计数标签腾出行内需求空间
         self._rule_menu = ctk.CTkOptionMenu(panel, values=list(RULE_NAMES),
-                                            width=130,
+                                            width=100,
                                             command=self._on_rule_changed)
         self._rule_menu.grid(row=0, column=8, padx=(2, 0), sticky="w")
         # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
