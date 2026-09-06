@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from log_ai_compressor.core.clustering import (
     ErrorClusterer,
+    extract_variable_distribution,
     fingerprint,
     mask_text,
     similarity,
@@ -16,6 +17,41 @@ def entry(msg, level="ERROR", module="db", ts=None, line=1, stack=None):
     return LogEntry(line_no=line, raw=msg, level=level, module=module,
                     message=msg, timestamp=ts, stack=stack or [],
                     last_line_no=line)
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R101：变量分布分析
+# ---------------------------------------------------------------------------
+class TestVariableDistribution:
+    def test_no_placeholder_returns_empty(self):
+        n, slots = extract_variable_distribution("no placeholder", ["abc"])
+        assert n == 0 and slots == []
+
+    def test_single_number_slot_top3(self):
+        tmpl = "request N failed"
+        msgs = [f"request {i} failed" for i in (5, 5, 5, 7, 3, 3, 9, 1, 2)]
+        n, slots = extract_variable_distribution(tmpl, msgs)
+        assert n == 9
+        assert len(slots) == 1
+        assert slots[0][0] == "数值"
+        assert slots[0][1][:3] == [("5", 3), ("3", 2), ("7", 1)]
+
+    def test_multi_slots_name_deduplication(self):
+        """同种变量多于一个时自动编号，如 标识符#1/标识符#2。"""
+        tmpl = "U request N failed"
+        msgs = ["abc request 1 failed", "def request 2 failed",
+                "abc request 3 failed"]
+        n, slots = extract_variable_distribution(tmpl, msgs, top_k=2)
+        assert n == 3
+        names = [s[0] for s in slots]
+        assert "标识符" in names
+        assert "数值" in names
+
+    def test_unmatched_messages_skipped(self):
+        tmpl = "request N failed"
+        n, slots = extract_variable_distribution(
+            tmpl, ["request 1 failed", "other text"])
+        assert n == 1
 
 
 # ---------------------------------------------------------------------------

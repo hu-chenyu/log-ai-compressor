@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
 
@@ -87,6 +88,76 @@ def fingerprint(entry: LogEntry) -> str:
 def similarity(a: str, b: str) -> float:
     """编辑距离相似度比值（0~1）。"""
     return SequenceMatcher(None, a, b).ratio()
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R101：变量分布分析（模板槽位取值 Top K，详情面板【变量分布】）
+# ---------------------------------------------------------------------------
+# 占位符均为独立令牌（掩码整体替换词元），\b 边界防止误切字面单词
+# 中的同名大写字母（如 "SEVERE" 里的 S 不是占位符）
+_PLACEHOLDER_RE = re.compile(r"\b0xH\b|\b[USHPN]\b")
+_VAR_KIND_NAMES = {"U": "标识符", "H": "标识符", "0xH": "地址",
+                   "S": "字符串", "P": "路径", "N": "数值"}
+
+
+def extract_variable_distribution(
+        template: str, messages: List[str],
+        max_slots: int = 4, top_k: int = 3
+) -> Tuple[int, List[Tuple[str, List[Tuple[str, int]]]]]:
+    """从消息模板 + 实例消息中提取各变量槽位的取值分布 Top K。
+
+    原理：模板字面量转义为正则锚点，占位符变捕获组；实例消息
+    逐条匹配，捕获值即变量实际取值，Counter 统计频次。
+
+    参数：
+        template: 簇的 message_template（含 U/H/0xH/S/P/N 占位符）；
+        messages: 实例消息列表（可为截断摘要，匹配失败自动跳过）；
+        max_slots: 最多展示的槽位数（防模板变量过多刷屏）；
+        top_k: 每槽位最多展示的取值数。
+    返回：
+        (匹配成功的消息条数, [(槽位名, [(取值, 次数), ...]), ...])；
+        无占位符或无匹配时返回 (0, [])。
+    """
+    if not template or not messages:
+        return 0, []
+    literals = _PLACEHOLDER_RE.split(template)
+    holders = _PLACEHOLDER_RE.findall(template)
+    if not holders:
+        return 0, []
+    # 模板被 200 字符截断时尾部字面量可能不完整 —— 不做尾部锚定，
+    # 只要求从头匹配（摘要 160 截断 / 省略号结尾均可对齐）
+    pattern = "".join(
+        re.escape(lit) + ("(.+?)" if i < len(holders) else "")
+        for i, lit in enumerate(literals))
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return 0, []
+    counters: List[Counter] = [Counter() for _ in holders]
+    matched = 0
+    for msg in messages[:200]:                # 上限保护（实例有界，双保险）
+        m = rx.match((msg or "").strip())
+        if not m:
+            continue
+        matched += 1
+        for gi, val in enumerate(m.groups()):
+            v = val.strip()
+            if v:
+                counters[gi][v] += 1
+    if not matched:
+        return 0, []
+    slots: List[Tuple[str, List[Tuple[str, int]]]] = []
+    kind_seen: Dict[str, int] = {}
+    for idx, counter in enumerate(counters):
+        if len(slots) >= max_slots:
+            break
+        if not counter:
+            continue
+        kind = _VAR_KIND_NAMES.get(holders[idx], "变量")
+        kind_seen[kind] = kind_seen.get(kind, 0) + 1
+        name = kind if kind_seen[kind] == 1 else f"{kind}#{kind_seen[kind]}"
+        slots.append((name, counter.most_common(top_k)))
+    return matched, slots
 
 
 # ---------------------------------------------------------------------------

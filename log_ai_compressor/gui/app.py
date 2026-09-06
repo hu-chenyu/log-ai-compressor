@@ -35,6 +35,7 @@ from log_ai_compressor.constants import (
     HUMAN_NAME,
 )
 from log_ai_compressor.core.analysis import simplify_stack
+from log_ai_compressor.core.clustering import extract_variable_distribution
 from log_ai_compressor.core.comparator import CompareResult, compare_files
 from log_ai_compressor.core.models import (
     AnalysisResult,
@@ -5434,6 +5435,23 @@ class LogCompressorApp(_make_app_base()):
             if rels:
                 meta(f"【相关簇】" + "、".join(rels[:3])
                      + ("…" if len(rels) > 3 else "") + "（模板相似 ≥80%）")
+        # 优化缺陷R101：变量分布（模板槽位实际取值 Top3，如
+        # 「数值: 93495 ×3」—— 一眼看清同一错误的哪部分在变）
+        var_msgs = []
+        if cluster.sample is not None and cluster.sample.entry is not None:
+            var_msgs.append(cluster.sample.entry.full_message)
+        for inst in cluster.instances:
+            if inst.entry is not None:
+                var_msgs.append(inst.entry.full_message)
+            elif inst.summary:
+                var_msgs.append(inst.summary)
+        var_n, var_slots = extract_variable_distribution(
+            cluster.message_template, var_msgs)
+        if var_slots:
+            meta(f"【变量分布】按 {var_n} 条实例消息提取：")
+            for slot_name, tops in var_slots:
+                vals = "、".join(f"{v} ×{c}" for v, c in tops)
+                meta(f"　{slot_name}: {vals}")
 
         sample = cluster.sample
         if sample is None:
