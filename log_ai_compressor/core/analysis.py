@@ -37,7 +37,12 @@ from log_ai_compressor.constants import (
     ROOT_CAUSE_KEYWORDS,
     is_noise_stack_frame,
 )
-from log_ai_compressor.core.models import AnalysisResult, ErrorCluster, RunStats
+from log_ai_compressor.core.models import (
+    AnalysisResult,
+    ErrorCluster,
+    RunStats,
+    format_timestamp,
+)
 
 # ---------------------------------------------------------------------------
 # 参数
@@ -115,7 +120,10 @@ def analyze_clusters(result: AnalysisResult) -> float:
     clusters = result.clusters
     if clusters:
         _mark_anomalies(clusters, result.global_hist, result.stats)
-        _mark_root_causes(clusters)
+        out_edges, by_id = _mark_root_causes(clusters)
+        # 优化缺陷R78：关联叙事（依赖因果图与异常标注，须在优先级前）
+        _link_related_clusters(clusters)
+        _build_timelines(clusters, out_edges, by_id)
         _compute_priorities(clusters, result.stats)
         _sort_clusters(clusters)
     result.stats.analysis_cost = time.perf_counter() - t0
@@ -281,8 +289,10 @@ def _add_cross_reference_edges(ordered: List[ErrorCluster],
     """消息互引用边：A 的模板词 60% 出现在后发的 B 中且含稀有词 → A→B。
 
     优化缺陷R76：衍生错误常在消息中复述上游签名（"auth failed"
-    衍生出 "request aborted because auth failed"）；稀有词（簇间
-    文档频率 ≤2）防 "error/failed" 等泛词造成的全连接假边。
+    衍生出 "request aborted because auth failed"）。建边条件：
+    包含度 ≥0.6 且（包含度 =1.0 —— B 完整复述 A 签名，强证据
+    无需稀有词；或含稀有词 df≤2 —— 部分复述时防 "error/failed"
+    泛词造成的全连接假边）。
     O(C²)，C 为簇数（有界），仅做集合运算，开销可忽略。
     """
     token_sets = {id(c): _tokens(c.message_template or c.summary)
@@ -300,8 +310,11 @@ def _add_cross_reference_edges(ordered: List[ErrorCluster],
             if not tb:
                 continue
             inter = ta & tb
-            if (len(inter) / len(ta) >= 0.6
-                    and any(df.get(t, 0) <= 2 for t in inter)):
+            containment = len(inter) / len(ta)
+            if containment < 0.6:
+                continue
+            if (containment >= 1.0
+                    or any(df.get(t, 0) <= 2 for t in inter)):
                 add_edge(id(a), id(b))
 
 
@@ -383,6 +396,8 @@ def _mark_root_causes(clusters: List[ErrorCluster]) -> None:
             elif _has_cascade_keyword(c):
                 c.root_cause_reason = "疑似连锁衍生错误（被动失败特征）"
 
+    return out_edges, by_id
+
 
 def _nearest_prior(ordered: Sequence[ErrorCluster],
                    target: ErrorCluster) -> Optional[ErrorCluster]:
@@ -397,6 +412,89 @@ def _nearest_prior(ordered: Sequence[ErrorCluster],
             if best_gap is None or gap < best_gap:
                 best, best_gap = c, gap
     return best
+
+
+# ---------------------------------------------------------------------------
+# 关联叙事（优化缺陷R78：相似簇关联 + 根因时间线）
+# ---------------------------------------------------------------------------
+RELATED_JACCARD_MIN = 0.8      # 相似簇模板词集 Jaccard 下限
+TIMELINE_MAX_NODES = 5         # 根因时间线最大节点数（可读性）
+
+
+def _link_related_clusters(clusters: List[ErrorCluster]) -> None:
+    """相似簇关联：模板词集 Jaccard ≥0.8 的簇互相登记 related_clusters。
+
+    优化缺陷R78：同一根因常炸出多种错误（变体未被指纹合并时散落
+    多簇）——关联后详情面板可见「相关簇」，一眼看穿同源。
+    性能：倒排索引（词→簇）只比较共享词的对子，避免 O(C²) 全枚举；
+    无共享词的对子 Jaccard 恒 0 无需计算。
+    """
+    token_sets = {id(c): _tokens(c.message_template or c.summary)
+                  for c in clusters}
+    index: dict = {}
+    for c in clusters:
+        for t in token_sets[id(c)]:
+            index.setdefault(t, []).append(id(c))
+    pair_inter: dict = {}
+    for ids in index.values():
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                key = (ids[i], ids[j])
+                pair_inter[key] = pair_inter.get(key, 0) + 1
+    by_id = {id(c): c for c in clusters}
+    for (a, b), inter in pair_inter.items():
+        union = len(token_sets[a]) + len(token_sets[b]) - inter
+        if union and inter / union >= RELATED_JACCARD_MIN:
+            by_id[a].related_clusters.append(by_id[b].cluster_id)
+            by_id[b].related_clusters.append(by_id[a].cluster_id)
+    for c in clusters:
+        c.related_clusters.sort()
+
+
+def _build_timelines(clusters: List[ErrorCluster], out_edges: dict,
+                     by_id: dict) -> None:
+    """根因时间线：沿因果图 BFS，生成传播链叙事（仅根因簇有值）。
+
+    优化缺陷R78：形如
+    「14:08:52 首次 connection refused（根因） → +3s request failed
+    （衍生） → +40s request failed storm（爆发 ×89）」—— 把因果图
+    翻译成人话，详情面板【传播链】展示。节点数上限保证可读；
+    无时间戳时退化用行号差。
+    """
+    for c in clusters:
+        if not c.is_root_cause:
+            continue
+        chain = []                       # (dst_cluster, 增量标签)
+        seen = {id(c)}
+        frontier = [id(c)]
+        while frontier and len(chain) < TIMELINE_MAX_NODES:
+            nxt = []
+            for src in frontier:
+                dsts = sorted(out_edges.get(src, ()),
+                              key=lambda d: _cluster_sort_key(by_id[d]))
+                for d in dsts:
+                    if d in seen or len(chain) >= TIMELINE_MAX_NODES:
+                        continue
+                    seen.add(d)
+                    dst = by_id[d]
+                    if (c.first_seen is not None
+                            and dst.first_seen is not None):
+                        dd = f"+{dst.first_seen - c.first_seen:.0f}s"
+                    else:
+                        dd = f"+{dst.first_line - c.first_line}行"
+                    chain.append((dst, dd))
+                    nxt.append(d)
+            frontier = nxt
+        if not chain:
+            continue
+        parts = [f"{format_timestamp(c.first_seen)} 首次 "
+                 f"{c.summary[:30]}（根因）"]
+        for dst, dd in chain:
+            tag = "衍生"
+            if dst.anomaly == "burst":
+                tag = f"爆发 ×{dst.count}"
+            parts.append(f"{dd} {dst.summary[:30]}（{tag}）")
+        c.root_timeline = " → ".join(parts)
 
 
 # ---------------------------------------------------------------------------

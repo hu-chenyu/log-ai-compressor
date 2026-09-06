@@ -432,6 +432,65 @@ class TestPriorityEnhanced:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R78：关联叙事（相似簇关联 + 根因时间线）
+# ---------------------------------------------------------------------------
+class TestRelatedAndTimeline:
+    def test_related_clusters_linked(self):
+        """模板词集 Jaccard ≥0.8 的簇互相登记相关簇。"""
+        a = make_cluster(0, "camera sensor init failed code 101")
+        b = make_cluster(1, "camera sensor init failed code 202")
+        c = make_cluster(2, "disk quota exceeded")
+        result = make_result([a, b, c])
+        analyze_clusters(result)
+        assert b.cluster_id in a.related_clusters
+        assert a.cluster_id in b.related_clusters
+        assert c.related_clusters == []
+
+    def test_related_requires_high_similarity(self):
+        """模板不相似的簇不得关联。"""
+        a = make_cluster(0, "camera sensor init failed")
+        b = make_cluster(1, "network socket timeout error")
+        result = make_result([a, b])
+        analyze_clusters(result)
+        assert a.related_clusters == []
+        assert b.related_clusters == []
+
+    def test_root_timeline_built(self):
+        """根因簇生成传播链：首次根因 → +Ns 衍生 → +Ns 爆发。"""
+        t0 = 1704067200.0
+        src = make_cluster(0, "auth token expired", count=1,
+                           first_seen=t0, first_line=1)
+        d1 = make_cluster(1, "request aborted because auth token expired",
+                          count=5, first_seen=t0 + 3, first_line=10)
+        d2 = make_cluster(2, "auth token expired storm", count=60,
+                          first_seen=t0 + 40, first_line=20)
+        # d2 自持基线爆发（全局平稳）
+        for i in range(60):
+            d2.hist.add(t0 + i)
+        for _ in range(10):
+            d2.hist.add(t0 + 60.0)
+        result = make_result([src, d1, d2],
+                             global_adds=[t0 + i for i in range(100)])
+        analyze_clusters(result)
+        assert src.is_root_cause
+        tl = src.root_timeline
+        assert "首次" in tl and "auth token expired" in tl
+        assert "+3s" in tl and "衍生" in tl
+        assert "+40s" in tl and "爆发" in tl
+        assert d1.root_timeline == "" and d2.root_timeline == "", \
+            "时间线仅根因簇持有"
+
+    def test_timeline_falls_back_to_line_delta(self):
+        """无时间戳时传播链退化为行号差。"""
+        src = make_cluster(0, "auth token expired", first_line=1)
+        d1 = make_cluster(1, "request aborted because auth token expired",
+                          first_line=40)
+        result = make_result([src, d1])
+        analyze_clusters(result)
+        assert "+39行" in src.root_timeline
+
+
+# ---------------------------------------------------------------------------
 # 时间格式化
 # ---------------------------------------------------------------------------
 class TestFormatTimestamp:
