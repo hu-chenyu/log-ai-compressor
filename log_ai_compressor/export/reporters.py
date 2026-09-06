@@ -128,6 +128,17 @@ def _fmt_tokens(n: int) -> str:
     return str(n)
 
 
+def _ratio_text(comp: int, raw: int) -> str:
+    """压缩率文案：≥99.5% 时保留一位小数（防 99.7% 四舍五入成
+    '100%' 读作 bug；修复缺陷R106）。"""
+    ratio = (1 - comp / raw) * 100
+    if ratio >= 99.95:
+        return "99.9"
+    if ratio >= 99.5:
+        return f"{ratio:.1f}"
+    return str(round(ratio))
+
+
 def token_status_text(result: AnalysisResult, compressed_text: str) -> str:
     """状态栏紧凑串：'≈3.2k tokens · 压缩 96%'（原始字符数为 0 时
     只显示压缩侧，不出压缩率）。"""
@@ -135,8 +146,7 @@ def token_status_text(result: AnalysisResult, compressed_text: str) -> str:
     raw = estimate_raw_tokens(result.stats.raw_chars)
     if raw <= 0 or comp >= raw:
         return f"≈{_fmt_tokens(comp)} tokens"
-    ratio = round((1 - comp / raw) * 100)
-    return f"≈{_fmt_tokens(comp)} tokens · 压缩 {ratio}%"
+    return f"≈{_fmt_tokens(comp)} tokens · 压缩 {_ratio_text(comp, raw)}%"
 
 
 def token_report_line(result: AnalysisResult, compressed_text: str) -> str:
@@ -145,9 +155,8 @@ def token_report_line(result: AnalysisResult, compressed_text: str) -> str:
     raw = estimate_raw_tokens(result.stats.raw_chars)
     if raw <= 0 or comp >= raw:
         return f"压缩后 ≈{_fmt_tokens(comp)} tokens（原始字符数未统计）"
-    ratio = round((1 - comp / raw) * 100)
     return (f"原始日志 ≈{_fmt_tokens(raw)} tokens → 压缩后 "
-            f"≈{_fmt_tokens(comp)} tokens（压缩 {ratio}%）")
+            f"≈{_fmt_tokens(comp)} tokens（压缩 {_ratio_text(comp, raw)}%）")
 
 
 # ---------------------------------------------------------------------------
