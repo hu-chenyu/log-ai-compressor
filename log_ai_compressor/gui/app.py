@@ -2446,9 +2446,14 @@ class LogCompressorApp(_make_app_base()):
         零副作用。注意 padx 全程用 Tk 物理 px：CTk 仅 grid()/pack()
         创建时做 DPI 缩放，grid_configure 不缩放（原生透传），
         换算会在高 DPI 下打对折。随 _layout_splitter 重入（窗口
-        缩放/分隔条拖动/字体档位，经 after_idle 调度）自动重同步；
-        目标线左于组体自然宽（分隔条拖到极左）时 padx 触底 0，
-        按自然最小宽呈现。
+        缩放/分隔条拖动/字体档位，经 after_idle 调度）自动重同步。
+        修复缺陷R83：对齐目标线冻结 —— 原实现每次同步读实时按钮
+        右缘（随分隔条/窗口移动），级别组 padx 被反复改写，整行
+        （级别组及其后智能分析/上下文行数/解析规则链）随分隔条
+        漂移；改为首次同步即冻结目标线（含紧凑区：紧凑起始后拖
+        入膨胀区也不再跳变），此后同步恒收敛于同一组 padx ——
+        过滤行绝对固定，启动布局的对齐观感永久保持；目标线左于
+        组体自然宽时 padx 触底 0（冻结值不变，行为同前）。
         """
         try:
             panel = self._ctx_entry.master
@@ -2458,8 +2463,13 @@ class LogCompressorApp(_make_app_base()):
             infos, cbs = children[0::2], children[1::2]
             if len(cbs) != 5:
                 return
-            target = (self._list_ctrl_box.winfo_x()
-                      + self._list_ctrl_box.winfo_width())
+            # 修复缺陷R83：冻结目标线（未冻结时读实时按钮右缘）
+            frozen = getattr(self, "_level_gap_target", None)
+            if frozen is None:
+                target = (self._list_ctrl_box.winfo_x()
+                          + self._list_ctrl_box.winfo_width())
+            else:
+                target = frozen
             nat_gaps, pads_tk, lefts_tk = [], [], []
             for i in range(4):
                 pad_l, pad_r = (int(v) for v in
@@ -2474,6 +2484,11 @@ class LogCompressorApp(_make_app_base()):
             text_right = (level_box.winfo_x() + cbs[-1].winfo_x()
                           + tl.winfo_x() + tl.winfo_reqwidth())
             nat_right = text_right - sum(pads_tk)
+            if frozen is None and target > 0:
+                # 修复缺陷R83：首次同步即冻结目标线（此刻控件组已
+                # place 且经 update_idletasks 结算，读数为真值）——
+                # 此后分隔条/窗口变化不再牵引本行
+                self._level_gap_target = target
             want = (target - nat_right + sum(nat_gaps)) / 4.0
             for i in range(4):
                 new_tk = max(0, int(round(want - nat_gaps[i])))
