@@ -341,3 +341,22 @@ class TestEmbeddedRuleset:
             assert e.module == "im_pll.c"
             assert e.message == "clk config broken", \
                 f"{word} 不得残留断词（实际 {e.message!r}）"
+
+    def test_bracket_iso_timestamp(self, emb_parser):
+        """修复缺陷R110：embedded 规则识别方括号 ISO 时间戳（嵌入式
+        CI 构建/烧录日志），此前时间戳识别率 0%、趋势图无数据。"""
+        emb_parser.feed(
+            "[2026-09-04T06:12:05.377Z] error: could not apply 3b972905", 1)
+        e = emb_parser.flush()
+        assert e.timestamp is not None
+        assert e.level == "ERROR"
+        assert e.message == "could not apply 3b972905"
+
+    def test_bracket_iso_no_level_keyword(self, emb_parser):
+        """修复缺陷R110（续）：ISO 行无级别关键词时级别走提示推断，
+        消息完整保留。"""
+        emb_parser.feed("[2026-09-04T06:12:04.341Z] * [new tag] build ok", 1)
+        e = emb_parser.flush()
+        assert e.timestamp is not None
+        assert e.message.startswith("* [new tag]")
+

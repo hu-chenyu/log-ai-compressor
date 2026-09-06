@@ -8,6 +8,13 @@ patterns:
     # [  123.456] [ERR ] [im_pll] clk config failed
     regex: '^\[\s*(?P<timestamp>\d+(?:\.\d+)?)\s*\]\s*\[\s*(?P<level>[A-Za-z]{1,10})\s*\]\s*(?:\[(?P<module>[^\]]{1,64})\]\s*)?(?P<message>.*)$'
 
+  - name: bracket_iso
+    # [2026-09-04T06:12:05.377Z] error: xxx —— 嵌入式 CI 构建/烧录
+    # 日志的方括号 ISO 时间戳（修复缺陷R110：此前 embedded 无 ISO
+    # 模式，此类日志时间戳识别率 0%，趋势图「无时间戳数据」）
+    regex: '^\[(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?)\]\s*(?:(?P<level>{LEVEL})\s*[:\-]\s+)?(?P<message>.*)$'
+    flags: [i]
+
   - name: time_level_ut
     # 12:00:01.123 FAIL/ERROR/PASS 测试用例描述
     regex: '^(?P<timestamp>\d{2}:\d{2}:\d{2}(?:[.,]\d{1,3})?)\s+[\[(]?\s*(?P<level>{LEVEL}|PASS|OK)\s*[\])]?\s*[:\-]?\s*(?P<message>.*)$'
