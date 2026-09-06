@@ -851,6 +851,70 @@ class TestClassicSelectedRow3D:
         assert int(row["frame"].cget("border_width")) == 1, \
             "换选后原行应恢复 1px 细边框"
 
+    def test_bars_inset_clear_of_border(self, app):
+        """优化缺陷R96：高光/阴影条内缩一个边框宽 —— 4px 亮描边
+        四边等宽完整可见（原贴边放置盖住边框内半，底缘上蓝下黑）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        row = app._cluster_rows[0]
+        app._select_cluster(0)
+        app.update()
+        bw = app._dpx(4)
+        hi_info = row["_hi_bar"].place_info()
+        assert int(hi_info["y"]) >= bw, \
+            f"高光条应退到边框内侧（y={hi_info['y']} < 边框宽 {bw}）"
+        sh_info = row["_shadow_bar"].place_info()
+        assert int(sh_info["y"]) <= -bw, \
+            f"阴影条应退到边框内侧（y={sh_info['y']} > -边框宽 {-bw}）"
+
+    def test_classic_row_press_release_3d(self, app):
+        """优化缺陷R96：经典行点击 3D 弹性 —— 按下下沉+阴影收缩，
+        释放回弹归位+阴影恢复（与虚拟行 R23 同款手感）。"""
+        import time as _time
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        row = app._cluster_rows[0]         # 分析后自动选中（阴影条可见）
+        app._select_cluster(0)
+        app.update()
+        frame = row["frame"]
+        base_top, base_bot = app._pack_pady(frame)
+        d = app._dpx(3)
+        # 按下：下沉（上 pady 增 d / 下 pady 减 d）+ 阴影收缩 1px
+        app._classic_press(row)
+        app.update()
+        top, bot = app._pack_pady(frame)
+        assert (top, bot) == (base_top + d, max(0, base_bot - d)), \
+            f"按下应下沉 {d}px（实测 pady {(top, bot)} vs 基准 {(base_top, base_bot)}）"
+        assert int(row["_shadow_bar"].place_info()["height"]) == 1, \
+            "按下阴影应收缩为 1px"
+        # 释放：回弹动画结束（~140ms）后归位 + 阴影恢复 2px
+        app._classic_release(row)
+        deadline = _time.time() + 2.0
+        while _time.time() < deadline and row.get("_press_anim") is not None:
+            app.update()
+            _time.sleep(0.02)
+        app.update()
+        top, bot = app._pack_pady(frame)
+        assert (top, bot) == (base_top, base_bot), \
+            "释放回弹结束应恢复基准 pady"
+        assert int(row["_shadow_bar"].place_info()["height"]) == \
+            max(1, app._dpx(2)), "释放结束阴影应恢复厚度"
+
+    def test_press_animation_cancelled_on_deselect(self, app):
+        """优化缺陷R96：动画进行中换选 → 旧行动画取消，pady 不被
+        动画结束帧写回旧基准（防覆盖未选中 pady=4）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        row = app._cluster_rows[0]
+        app._select_cluster(0)
+        app.update()
+        app._classic_press(row)            # 按下不放（动画未启动）
+        app.update()
+        app._select_cluster(1)             # 换选 → 应取消按压态
+        app.update()
+        assert row.get("_press_base") is None
+        assert row.get("_press_anim") is None
+
 
 class TestFontSizeSelector:
     def test_font_menu_exists_with_default(self, app):

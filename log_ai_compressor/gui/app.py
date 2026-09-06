@@ -5268,9 +5268,114 @@ class LogCompressorApp(_make_app_base()):
         if toggle is not None:
             row["toggle"] = toggle
             row["toggle_icon"] = toggle_icon
+        # 优化缺陷R96：经典行点击 3D 按压（此前仅虚拟行 R23 有，
+        # 经典行点击干瘪无弹性 —— 与虚拟同款手感：按下下沉+阴影
+        # 收缩，释放回弹→常态 ~140ms）
+        self._bind_row_press((frame, head, summary), row)
         if register:
             self._cluster_rows.append(row)
         return row
+
+    # ------------------------------------------------------------------
+    # 优化缺陷R96：经典行点击 3D 按压动画（pack pady 位移，零控件重建）
+    # ------------------------------------------------------------------
+    def _bind_row_press(self, widgets, row: dict) -> None:
+        """经典行按压事件绑定（与 _bind_row_events 同覆盖策略）。
+
+        必须 add="+"：<ButtonPress-1> 与选择绑定的 <Button-1> 是
+        同一事件模式，不加 + 会覆盖选中逻辑；绑定顺序在选择之后，
+        按压读取的 pady 基准即为选中态更新后的新值。
+        """
+        targets: list = []
+        for widget in widgets:
+            targets.append(widget)
+            targets.extend(widget.winfo_children())
+        for t in targets:
+            tk.Misc.bind(t, "<ButtonPress-1>",
+                         lambda e: self._classic_press(row), add="+")
+            tk.Misc.bind(t, "<ButtonRelease-1>",
+                         lambda e: self._classic_release(row), add="+")
+
+    @staticmethod
+    def _pack_pady(frame) -> tuple:
+        """读取当前 pack pady（Tk 物理 px，兼容单值/双值形态）。"""
+        raw = frame.pack_info()["pady"]
+        if isinstance(raw, (tuple, list)):
+            return int(raw[0]), int(raw[1])
+        return int(raw), int(raw)
+
+    def _classic_press(self, row: dict) -> None:
+        """按下：行整体下沉 3px（上 pady 增/下 pady 减）+ 阴影收缩。"""
+        self._classic_press_cancel(row)
+        try:
+            top, bot = self._pack_pady(row["frame"])
+            d = self._dpx(3)
+            row["_press_base"] = (top, bot)
+            row["frame"].pack_configure(
+                pady=(top + d, max(0, bot - d)))
+            bar = row.get("_shadow_bar")
+            if bar is not None and bar.winfo_ismapped():
+                bar.place_configure(height=1)      # 按压阴影收缩
+        except tk.TclError:
+            pass
+
+    def _classic_release(self, row: dict) -> None:
+        """释放：上弹 2px → 回落常态（70ms+70ms 两段缓动 ≈140ms）。"""
+        if row.get("_press_base") is None:
+            return
+        import time as _time
+        row["_press_anim"] = _time.monotonic()
+        self._classic_press_step(row)
+
+    def _classic_press_step(self, row: dict) -> None:
+        """回弹步进：+3 下沉 → -2 上弹 → 0 常态；结束恢复阴影厚度。"""
+        import math
+        import time as _time
+        t0 = row.get("_press_anim")
+        base = row.get("_press_base")
+        if t0 is None or base is None:
+            return
+        top, bot = base
+        d, lift = self._dpx(3), self._dpx(2)
+        el = _time.monotonic() - t0
+        DUR = 0.07
+        if el < DUR:                            # ease-out：+d → -lift
+            x = el / DUR
+            e = 1.0 - (1.0 - x) ** 3
+            off = d + (-lift - d) * e
+        elif el < 2 * DUR:                      # ease-in-out：-lift → 0
+            x = (el - DUR) / DUR
+            e = 0.5 * (1.0 - math.cos(math.pi * x))
+            off = -lift * (1.0 - e)
+        else:                                   # 结束：复位 + 阴影恢复
+            off = 0
+            row["_press_anim"] = None
+            row["_press_base"] = None
+        try:
+            row["frame"].pack_configure(
+                pady=(max(0, int(round(top + off))),
+                      max(0, int(round(bot - off)))))
+            if off == 0:
+                bar = row.get("_shadow_bar")
+                if bar is not None and bar.winfo_ismapped():
+                    bar.place_configure(height=max(1, self._dpx(2)))
+        except tk.TclError:
+            row["_press_anim"] = None
+            return
+        if off != 0:
+            row["_press_job"] = self.after(
+                16, self._classic_press_step, row)
+
+    def _classic_press_cancel(self, row: dict) -> None:
+        """取消进行中的按压动画（重按/换选/重建前清理残留）。"""
+        job = row.pop("_press_job", None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        row["_press_anim"] = None
+        row["_press_base"] = None
 
     @staticmethod
     def _is_dark_mode() -> bool:
@@ -5363,6 +5468,9 @@ class LogCompressorApp(_make_app_base()):
                             border_width=4,
                             border_color=p["sel_hi"])
                         # 选中行 pady 收紧 -> 比未选中行稍大，浮起感
+                        # 修复缺陷R96：换选前先取消残留按压动画（否则
+                        # 动画结束帧会把 pady 写回旧基准覆盖新态）
+                        self._classic_press_cancel(row)
                         try:
                             row["frame"].pack_configure(pady=0)
                         except tk.TclError:
@@ -5391,13 +5499,18 @@ class LogCompressorApp(_make_app_base()):
                         try:
                             _in = self._dpx(_ROW_BAR_INSET)
                             _bh = max(1, self._dpx(2))
+                            # 修复缺陷R96：高光/阴影条内缩一个边框宽
+                            # —— 原贴 frame 边缘放置，盖住 4px 亮边框
+                            # 的内半（底缘上蓝下黑、上粗下细的隐蔽
+                            # 缺陷）；条退进内容区后描边四边等宽
+                            _bw = self._dpx(4)
                             row["_hi_bar"].configure(bg=p["sel_hi"])
                             row["_hi_bar"].place(
-                                x=_in, y=0, relwidth=1,
+                                x=_in, y=_bw, relwidth=1,
                                 width=-2 * _in, height=_bh)
                             row["_shadow_bar"].configure(bg=p["sel_shadow"])
                             row["_shadow_bar"].place(
-                                x=_in, rely=1.0, relwidth=1,
+                                x=_in, rely=1.0, y=-_bw, relwidth=1,
                                 width=-2 * _in, height=_bh, anchor="sw")
                         except (tk.TclError, KeyError):
                             pass
@@ -5426,6 +5539,8 @@ class LogCompressorApp(_make_app_base()):
                             border_width=1,
                             border_color=p["row_border"])
                         # 未选中恢复默认 pady
+                        # 修复缺陷R96：同选中分支，先取消残留按压动画
+                        self._classic_press_cancel(row)
                         try:
                             row["frame"].pack_configure(pady=4)
                         except tk.TclError:
