@@ -96,6 +96,16 @@ class PipelineConfig:
     # 优化缺陷R84：相似度阈值档位 strict（严格0.95）/ standard（标准
     # 0.85，默认）/ lenient（宽松0.70）—— 控制错误聚类合并激进度
     similarity: str = "standard"
+    # 优化缺陷R85：时间范围过滤（第一前置项）—— epoch 精确区间
+    # （time_start/time_end，秒）或每日时段区间（tod_start/tod_end，
+    # 当日秒数）；None 表示该端不限；无时间戳条目始终保留
+    time_start: Optional[float] = None
+    time_end: Optional[float] = None
+    tod_start: Optional[float] = None
+    tod_end: Optional[float] = None
+    # 优化缺陷R85：行数上限采样（None=全部；达上限收束并标记
+    # stats.limit_hit，与取消中断区分）
+    max_lines: Optional[int] = None
 
 
 class LogPipeline:
@@ -179,6 +189,7 @@ class LogPipeline:
 
         line_no = 0
         cancelled = False
+        limit_hit = False     # 优化缺陷R85：行数上限采样命中标记
 
         def notify(phase: str) -> None:
             if self._progress_cb:
@@ -221,6 +232,13 @@ class LogPipeline:
                     cancelled = True
                     break
 
+                # 4.5) 行数上限采样（优化缺陷R85）：达上限即收束 ——
+                # 标记 limit_hit（与取消中断区分，非用户取消）
+                if (self._config.max_lines is not None
+                        and line_no >= self._config.max_lines):
+                    limit_hit = True
+                    break
+
                 # 5) 进度上报（按行数间隔）
                 if line_no % PROGRESS_EVERY_LINES == 0:
                     notify("parsing")
@@ -239,6 +257,7 @@ class LogPipeline:
 
         stats.total_lines = line_no
         stats.truncated = cancelled
+        stats.limit_hit = limit_hit       # 优化缺陷R85：上限采样命中
         stats.duration = time.perf_counter() - t0
         stats.lines_per_second = (line_no / stats.duration
                                   if stats.duration > 0 else 0.0)
@@ -264,6 +283,27 @@ class LogPipeline:
     def _handle_entry(self, entry, stats: RunStats, clusterer: ErrorClusterer,
                       global_hist, recent: deque, pending: Dict[int, dict]) -> None:
         """统计 + 过滤 + 聚类；必要时开启样例后上下文待补。"""
+        # 优化缺陷R85：时间范围过滤（第一前置项，先于一切统计）——
+        # epoch 精确区间 / 每日时段区间；无时间戳条目无法定位，
+        # 始终保留（宁留勿丢，避免 CI 日志大量无戳行被误清）
+        ts = entry.timestamp
+        if ts is not None:
+            if (self._config.time_start is not None
+                    and ts < self._config.time_start):
+                return
+            if (self._config.time_end is not None
+                    and ts > self._config.time_end):
+                return
+            if (self._config.tod_start is not None
+                    or self._config.tod_end is not None):
+                lt = time.localtime(ts)
+                tod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+                if (self._config.tod_start is not None
+                        and tod < self._config.tod_start):
+                    return
+                if (self._config.tod_end is not None
+                        and tod > self._config.tod_end):
+                    return
         stats.entry_lines += 1
         stats.level_counts[entry.level] = stats.level_counts.get(entry.level, 0) + 1
 
@@ -331,8 +371,9 @@ class LogPipeline:
 # 便捷 API（GUI / CLI / 测试共用）
 # ---------------------------------------------------------------------------
 def _build_config(levels, include, exclude, top_n, context_lines, rule,
-                  analyze, analysis_mode="full",
-                  similarity="standard") -> PipelineConfig:
+                  analyze, analysis_mode="full", similarity="standard",
+                  time_start=None, time_end=None, tod_start=None,
+                  tod_end=None, max_lines=None) -> PipelineConfig:
     cfg = FilterConfig(
         levels=list(levels) if levels else list(DEFAULT_SELECTED_LEVELS),
         include=list(include or []),
@@ -345,19 +386,26 @@ def _build_config(levels, include, exclude, top_n, context_lines, rule,
     return PipelineConfig(filter_config=cfg, rule=rule,
                           analyze=analyze and analysis_mode != "fast",
                           analysis_mode=analysis_mode,
-                          similarity=similarity)
+                          similarity=similarity,
+                          time_start=time_start, time_end=time_end,
+                          tod_start=tod_start, tod_end=tod_end,
+                          max_lines=max_lines)
 
 
 def analyze_file(path, *, levels=None, include=None, exclude=None,
                  top_n=None, context_lines=None, rule=None, analyze=True,
                  analysis_mode: str = "full",
                  similarity: str = "standard",
+                 time_start=None, time_end=None, tod_start=None,
+                 tod_end=None, max_lines=None,
                  progress_cb: Optional[ProgressCallback] = None,
                  cancel_event: Optional[Event] = None) -> AnalysisResult:
     """分析单个日志文件（详见 LogPipeline.run_file）。"""
     pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
                                          context_lines, rule, analyze,
-                                         analysis_mode, similarity),
+                                         analysis_mode, similarity,
+                                         time_start, time_end, tod_start,
+                                         tod_end, max_lines),
                            progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_file(path)
 
@@ -366,11 +414,15 @@ def analyze_text(text: str, *, source: str = "<粘贴文本>", levels=None,
                  include=None, exclude=None, top_n=None, context_lines=None,
                  rule=None, analyze=True, analysis_mode: str = "full",
                  similarity: str = "standard",
+                 time_start=None, time_end=None, tod_start=None,
+                 tod_end=None, max_lines=None,
                  progress_cb: Optional[ProgressCallback] = None,
                  cancel_event: Optional[Event] = None) -> AnalysisResult:
     """分析粘贴文本（详见 LogPipeline.run_text）。"""
     pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
                                          context_lines, rule, analyze,
-                                         analysis_mode, similarity),
+                                         analysis_mode, similarity,
+                                         time_start, time_end, tod_start,
+                                         tod_end, max_lines),
                            progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_text(text, source=source)

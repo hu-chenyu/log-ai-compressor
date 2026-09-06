@@ -351,6 +351,81 @@ class TestSimilarityMode:
             assert len(r.clusters) == 1 and r.clusters[0].count == 3
 
 
+# ---------------------------------------------------------------------------
+# 优化缺陷R85：时间范围过滤（epoch 精确 / tod 每日时段）+ 行数上限采样
+# ---------------------------------------------------------------------------
+class TestTimeRangeFilter:
+    _LOG = "\n".join([
+        "2024-01-01 08:00:00 ERROR [db] early morning error",
+        "2024-01-01 14:00:00 ERROR [db] midday error",
+        "2024-01-01 20:00:00 ERROR [db] evening error",
+    ])
+
+    def test_tod_range_keeps_only_in_window(self):
+        """每日时段 12:00~18:00：仅正午错误入窗（第一前置项）。"""
+        r = analyze_text(self._LOG,
+                         tod_start=12 * 3600, tod_end=18 * 3600)
+        assert len(r.clusters) == 1
+        assert "midday" in r.clusters[0].summary
+        assert r.stats.error_entries == 1
+
+    def test_tod_open_end(self):
+        """仅填开始端：14:00 起，晚间保留、清晨剔除。"""
+        r = analyze_text(self._LOG, tod_start=12 * 3600)
+        assert len(r.clusters) == 2
+        assert all("early" not in c.summary for c in r.clusters)
+
+    def test_epoch_range(self):
+        """epoch 精确区间：15:00 之后仅晚间错误。"""
+        import time as _time
+        start = _time.mktime(
+            _time.strptime("2024-01-01 15:00:00", "%Y-%m-%d %H:%M:%S"))
+        r = analyze_text(self._LOG, time_start=start)
+        assert len(r.clusters) == 1
+        assert "evening" in r.clusters[0].summary
+
+    def test_untimestamped_entries_always_kept(self):
+        """无时间戳条目始终保留（宁留勿丢，CI 日志无戳行不误清）。"""
+        log = "\n".join([
+            "[2024-01-01T02:00:00.000Z] error: early morning error",
+            "error: untimestamped failure",
+        ])
+        r = analyze_text(log, rule="jenkins",
+                         tod_start=12 * 3600, tod_end=18 * 3600)
+        summaries = [c.summary for c in r.clusters]
+        assert any("untimestamped" in s for s in summaries), \
+            "无时间戳条目不得被时间窗过滤"
+        assert not any("early" in s for s in summaries), \
+            "清晨错误在窗外应被剔除"
+
+
+class TestMaxLines:
+    def test_max_lines_stops_at_limit(self):
+        """上限 10 行：只处理前 10 行，limit_hit 置位、非取消中断。"""
+        lines = [f"2024-01-01 09:00:{i:02d} ERROR [db] error number {i}"
+                 for i in range(50)]
+        r = analyze_text("\n".join(lines), max_lines=10)
+        assert r.stats.total_lines == 10
+        assert r.stats.limit_hit is True
+        assert r.stats.truncated is False, "上限收束不是取消中断"
+        assert sum(c.count for c in r.clusters) <= 10
+
+    def test_no_limit_by_default(self):
+        """默认全部：limit_hit 不置位，全部行处理。"""
+        lines = [f"2024-01-01 09:00:{i:02d} ERROR [db] error number {i}"
+                 for i in range(20)]
+        r = analyze_text("\n".join(lines))
+        assert r.stats.total_lines == 20
+        assert r.stats.limit_hit is False
+
+    def test_limit_larger_than_file_no_hit(self):
+        """上限大于总行数：正常完成，limit_hit 不置位。"""
+        r = analyze_text(
+            "2024-01-01 09:00:00 ERROR [db] single error", max_lines=100)
+        assert r.stats.total_lines == 1
+        assert r.stats.limit_hit is False
+
+
 
 # ---------------------------------------------------------------------------
 # 文件模式（编码探测联动）
