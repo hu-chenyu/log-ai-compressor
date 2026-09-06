@@ -40,6 +40,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # 优化缺陷R111：已屏蔽错误模板（message_template 列表，已知
     # 噪音错误右键屏蔽后默认从列表隐藏）
     "muted": [],
+    # 优化缺陷R114：过滤预设（名称 → 时间范围/行数上限/关键词/
+    # 正则开关/相似度/编码 的 UI 原值快照，⚙ 弹层一键套用）
+    "filter_presets": {},
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},
     "last_files": [],

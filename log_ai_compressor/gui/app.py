@@ -1767,6 +1767,9 @@ class LogCompressorApp(_make_app_base()):
         self._tail_prev_errors = 0
         # 优化缺陷R111：已知错误屏蔽（message_template 集合，持久化）
         self._muted = set(self._config.get("muted") or [])
+        # 优化缺陷R114：过滤预设（名称 → UI 原值快照，⚙ 弹层套用）
+        self._presets = dict(self._config.get("filter_presets") or {})
+        self._last_preset = None          # 最近套用的预设名（✕ 删除目标）
         self._show_muted = False            # 会话态：列表是否显示已屏蔽
         self._detail_cluster = None         # 详情面板当前簇（屏蔽按钮用）
         # 修复缺陷R1：四态主题（兼容旧配置的 light/dark 值）
@@ -3740,6 +3743,8 @@ class LogCompressorApp(_make_app_base()):
                 "1.0", "end").strip(),
             # 优化缺陷R111：已屏蔽错误模板持久化
             "muted": sorted(self._muted),
+            # 优化缺陷R114：过滤预设持久化
+            "filter_presets": dict(self._presets),
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
             # 修复缺陷R10：字体大小档位持久化（下次启动自动恢复）
@@ -4009,16 +4014,16 @@ class LogCompressorApp(_make_app_base()):
         # 自定义脱敏规则（优化缺陷R103：内置规则覆盖不了的内部敏感
         # 词 —— 工单号/内部域名等，用户每行写一条正则）
         ctk.CTkLabel(frame, text="自定义脱敏").grid(
-            row=5, column=0, padx=(12, 4), pady=(2, 12), sticky="nw")
+            row=5, column=0, padx=(12, 4), pady=(2, 2), sticky="nw")
         self._redact_custom_box = ctk.CTkTextbox(
             frame, width=170, height=64,
             font=ctk.CTkFont(family="Consolas", size=11))
         self._redact_custom_box.grid(row=5, column=1, padx=(4, 0),
-                                     pady=(2, 12), sticky="w")
+                                     pady=(2, 2), sticky="w")
         custom_help = ctk.CTkLabel(
             frame, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        custom_help.grid(row=5, column=2, padx=(6, 12), pady=(2, 12),
+        custom_help.grid(row=5, column=2, padx=(6, 12), pady=(2, 2),
                          sticky="nw")
         Tooltip(custom_help, lambda: (
             "每行一条正则，命中统一打码为 [自定义]\n"
@@ -4026,6 +4031,42 @@ class LogCompressorApp(_make_app_base()):
             "例：[\\w.-]+\\.corp  —— 内部域名\n"
             "非法行在导出/复制时忽略并在状态栏提示\n"
             "与上方开关联动：开关关闭时自定义规则也不生效"))
+
+        # 过滤预设（优化缺陷R114）：高级选项行 + ⚙ 弹层的过滤参数
+        # 一键存取 —— 存 UI 原值快照（未解析字符串），套用即完整
+        # 还原；名称即键，重名覆盖；下拉套用 / ✕ 删除当前选中项
+        ctk.CTkLabel(frame, text="过滤预设").grid(
+            row=6, column=0, padx=(12, 4), pady=2, sticky="w")
+        self._preset_name_entry = ctk.CTkEntry(
+            frame, width=170, placeholder_text="输入名称后点 💾 保存当前过滤")
+        self._preset_name_entry.grid(row=6, column=1, padx=(4, 0),
+                                     pady=2, sticky="w")
+        self._preset_save_btn = ctk.CTkButton(
+            frame, text="💾", width=28, command=self._save_preset)
+        self._preset_save_btn.grid(row=6, column=2, padx=(6, 12),
+                                   pady=2, sticky="w")
+        self._preset_menu = ctk.CTkOptionMenu(
+            frame, width=170, dynamic_resizing=False,
+            values=self._preset_names(), command=self._apply_preset)
+        self._preset_menu.set("选择预设套用…" if not self._presets
+                              else "选择预设…")
+        self._preset_menu.grid(row=7, column=1, padx=(4, 0),
+                               pady=(2, 12), sticky="w")
+        self._preset_del_btn = ctk.CTkButton(
+            frame, text="✕", width=28, fg_color="#6b7280",
+            hover_color="#4b5563", command=self._delete_preset)
+        self._preset_del_btn.grid(row=7, column=2, padx=(6, 12),
+                                  pady=(2, 12), sticky="w")
+        preset_help = ctk.CTkLabel(
+            frame, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        preset_help.grid(row=7, column=0, padx=(12, 4), pady=(2, 12),
+                         sticky="e")
+        Tooltip(preset_help, lambda: (
+            "快照内容：时间范围 / 行数上限 / 包含·排除关键词 /\n"
+            "正则开关 / 相似度 / 编码 —— 即「开始分析」下发的全部过滤\n"
+            "💾 保存：以上方输入框的名称为键（重名覆盖）\n"
+            "下拉：选中即套用到各控件；✕：删除最近套用的预设"))
         # 全局点击收起（同主题弹窗 R15 机制，与焦点解耦）
         self.bind_all("<Button-1>", self._on_settings_global_click,
                       add=True)
@@ -4087,6 +4128,86 @@ class LogCompressorApp(_make_app_base()):
         """收起设置弹层。"""
         if self._settings_popup.state() != "withdrawn":
             self._settings_popup.withdraw()
+
+    # ------------------------------------------------------------------
+    # 优化缺陷R114：过滤预设（⚙ 弹层；UI 原值快照存取）
+    # ------------------------------------------------------------------
+    def _preset_names(self) -> list:
+        """预设下拉选项（无预设时给占位项防空列表异常）。"""
+        return list(self._presets) or ["（暂无预设）"]
+
+    def _preset_snapshot(self) -> dict:
+        """当前过滤参数的 UI 原值快照（未解析字符串，套用即还原）。"""
+        return {
+            "time_start": self._time_start_entry.get(),
+            "time_end": self._time_end_entry.get(),
+            "maxlines": self._maxlines_key,
+            "include": self._include_entry.get(),
+            "exclude": self._exclude_entry.get(),
+            "use_regex": bool(self._use_regex_var.get()),
+            "similarity": self._similarity_key,
+            "encoding": self._encoding_display,
+        }
+
+    def _refresh_preset_menu(self) -> None:
+        """预设下拉重填（增删后）；显示回占位文案。"""
+        self._preset_menu.configure(values=self._preset_names())
+        self._preset_menu.set("选择预设…" if self._presets
+                              else "（暂无预设）")
+
+    def _save_preset(self) -> None:
+        """💾 保存当前过滤参数为预设（名称为键，重名覆盖）。"""
+        name = self._preset_name_entry.get().strip()
+        if not name:
+            self._status_label.configure(text="预设保存失败：请先输入名称")
+            return
+        self._presets[name] = self._preset_snapshot()
+        self._save_config()
+        self._refresh_preset_menu()
+        self._preset_name_entry.delete(0, "end")
+        self._status_label.configure(
+            text=f"预设「{name}」已保存（{len(self._presets)} 个）")
+
+    def _apply_preset(self, name: str) -> None:
+        """下拉选中即套用：快照原值回填各过滤控件（下次分析生效）。"""
+        snap = self._presets.get(name)
+        if snap is None:
+            return
+        for entry, key in ((self._time_start_entry, "time_start"),
+                           (self._time_end_entry, "time_end"),
+                           (self._include_entry, "include"),
+                           (self._exclude_entry, "exclude")):
+            entry.delete(0, "end")
+            value = str(snap.get(key) or "")
+            if value:
+                entry.insert(0, value)
+        if snap.get("maxlines") in MAXLINES_KEYS:
+            self._on_maxlines_changed(
+                MAXLINES_DISPLAY[snap["maxlines"]])
+        self._use_regex_var.set(bool(snap.get("use_regex")))
+        if snap.get("similarity") in SIMILARITY_KEYS:
+            self._on_similarity_changed(
+                SIMILARITY_DISPLAY[snap["similarity"]])
+        if snap.get("encoding") in _ENCODING_VALUES:
+            self._on_encoding_changed(str(snap["encoding"]))
+        self._last_preset = name
+        self._status_label.configure(
+            text=f"预设「{name}」已套用：下一次「开始分析」生效")
+
+    def _delete_preset(self) -> None:
+        """✕ 删除最近套用的预设（无套用记录则删下拉当前项）。"""
+        name = getattr(self, "_last_preset", None) or \
+            self._preset_menu.get()
+        if name not in self._presets:
+            self._status_label.configure(
+                text="无可删预设：先从下拉选中一个")
+            return
+        del self._presets[name]
+        self._last_preset = None
+        self._save_config()
+        self._refresh_preset_menu()
+        self._status_label.configure(
+            text=f"预设「{name}」已删除（剩 {len(self._presets)} 个）")
 
     # ==================================================================
     # 文件选择 / 拖拽
