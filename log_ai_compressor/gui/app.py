@@ -96,6 +96,34 @@ RULE_DISPLAY = {
     "jenkins": "CI构建 jenkins",
 }
 _RULE_BY_DISPLAY = {v: k for k, v in RULE_DISPLAY.items()}
+# 优化缺陷R79：智能分析模式三件套（完整默认 + 中文显示名映射，
+# 与解析规则选择器同款交互：选中项从下拉消失 + ⓘ 悬停说明）
+ANALYZE_KEYS = ("full", "deep", "fast")
+ANALYZE_DISPLAY = {
+    "full": "完整分析（推荐）",
+    "deep": "深度扫描",
+    "fast": "快速聚类",
+}
+_ANALYZE_BY_DISPLAY = {v: k for k, v in ANALYZE_DISPLAY.items()}
+ANALYZE_DESCRIPTIONS = {
+    "full": "完整分析（推荐）：聚类 + 优先级 P0~P4 + 根因▲ + "
+            "爆发●(3σ)/周期◔/新型◆/罕见○ + 堆栈降噪。\n"
+            "证据确凿才标记（默认阈值），日常排查用它",
+    "deep": "深度扫描：与完整分析同样的五件套，但报案门槛降低——"
+            "爆发 3σ→2σ、罕见判定 总数≥10→≥5、根因关键词 ≥3→≥2。\n"
+            "疑难日志（完整分析啥都没标出）时用它；代价是误报增多",
+    "fast": "快速聚类：只做聚类压缩 + 级别排序，跳过全部智能标记"
+            "（无 ▲●○◆ 与优先级评分）。\n"
+            "超大文件卡顿时用；详情面板智能分析区显示「未执行」",
+}
+_ANOMALY_LEGEND = ("标记图例：▲ 根因（紫） · ● 集中爆发 · ◔ 周期发作 · "
+                   "◆ 新型错误 · ○ 罕见异常")
+ANOMALY_DESCRIPTIONS = {
+    "burst": "集中爆发：错误峰值超过全局 3σ 或簇自身基线（中位数+3×MAD）",
+    "periodic": "周期发作：实例间隔变异系数 ≤0.10（定时任务/心跳失败指纹）",
+    "novel": "新型错误：仅 1 次且与既有簇模板 Jaccard <0.5（从没见过）",
+    "rare": "罕见异常：错误总数可观但该类仅出现 1 次（老错误的偶发尾巴）",
+}
 _ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常",
                    "periodic": "周期发作", "novel": "新型错误"}
 
@@ -1985,11 +2013,11 @@ class LogCompressorApp(_make_app_base()):
         panel.grid(row=2, column=0, sticky="ew", padx=10, pady=3)
         self._bg_widgets.append((panel, "card"))
         # 修复缺陷R72：搜索组迁出至独立「实时筛选行」—— 本行只剩
-        # 「按开始分析才生效」的控件（级别/上下文行数/解析规则），
-        # 整行请求宽远低于可用宽，超宽切边问题根除；列 2 弹性空白
-        # 吸收窗口余量（原 R49/R51/R52 的搜索框等距/防切机制随搜索
-        # 组一并迁出，不再适用本行）
-        panel.grid_columnconfigure(2, weight=1, minsize=self._dpx(12))
+        # 「按开始分析才生效」的控件（级别/智能分析模式/上下文行数/
+        # 解析规则），整行请求宽远低于可用宽，超宽切边问题根除；
+        # 弹性空白列吸收窗口余量（原 R49/R51/R52 的搜索框等距/防切
+        # 机制随搜索组一并迁出，不再适用本行）
+        panel.grid_columnconfigure(5, weight=1, minsize=self._dpx(12))
 
         ctk.CTkLabel(panel, text="级别过滤", font=ctk.CTkFont(weight="bold")
                      ).grid(row=0, column=0, padx=(12, 4), sticky="w")
@@ -2041,18 +2069,40 @@ class LogCompressorApp(_make_app_base()):
             self._level_tooltips[level] = Tooltip(
                 info, lambda lv=level: _LEVEL_HELP[lv])
 
+        # 优化缺陷R79：智能分析模式选择器 —— 紧随级别组（R74 对齐
+        # 机制不变：DEBUG 的 G 右缘仍贴全屏按钮线，本组落在原空位），
+        # 与解析规则同款交互（选中项从下拉消失 + ⓘ 悬停说明）
+        ctk.CTkLabel(panel, text="智能分析").grid(
+            row=0, column=2, padx=(12, 2), sticky="w")
+        self._analyze_key = "full"
+        self._analyze_menu = ctk.CTkOptionMenu(
+            panel, width=130,
+            values=[ANALYZE_DISPLAY[k] for k in ANALYZE_KEYS
+                    if k != "full"],
+            command=self._on_analyze_changed)
+        self._analyze_menu.set(ANALYZE_DISPLAY["full"])
+        self._analyze_menu.grid(row=0, column=3, padx=(2, 0), sticky="w")
+        analyze_help = ctk.CTkLabel(
+            panel, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        analyze_help.grid(row=0, column=4, padx=(4, 0), sticky="w")
+        self._analyze_help_tooltip = Tooltip(
+            analyze_help,
+            lambda: (ANALYZE_DESCRIPTIONS.get(self._analyze_key, "")
+                     + "\n" + _ANOMALY_LEGEND))
+
         # 修复缺陷R72：搜索组（搜索标签/输入框/计数影子框/导航按钮）
         # 迁至 _build_search_panel 的独立实时筛选行
         # 优化缺陷R43：包含/排除关键字、Top N 输入区删除（用户决策）
         # 优化缺陷R44：上下文行数输入框回归 —— 置于级别过滤与解析
         # 规则之间的空白区（≥0 有效，负数按 0 行处理）
         ctk.CTkLabel(panel, text="上下文行数").grid(
-            row=0, column=3, padx=(0, 2), sticky="e")
+            row=0, column=6, padx=(0, 2), sticky="e")
         self._ctx_entry = ctk.CTkEntry(panel, width=60)
         self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
-        self._ctx_entry.grid(row=0, column=4, padx=(2, 12), sticky="w")
+        self._ctx_entry.grid(row=0, column=7, padx=(2, 12), sticky="w")
 
-        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=5, padx=(6, 2),
+        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=8, padx=(6, 2),
                                                   sticky="e")
         # 优化缺陷R71：下拉显示中文名，默认「自动识别（推荐）」；
         # 当前选中项不出现在下拉列表（与主题选择器同款交互）
@@ -2062,12 +2112,12 @@ class LogCompressorApp(_make_app_base()):
             values=[RULE_DISPLAY[k] for k in RULE_KEYS if k != "auto"],
             command=self._on_rule_changed)
         self._rule_menu.set(RULE_DISPLAY["auto"])
-        self._rule_menu.grid(row=0, column=6, padx=(2, 0), sticky="w")
+        self._rule_menu.grid(row=0, column=9, padx=(2, 0), sticky="w")
         # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
         rule_help = ctk.CTkLabel(
             panel, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        rule_help.grid(row=0, column=7, padx=(4, 12), sticky="w")
+        rule_help.grid(row=0, column=10, padx=(4, 12), sticky="w")
         self._rule_help_tooltip = Tooltip(
             rule_help,
             lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
@@ -3301,6 +3351,9 @@ class LogCompressorApp(_make_app_base()):
             # 优化缺陷R71：配置存规则键（旧配置 generic 等键直接兼容），
             # 下拉显示中文名且选中项移出列表
             self._on_rule_changed(RULE_DISPLAY[cfg["rule"]])
+        if cfg.get("analyze_mode") in ANALYZE_KEYS:
+            # 优化缺陷R79：恢复智能分析模式（默认完整分析）
+            self._on_analyze_changed(ANALYZE_DISPLAY[cfg["analyze_mode"]])
         # 修复缺陷R10：字体大小档位恢复（__init__ 已按档位建字体，
         # 此处仅同步选择器显示；字号一致时回调为空操作）
         if cfg.get("font_size") in FONT_SIZE_SCALE:
@@ -3317,6 +3370,8 @@ class LogCompressorApp(_make_app_base()):
             "levels": [lv for lv, var in self._level_vars.items() if var.get()],
             "context_lines": self._current_context_lines(),
             "rule": self._rule_key,
+            # 优化缺陷R79：智能分析模式持久化
+            "analyze_mode": self._analyze_key,
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
             # 修复缺陷R10：字体大小档位持久化（下次启动自动恢复）
@@ -3365,6 +3420,29 @@ class LogCompressorApp(_make_app_base()):
         if desc:
             self._status_label.configure(
                 text=f"解析规则 {RULE_DISPLAY[key]}：{desc}")
+
+    def _on_analyze_changed(self, choice: str) -> None:
+        """智能分析模式切换（优化缺陷R79）：完整/深度/快速。
+
+        与解析规则选择器同款交互：选项为中文显示名（内部映射模式
+        键）；当前选中项从下拉列表移除；状态栏即时展示该模式说明
+        （与 ⓘ 悬停 tooltip 互补）。模式在下一次「开始分析」生效。
+        """
+        key = _ANALYZE_BY_DISPLAY.get(choice)
+        if key is None:
+            return
+        self._analyze_key = key
+        self._analyze_menu.set(ANALYZE_DISPLAY[key])
+        self._analyze_menu.configure(
+            values=[ANALYZE_DISPLAY[k] for k in ANALYZE_KEYS
+                    if k != key])
+        desc = ANALYZE_DESCRIPTIONS.get(key)
+        if desc:
+            self._status_label.configure(
+                text=f"智能分析 {ANALYZE_DISPLAY[key]}：{desc}")
+        # 注：不在此 _save_config —— _restore_config 启动回放本方法时
+        # 窗口尚未映射，winfo_height 只有 ~200，会冲掉已保存的窗口
+        # 尺寸（修复缺陷R80）；持久化由后续保存点（分析完成/关窗）负责
 
     # ==================================================================
     # 文件选择 / 拖拽
@@ -3796,6 +3874,8 @@ class LogCompressorApp(_make_app_base()):
             levels=[lv for lv, var in self._level_vars.items() if var.get()],
             context_lines=self._current_context_lines(),
             rule=self._rule_key,
+            # 优化缺陷R79：智能分析模式随分析任务下发（full/deep/fast）
+            analysis_mode=self._analyze_key,
         )
         if mode == "文件导入":
             path = self._file_entry.get().strip()
@@ -3849,7 +3929,11 @@ class LogCompressorApp(_make_app_base()):
         progress = lambda d: self._queue.put(("progress", d))  # noqa: E731
         try:
             if payload["mode"] == "多文件对比":
-                results = compare_files(payload["files"], **common)
+                # 修复缺陷R80：对比模式内置 analyze=False（diff 不需要
+                # 智能标记），不下发 analysis_mode（compare_files 不收）
+                cmp_common = {k: v for k, v in payload["common"].items()
+                              if k != "analysis_mode"}
+                results = compare_files(payload["files"], **cmp_common)
                 self._queue.put(("compare_done", results))
             elif payload["mode"] == "文件导入":
                 result = analyze_file(payload["file"], analyze=True,
@@ -5262,7 +5346,13 @@ class LogCompressorApp(_make_app_base()):
             notes.append(cluster.root_cause_reason)
         if cluster.anomaly:
             notes.append(f"异常：{_ANOMALY_LABELS.get(cluster.anomaly, cluster.anomaly)}")
-        meta(("【智能分析】" + "；".join(notes)) if notes else "【智能分析】无特殊标记")
+        if notes:
+            meta("【智能分析】" + "；".join(notes))
+        elif self._analyze_key == "fast":
+            # 优化缺陷R79：快速聚类模式明示「未执行」（区别于无标记）
+            meta("【智能分析】快速聚类模式（未执行智能分析）")
+        else:
+            meta("【智能分析】无特殊标记")
         # 优化缺陷R78：根因传播链（因果图叙事）与相关簇（模板相似）
         if cluster.root_timeline:
             meta(f"【传播链】{cluster.root_timeline}")

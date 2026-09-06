@@ -114,13 +114,24 @@ def simplify_stack(stack: Sequence[str]) -> SimplifiedStack:
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
-def analyze_clusters(result: AnalysisResult) -> float:
-    """对管线结果执行智能分析（就地填充字段并排序），返回耗时（秒）。"""
+def analyze_clusters(result: AnalysisResult, *,
+                     burst_sigma: float = BURST_SIGMA,
+                     rare_min_total: int = RARE_MIN_TOTAL,
+                     strong_keyword_score: float = STRONG_KEYWORD_SCORE
+                     ) -> float:
+    """对管线结果执行智能分析（就地填充字段并排序），返回耗时（秒）。
+
+    优化缺陷R79：灵敏度参数化（智能分析模式）——完整分析用默认
+    阈值；深度扫描经 ANALYSIS_MODE_DEEP 降阈（宁多报不漏报）。
+    """
     t0 = time.perf_counter()
     clusters = result.clusters
     if clusters:
-        _mark_anomalies(clusters, result.global_hist, result.stats)
-        out_edges, by_id = _mark_root_causes(clusters)
+        _mark_anomalies(clusters, result.global_hist, result.stats,
+                        burst_sigma=burst_sigma,
+                        rare_min_total=rare_min_total)
+        out_edges, by_id = _mark_root_causes(
+            clusters, strong_keyword_score=strong_keyword_score)
         # 优化缺陷R78：关联叙事（依赖因果图与异常标注，须在优先级前）
         _link_related_clusters(clusters)
         _build_timelines(clusters, out_edges, by_id)
@@ -130,10 +141,19 @@ def analyze_clusters(result: AnalysisResult) -> float:
     return result.stats.analysis_cost
 
 
+# 优化缺陷R79：深度扫描模式预设（疑难日志：默认啥都没标出时用，
+# 宁多报不漏报 —— 爆发 3σ→2σ、罕见判定 10→5、强根因关键词 3→2）
+ANALYSIS_MODE_DEEP = {"burst_sigma": 2.0, "rare_min_total": 5,
+                      "strong_keyword_score": 2}
+
+
 # ---------------------------------------------------------------------------
 # 异常检测
 # ---------------------------------------------------------------------------
-def _mark_anomalies(clusters: List[ErrorCluster], global_hist, stats: RunStats) -> None:
+def _mark_anomalies(clusters: List[ErrorCluster], global_hist,
+                    stats: RunStats, *,
+                    burst_sigma: float = BURST_SIGMA,
+                    rare_min_total: int = RARE_MIN_TOTAL) -> None:
     """集中爆发 / 周期发作 / 新型错误 / 罕见异常 标注（优先级递降）。
 
     优化缺陷R75：异常检测强化 ——
@@ -144,7 +164,7 @@ def _mark_anomalies(clusters: List[ErrorCluster], global_hist, stats: RunStats) 
     - 新增 novel：罕见且与既有所有簇模板 Jaccard <0.5（从没见过
       的错，比"老错误的偶发尾巴"含金量高）。
     """
-    bursts = global_hist.burst_buckets(k=BURST_SIGMA)
+    bursts = global_hist.burst_buckets(k=burst_sigma)
     burst_ranges = [(t, t + global_hist.width) for t, _ in bursts]
     total = stats.error_entries
     token_sets = {id(c): _tokens(c.message_template or c.summary)
@@ -157,17 +177,18 @@ def _mark_anomalies(clusters: List[ErrorCluster], global_hist, stats: RunStats) 
             peak_t = max(series, key=lambda x: x[1])[0]
         global_burst = (peak_t is not None
                         and any(a <= peak_t < b for a, b in burst_ranges))
-        if global_burst or _own_baseline_burst(c):
+        if global_burst or _own_baseline_burst(c, burst_sigma):
             c.anomaly = "burst"
         elif _is_periodic(c):
             c.anomaly = "periodic"
-        elif total >= RARE_MIN_TOTAL and c.count <= 1:
+        elif total >= rare_min_total and c.count <= 1:
             # 罕见再细分：与既有簇不相似 = 新型错误，相似 = 普通罕见
             c.anomaly = ("novel" if _is_novel(c, clusters, token_sets)
                          else "rare")
 
 
-def _own_baseline_burst(c: ErrorCluster) -> bool:
+def _own_baseline_burst(c: ErrorCluster,
+                        sigma: float = BURST_SIGMA) -> bool:
     """簇自持基线爆发：峰值桶超过自身 中位数+3×MAD 且 ≥2 倍基线。
 
     优化缺陷R75：与全局检测互补 —— 全局直方图被大量其他错误稀释
@@ -185,7 +206,7 @@ def _own_baseline_burst(c: ErrorCluster) -> bool:
         return False
     median = statistics.median(counts)
     mad = statistics.median(abs(x - median) for x in counts)
-    threshold = max(median + 3.0 * 1.4826 * mad, 2.0 * median)
+    threshold = max(median + sigma * 1.4826 * mad, 2.0 * median)
     return peak > threshold
 
 
@@ -318,7 +339,9 @@ def _add_cross_reference_edges(ordered: List[ErrorCluster],
                 add_edge(id(a), id(b))
 
 
-def _mark_root_causes(clusters: List[ErrorCluster]) -> None:
+def _mark_root_causes(clusters: List[ErrorCluster], *,
+                      strong_keyword_score: float = STRONG_KEYWORD_SCORE
+                      ) -> None:
     """因果图根因判定（优化缺陷R76：从关键词投票升级为因果 DAG）。
 
     建边（均为保守强证据，宁缺毋错）：
@@ -384,7 +407,7 @@ def _mark_root_causes(clusters: List[ErrorCluster]) -> None:
     # 3) 强关键词 / 4) 连锁衍生标记
     for c in ordered:
         if (not c.is_root_cause
-                and _keyword_score(c, weights) >= STRONG_KEYWORD_SCORE):
+                and _keyword_score(c, weights) >= strong_keyword_score):
             c.is_root_cause = True
             c.root_cause_reason = "高频根因特征关键词"
         elif not c.is_root_cause and not c.root_cause_reason:
