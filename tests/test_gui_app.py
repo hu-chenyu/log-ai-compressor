@@ -4893,6 +4893,64 @@ PASTE_CN_LOG = "\n".join([
 ])
 
 
+# ---------------------------------------------------------------------------
+# 优化缺陷R100：分析历史（最近 10 次结果可回放）
+# ---------------------------------------------------------------------------
+class TestHistory:
+    def test_history_button_in_tab_row(self, app):
+        """页签行右侧存在🕘历史按钮。"""
+        assert app._history_btn.winfo_exists()
+        assert "历史" in app._history_btn.cget("text")
+
+    def test_result_auto_saved_to_history(self, app):
+        """分析完成后结果自动入库，历史条数 ≥1。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        entries = app._history.list()
+        assert len(entries) >= 1
+        assert entries[0]["source"] == "<粘贴文本>"
+        assert entries[0]["clusters"] == len(app._result.clusters)
+
+    def test_restore_from_history_roundtrip(self, app):
+        """历史回放：完整恢复 result 且不重复入库。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        first_id = app._history.list()[0]["id"]
+        before_count = len(app._history.list())
+        app._restore_from_history(first_id)
+        app.update()
+        # 回放后 _result 有效；播放不产生新的历史条目
+        assert app._result is not None
+        assert len(app._history.list()) == before_count
+        assert "历史回放" in str(app._status_label.cget("text"))
+
+    def test_history_clear_button(self, app):
+        """清空历史按钮清空全部条目。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        assert len(app._history.list()) >= 1
+        app._clear_history()
+        assert app._history.list() == []
+
+    def test_history_load_corrupt_returns_none(self, app):
+        """损坏/不存在 id 返回 None，不抛异常。"""
+        assert app._history.load("not-exist") is None
+
+    def test_history_cap_10_evicts_oldest(self, app):
+        """超出 10 条自动淘汰最旧（索引与 pickle 文件同步清理）。"""
+        from log_ai_compressor.core.models import (
+            AnalysisResult, RunStats, TimeHistogram)
+        for i in range(12):
+            stats = RunStats(source=f"f{i}.log", total_lines=i)
+            app._history.add(AnalysisResult(
+                stats=stats, clusters=[], global_hist=TimeHistogram()))
+        entries = app._history.list()
+        assert len(entries) == 10
+        # 最新在最前；最旧两条（f0/f1）已被淘汰
+        assert entries[0]["source"] == "f11.log"
+        sources = [e["source"] for e in entries]
+        assert "f0.log" not in sources and "f1.log" not in sources
+        pkl_files = list(app._history._dir.glob("*.pkl"))
+        assert len(pkl_files) == 10
+
+
 class TestPasteMode:
     def test_paste_large_text_analysis(self, app):
         """粘贴 1 万行文本：正常解析（总行数 / 错误数正确）。"""

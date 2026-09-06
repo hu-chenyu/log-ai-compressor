@@ -60,7 +60,7 @@ from log_ai_compressor.export.reporters import (
     token_report_line,
     token_status_text,
 )
-from log_ai_compressor.gui.config_store import ConfigStore
+from log_ai_compressor.gui.config_store import ConfigStore, HistoryStore
 
 # 修复缺陷#9：matplotlib 导入约 0.4s，延迟到首次点击「统计图表」时
 # 才加载（charts 模块不再在 GUI 启动路径上被导入）。
@@ -1715,6 +1715,9 @@ class LogCompressorApp(_make_app_base()):
     def __init__(self):
         self._store = ConfigStore()
         self._config = self._store.load()
+        # 优化缺陷R100：分析历史（随配置目录隔离，测试可注入临时目录）
+        self._history = HistoryStore(self._store.path)
+        self._from_history = False          # 历史回放中标记（防重复入库）
         # 修复缺陷R1：四态主题（兼容旧配置的 light/dark 值）
         raw_theme = str(self._config.get("appearance", "dark")).lower()
         self._theme = _THEME_ALIASES.get(raw_theme, "dark")
@@ -2005,6 +2008,14 @@ class LogCompressorApp(_make_app_base()):
         # 文件导入页仍留大片空白 —— 建完全部页后关闭传播，显式
         # height 才生效（_set_dimensions 会同步 tk.Frame height 选项）
         self._tabview.grid_propagate(False)
+        # 优化缺陷R100：分析历史入口（页签行右侧空地，place 叠于
+        # tabview 页头空白区，不挤压三页签）
+        hist_btn = ctk.CTkButton(self._tabview, text="🕘 历史", width=76,
+                                 height=26,
+                                 command=self._open_history_popup)
+        hist_btn.place(relx=1.0, rely=0, anchor="ne", x=-8, y=5)
+        self._history_btn = hist_btn
+        self._accent_buttons.append((hist_btn, "accent"))
 
     def _fit_tab_height(self) -> None:
         """tab 切换：容器高度按当前页内容紧凑适配（修复缺陷R21）。
@@ -4551,6 +4562,9 @@ class LogCompressorApp(_make_app_base()):
                  f"{s.analysis_cost * 1000:.0f}ms{tag_text}")
         self._render_cluster_list()
         self._save_config()
+        # 优化缺陷R100：分析完成自动入历史（回放自身不重复入库）
+        if not self._from_history:
+            self._history.add(result)
         # 优化缺陷R71：规则体检（疑似不匹配时覆盖状态栏为可点击提示）
         self._check_rule_health(result)
         if self._displayed:
@@ -4567,6 +4581,10 @@ class LogCompressorApp(_make_app_base()):
     def _check_rule_health(self, result: AnalysisResult) -> None:
         """分析后体检：疑似规则不匹配时状态栏给可点击换规则提示。"""
         self._reset_rule_hint()
+        # 优化缺陷R100：历史回放不做体检（当前输入与历史结果未必
+        # 同源，体检结论会误导用户换规则重跑）
+        if self._from_history:
+            return
         s = result.stats
         ts_rate = s.ts_entries / max(1, s.entry_lines)
         if s.error_lines > 0 and ts_rate >= 0.5:
@@ -4627,6 +4645,93 @@ class LogCompressorApp(_make_app_base()):
         self._reset_rule_hint()
         self._on_rule_changed(RULE_DISPLAY[key])
         self._on_start()
+
+    # ------------------------------------------------------------------
+    # 优化缺陷R100：分析历史弹层（最近 10 次，点击回放免重跑）
+    # ------------------------------------------------------------------
+    def _open_history_popup(self) -> None:
+        """历史弹层：元数据列表（新→旧），点行回放，底部可清空。"""
+        old = getattr(self, "_history_dlg", None)
+        if old is not None and old.winfo_exists():
+            old.focus_set()
+            return
+        entries = self._history.list()
+        dlg = ctk.CTkToplevel(self)
+        self._history_dlg = dlg
+        dlg.title("分析历史（最近 10 次）")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        rows = max(1, len(entries))
+        w, h = 640, min(500, 150 + 48 * rows)
+        self.update_idletasks()
+        cx = self.winfo_x() + max(0, (self.winfo_width() - w) // 2)
+        cy = self.winfo_y() + max(0, (self.winfo_height() - h) // 2)
+        dlg.geometry(f"{w}x{h}+{cx}+{cy}")
+
+        ctk.CTkLabel(dlg, text="点击任意一条直接回放完整分析结果（免重跑）",
+                     font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=16, pady=(12, 4))
+        body = ctk.CTkScrollableFrame(dlg)
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        if not entries:
+            ctk.CTkLabel(body, text="暂无历史记录（分析完成后自动保存）",
+                         text_color="#8fa4b8").pack(pady=18)
+        for meta in entries:
+            saved = time.strftime("%m-%d %H:%M",
+                                  time.localtime(meta.get("saved_at", 0)))
+            src = os.path.basename(meta.get("source", "")) or \
+                meta.get("source", "")
+            text = (f"{saved}  |  {src}  |  "
+                    f"{meta.get('total_lines', 0):,} 行  |  "
+                    f"错误 {meta.get('error_lines', 0):,}  |  "
+                    f"{meta.get('clusters', 0)} 种  |  "
+                    f"{meta.get('rule', '')}")
+            p = self._palette()
+            row = ctk.CTkButton(
+                body, text=text, anchor="w", height=36,
+                fg_color=p["card"], text_color=p["text"],
+                hover_color=p["row_hover"],
+                command=lambda hid=meta.get("id", ""):
+                    self._restore_from_history(hid))
+            row.pack(fill="x", pady=3)
+
+        foot = ctk.CTkFrame(dlg, fg_color="transparent")
+        foot.pack(fill="x", padx=16, pady=(0, 12))
+        ctk.CTkButton(foot, text="关闭", width=90, fg_color="#6b7280",
+                      command=dlg.destroy).pack(side="right", padx=(6, 0))
+        if entries:
+            ctk.CTkButton(foot, text="清空历史", width=90,
+                          fg_color="#8a3a3a",
+                          command=self._clear_history).pack(side="right")
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        dlg.after(60, dlg.focus_set)
+
+    def _restore_from_history(self, hid: str) -> None:
+        """回放历史结果（优化缺陷R100）：完整恢复列表/详情/图表数据。"""
+        result = self._history.load(hid)
+        if result is None:
+            messagebox.showwarning(
+                "分析历史", "该条历史已损坏或版本不兼容，无法回放")
+            return
+        dlg = getattr(self, "_history_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.destroy()
+        self._from_history = True
+        try:
+            self._on_result(result)
+        finally:
+            self._from_history = False
+        # 回放标注（状态栏前缀，区分实时分析结果）
+        self._status_label.configure(
+            text=f"历史回放 · {self._status_label.cget('text')}")
+
+    def _clear_history(self) -> None:
+        """清空全部历史并刷新弹层（优化缺陷R100）。"""
+        self._history.clear()
+        dlg = getattr(self, "_history_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.destroy()
+        self._status_label.configure(text="分析历史已清空")
 
     def _clear_list(self) -> None:
         """清空左侧列表（销毁虚拟模式 / 经典行，恢复经典滚动容器）。"""
