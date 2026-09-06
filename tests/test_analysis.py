@@ -163,7 +163,9 @@ class TestAnomaly:
         assert normal.anomaly == ""
 
     def test_rare_cluster_detected(self):
-        rare = make_cluster(0, "weird one-time glitch", count=1)
+        # 优化缺陷R75：罕见簇与既有簇模板相似（老错误的偶发尾巴）
+        # 才判 rare；不相似的升入 novel（见 TestAnomalyEnhanced）
+        rare = make_cluster(0, "frequent error variant", count=1)
         common = make_cluster(1, "frequent error", count=99)
         result = make_result([rare, common], error_entries=100)
         analyze_clusters(result)
@@ -175,6 +177,99 @@ class TestAnomaly:
         result = make_result([c], error_entries=1)
         analyze_clusters(result)
         assert c.anomaly == ""
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R75：异常检测强化（自持基线爆发 / 周期发作 / 新型错误）
+# ---------------------------------------------------------------------------
+class TestAnomalyEnhanced:
+    @staticmethod
+    def _instances(cluster, timestamps):
+        from log_ai_compressor.core.models import ClusterInstance
+        cluster.instances = [
+            ClusterInstance(timestamp=t, line_no=i + 1)
+            for i, t in enumerate(timestamps)
+        ]
+
+    def test_own_baseline_burst_without_global_burst(self):
+        """全局平稳但单簇自身陡增 → 自持基线通道判 burst（原全局通道漏报）。"""
+        t0 = 1704067200.0
+        c = make_cluster(0, "spiking error", count=70, first_seen=t0)
+        # 簇直方图：前 60 桶各 1 次，第 61 桶突增 10 次
+        for i in range(60):
+            c.hist.add(t0 + i)
+        for _ in range(10):
+            c.hist.add(t0 + 60.0)
+        # 全局直方图完全平稳（每秒 1 个）→ 无全局爆发窗口
+        flat = [t0 + i for i in range(100)]
+        result = make_result([c], global_adds=flat)
+        analyze_clusters(result)
+        assert c.anomaly == "burst", "自持基线爆发应命中（全局通道未命中）"
+
+    def test_own_baseline_quiet_when_uniform(self):
+        """簇内频次均匀 → 不误报自持基线爆发。"""
+        t0 = 1704067200.0
+        c = make_cluster(0, "steady error", count=60, first_seen=t0)
+        for i in range(60):
+            c.hist.add(t0 + i)
+        result = make_result([c], global_adds=[t0 + i for i in range(100)])
+        analyze_clusters(result)
+        assert c.anomaly == ""
+
+    def test_periodic_detected(self):
+        """定时间隔报错（变异系数≈0）→ periodic（周期发作）。"""
+        c = make_cluster(0, "watchdog keepalive failed", count=5,
+                         first_seen=100.0)
+        self._instances(c, [100.0, 130.0, 160.0, 190.0, 220.0])
+        result = make_result([c], error_entries=5)
+        analyze_clusters(result)
+        assert c.anomaly == "periodic"
+
+    def test_periodic_not_flagged_when_irregular(self):
+        """间隔忽长忽短 → 不判周期。"""
+        c = make_cluster(0, "random failure", count=5, first_seen=100.0)
+        self._instances(c, [100.0, 103.0, 190.0, 191.0, 400.0])
+        result = make_result([c], error_entries=5)
+        analyze_clusters(result)
+        assert c.anomaly == ""
+
+    def test_periodic_needs_min_samples(self):
+        """时间戳样本 <4 → 不判周期。"""
+        c = make_cluster(0, "few beats", count=3, first_seen=100.0)
+        self._instances(c, [100.0, 130.0, 160.0])
+        result = make_result([c], error_entries=3)
+        analyze_clusters(result)
+        assert c.anomaly == ""
+
+    def test_novel_detected_for_dissimilar_rare(self):
+        """罕见且与既有簇模板不相似 → novel（新型错误）。"""
+        common = make_cluster(0, "connection refused timeout error", count=10)
+        rare_new = make_cluster(1, "zqx blorptastic quantumflux failure",
+                                count=1)
+        result = make_result([common, rare_new], error_entries=11)
+        analyze_clusters(result)
+        assert rare_new.anomaly == "novel"
+
+    def test_rare_kept_for_similar_rare(self):
+        """罕见但与既有簇相似（老错误的偶发尾巴）→ 仍判 rare 不判 novel。"""
+        common = make_cluster(0, "connection refused timeout error", count=10)
+        rare_tail = make_cluster(1, "connection refused error again", count=1)
+        result = make_result([common, rare_tail], error_entries=11)
+        analyze_clusters(result)
+        assert rare_tail.anomaly == "rare"
+
+    def test_burst_precedes_periodic(self):
+        """优先级递降：既是周期又有自持爆发 → burst 优先。"""
+        t0 = 1704067200.0
+        c = make_cluster(0, "periodic spiker", count=70, first_seen=t0)
+        self._instances(c, [t0, t0 + 30, t0 + 60, t0 + 90, t0 + 120])
+        for i in range(60):
+            c.hist.add(t0 + i)
+        for _ in range(10):
+            c.hist.add(t0 + 60.0)
+        result = make_result([c], global_adds=[t0 + i for i in range(100)])
+        analyze_clusters(result)
+        assert c.anomaly == "burst", "爆发应优先于周期标注"
 
 
 # ---------------------------------------------------------------------------

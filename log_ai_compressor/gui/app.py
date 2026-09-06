@@ -96,7 +96,8 @@ RULE_DISPLAY = {
     "jenkins": "CI构建 jenkins",
 }
 _RULE_BY_DISPLAY = {v: k for k, v in RULE_DISPLAY.items()}
-_ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常"}
+_ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常",
+                   "periodic": "周期发作", "novel": "新型错误"}
 
 # 优化：五个级别复选框旁的 ⓘ 悬停说明（每个级别对应自己的解释）
 _LEVEL_HELP = {
@@ -116,10 +117,12 @@ _LEVEL_HELP = {
 FONT_SIZE_OPTIONS = ("小", "中", "大", "特大")
 FONT_SIZE_SCALE = {"小": 0.85, "中": 1.0, "大": 1.15, "特大": 1.3}
 
-# 错误行智能图标：▲ 根因 / ● 爆发 / ○ 稀有 / • 普通
+# 错误行智能图标：▲ 根因 / ● 爆发 / ◔ 周期 / ◆ 新型 / ○ 稀有 / • 普通
 # 修复缺陷R40：◆ 致命图标随 FATAL 级别删除移除；五级别五色
 # + 根因紫（与级别色区分，一眼区分严重程度）
+# 优化缺陷R75：新增 ◔ 周期发作 / ◆ 新型错误（异常检测强化产出）
 _CLUSTER_ICON = {"root": "\u25b2", "burst": "\u25cf",
+                 "periodic": "\u25d4", "novel": "\u25c6",
                  "rare": "\u25cb", "normal": "\u2022"}
 _LEVEL_COLORS = {
     "ERROR": "#ff5252",   # 红
@@ -4860,10 +4863,10 @@ class LogCompressorApp(_make_app_base()):
         """
         if cluster.is_root_cause:
             icon = _CLUSTER_ICON["root"]
-        elif cluster.anomaly == "burst":
-            icon = _CLUSTER_ICON["burst"]
-        elif cluster.anomaly == "rare":
-            icon = _CLUSTER_ICON["rare"]
+        elif cluster.anomaly in _CLUSTER_ICON and cluster.anomaly != "normal":
+            # 优化缺陷R75：burst/periodic/novel/rare 统一查表
+            # （优先级递降由 _mark_anomalies 保证单值）
+            icon = _CLUSTER_ICON[cluster.anomaly]
         else:
             icon = _CLUSTER_ICON["normal"]
         module = f"  {cluster.module}" if cluster.module else ""

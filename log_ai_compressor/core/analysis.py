@@ -42,6 +42,12 @@ BURST_WINDOW_SEC = 60.0        # 时间连锁判定窗口（秒）
 BURST_SIGMA = 3.0              # 集中爆发判定阈值（均值 + N 倍标准差）
 RARE_MIN_TOTAL = 10            # 触发罕见异常判定的最小错误总量
 STRONG_KEYWORD_SCORE = 3       # 强根因关键词命中数阈值
+# 优化缺陷R75：异常检测强化参数（自持基线爆发 / 周期发作 / 新型错误）
+OWN_BASELINE_MIN_BUCKETS = 3   # 自持基线：簇内直方图最少桶数
+OWN_BASELINE_MIN_PEAK = 5      # 自持基线：峰值桶最小计数（防小样本虚报）
+PERIODIC_MIN_SAMPLES = 4       # 周期发作：最少时间戳样本数
+PERIODIC_MAX_CV = 0.10         # 周期发作：间隔变异系数上限（越小越规律）
+NOVEL_JACCARD_MAX = 0.5        # 新型错误：与既有簇模板相似度上限
 
 # 关键因果行（降噪时永不折叠）
 _CAUSED_BY_RE = re.compile(r"^\s*Caused by\s*[:：]", re.IGNORECASE)
@@ -116,20 +122,108 @@ def analyze_clusters(result: AnalysisResult) -> float:
 # 异常检测
 # ---------------------------------------------------------------------------
 def _mark_anomalies(clusters: List[ErrorCluster], global_hist, stats: RunStats) -> None:
-    """集中爆发（burst）与罕见异常（rare）标注。"""
+    """集中爆发 / 周期发作 / 新型错误 / 罕见异常 标注（优先级递降）。
+
+    优化缺陷R75：异常检测强化 ——
+    - burst 双通道：全局爆发窗口命中【或】簇自持基线爆发（与自身
+      历史比，全局平稳但单簇陡增不再漏报）；
+    - 新增 periodic：实例间隔变异系数 ≤0.10（定时任务/心跳失败的
+      指纹，此前完全不可见）；
+    - 新增 novel：罕见且与既有所有簇模板 Jaccard <0.5（从没见过
+      的错，比"老错误的偶发尾巴"含金量高）。
+    """
     bursts = global_hist.burst_buckets(k=BURST_SIGMA)
     burst_ranges = [(t, t + global_hist.width) for t, _ in bursts]
     total = stats.error_entries
+    token_sets = {id(c): _tokens(c.message_template or c.summary)
+                  for c in clusters}
 
     for c in clusters:
         peak_t: Optional[float] = None
         if c.hist.total:
             series = c.hist.series()
             peak_t = max(series, key=lambda x: x[1])[0]
-        if peak_t is not None and any(a <= peak_t < b for a, b in burst_ranges):
+        global_burst = (peak_t is not None
+                        and any(a <= peak_t < b for a, b in burst_ranges))
+        if global_burst or _own_baseline_burst(c):
             c.anomaly = "burst"
+        elif _is_periodic(c):
+            c.anomaly = "periodic"
         elif total >= RARE_MIN_TOTAL and c.count <= 1:
-            c.anomaly = "rare"
+            # 罕见再细分：与既有簇不相似 = 新型错误，相似 = 普通罕见
+            c.anomaly = ("novel" if _is_novel(c, clusters, token_sets)
+                         else "rare")
+
+
+def _own_baseline_burst(c: ErrorCluster) -> bool:
+    """簇自持基线爆发：峰值桶超过自身 中位数+3×MAD 且 ≥2 倍基线。
+
+    优化缺陷R75：与全局检测互补 —— 全局直方图被大量其他错误稀释
+    时，单簇自身从 2 次/桶陡增到 20 次/桶 的局部爆发照样可抓。
+    MAD=0（基线完全平稳）时阈值退化为 2×中位数 + 峰值下限。
+    """
+    import statistics
+
+    series = c.hist.series()
+    if len(series) < OWN_BASELINE_MIN_BUCKETS:
+        return False
+    counts = [cnt for _, cnt in series]
+    peak = max(counts)
+    if peak < OWN_BASELINE_MIN_PEAK:
+        return False
+    median = statistics.median(counts)
+    mad = statistics.median(abs(x - median) for x in counts)
+    threshold = max(median + 3.0 * 1.4826 * mad, 2.0 * median)
+    return peak > threshold
+
+
+def _is_periodic(c: ErrorCluster) -> bool:
+    """周期发作：实例间隔变异系数（标准差/均值）≤ 阈值。
+
+    优化缺陷R75：定时任务/心跳/看门狗失败的指纹特征 —— 每隔固定
+    间隔准时报错；间隔样本取实例时间戳（内存有界：详实实例 +
+    元数据实例均带时间戳，与出现总次数无关）。
+    """
+    ts = sorted(i.timestamp for i in c.instances
+                if i.timestamp is not None)
+    if len(ts) < PERIODIC_MIN_SAMPLES:
+        return False
+    deltas = [b - a for a, b in zip(ts, ts[1:]) if b - a > 1e-3]
+    if len(deltas) < PERIODIC_MIN_SAMPLES - 1:
+        return False
+    mean = sum(deltas) / len(deltas)
+    var = sum((d - mean) ** 2 for d in deltas) / len(deltas)
+    return math.sqrt(var) / mean <= PERIODIC_MAX_CV
+
+
+_TOKEN_RE = re.compile(r"[a-zA-Z_]{3,}|[一-鿿]{2,}")
+
+
+def _tokens(text: str) -> set:
+    """模板词集（Jaccard 相似度用；英文/数字词 ≥3 字符，中文 ≥2 字）。"""
+    return set(_TOKEN_RE.findall((text or "").lower()))
+
+
+def _is_novel(c: ErrorCluster, clusters: List[ErrorCluster],
+              token_sets: dict) -> bool:
+    """新型错误：与既有所有簇的模板词集 Jaccard 相似度 < 上限。
+
+    优化缺陷R75：Datadog Content Anomaly 同款思路（内容级相异而
+    非量级异常）；仅对罕见簇调用（数量有界，O(罕见簇×总簇)）。
+    """
+    mine = token_sets.get(id(c)) or set()
+    if not mine:
+        return False
+    for o in clusters:
+        if o is c:
+            continue
+        other = token_sets.get(id(o)) or set()
+        if not other:
+            continue
+        jaccard = len(mine & other) / max(1, len(mine | other))
+        if jaccard >= NOVEL_JACCARD_MAX:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
