@@ -3196,6 +3196,81 @@ class TestMainWindowSearch:
         pads = [int(cb.grid_info()["padx"][1]) for cb in cbs[:4]]
         assert pads == [0, 0, 0, 0], "目标线过左时间距 padx 应触底 0"
 
+    def test_filter_row_group_gaps_equal(self, app):
+        """修复缺陷R81：三个组间可视区间完全相等（静态 padx 补偿）。
+
+        两层验证：
+        1) 真实行构造锚点 —— 三组首左 padx 为 (19,24,24)、输入框右
+           padx 0、列 5 弹性权重已废（区间不再随窗口漂移）；
+        2) 复刻行实测 —— 同款 CTk 控件 + 相同 padx + R74 紧凑宽
+           复选框（尾距恒 4 逻辑 px），在本机 DPI 下量三个内容级
+           区间（前组内容右缘 → 组首标签文本左缘）应完全相等。
+           （真实行整行 reqw 随 R74 对齐机制填满可用宽，高 DPI
+           下必超屏触发窗口钳制、混合量测历元不可信 —— 故用复刻
+           行验证补偿数学；复刻行无 R74/after_idle 链，确定性结算）
+        """
+        panel = app._ctx_entry.master
+        scale = max(1.0, getattr(app, "_font_scale", 1.0))
+        # 1) 真实行构造锚点（grid_info 的 padx 为 Tk 物理 px ——
+        # 创建时已经 CTk 按 DPI 缩放，须乘 scale 比对）
+        pads = [panel.grid_slaves(row=0, column=c)[0].grid_info()["padx"]
+                for c in (2, 6, 8)]
+        pads = [tuple(int(v) for v in p) for p in pads]
+        s2 = int(round(2 * scale))
+        expected = [(int(round(19 * scale)), s2),
+                    (int(round(24 * scale)), s2),
+                    (int(round(24 * scale)), s2)]
+        assert pads == expected, \
+            f"组首左 padx 应为补偿值 (19,24,24)×scale（实测 {pads}）"
+        entry_pad = tuple(int(v) for v in
+                          app._ctx_entry.grid_info()["padx"])
+        assert entry_pad[1] == 0, "输入框右 padx 应为 0（区间由组首承担）"
+        col5 = panel.grid_columnconfigure(5)
+        assert int(col5["weight"]) == 0 and int(col5["minsize"]) == 0, \
+            "列 5 弹性权重/minsize 应已废止"
+
+        # 2) 复刻行实测（与真实行同控件类、同 padx、同 DPI）
+        import customtkinter as ctk
+        import tkinter.font as tkfont
+        top = ctk.CTkToplevel(app)
+        top.geometry("1600x200")
+        f = ctk.CTkFrame(top)
+        f.pack(padx=10, pady=10)
+        # DEBUG 复选框（R74 紧凑宽公式：文本实测宽 + 28，尾距恒 4）
+        cb = ctk.CTkCheckBox(f, text="DEBUG",
+                             checkbox_width=18, checkbox_height=18)
+        tw = tkfont.Font(font=cb._text_label.cget("font")).measure("DEBUG")
+        cb.configure(width=int(tw / scale + 0.999) + 28)
+        cb.grid(row=0, column=0, padx=(1, 0), sticky="w")
+        ctk.CTkLabel(f, text="智能分析").grid(row=0, column=1,
+                                              padx=(19, 2), sticky="w")
+        info = ctk.CTkLabel(f, text="ⓘ",
+                            font=ctk.CTkFont(size=13, weight="bold"))
+        info.grid(row=0, column=2, padx=(4, 0), sticky="w")
+        ctk.CTkLabel(f, text="上下文行数").grid(row=0, column=3,
+                                                padx=(24, 2), sticky="w")
+        entry = ctk.CTkEntry(f, width=60)
+        entry.grid(row=0, column=4, padx=(2, 0), sticky="w")
+        ctk.CTkLabel(f, text="解析规则").grid(row=0, column=5,
+                                              padx=(24, 2), sticky="w")
+        top.update()
+        top.update_idletasks()
+
+        # CTk 6 标签无横向内边距（实测 2x 下文本宽==控件宽），文本
+        # 边即控件边 —— 全程 winfo 物理几何直读，零字体/缩放换算，
+        # 任何 DPI/显示器落点下自洽
+        heads = [f.grid_slaves(row=0, column=c)[0] for c in (1, 3, 5)]
+        tl = cb._text_label
+        left1 = cb.winfo_x() + tl.winfo_x() + tl.winfo_reqwidth()
+        left2 = info.winfo_x() + info.winfo_width()
+        left3 = entry.winfo_x() + entry.winfo_width()
+        gaps = [h.winfo_x() - l for h, l in zip(heads, (left1, left2, left3))]
+        top.destroy()
+        # 复选框尾距含文本宽向上取整残差 δ∈[0,1) 逻辑 px（×scale 物理）
+        tol = max(2, int(round(scale)))
+        assert max(gaps) - min(gaps) <= tol, \
+            f"复刻行三个组间区间应完全相等（实测 {gaps}，容差 {tol}）"
+
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
         _run_paste_analysis(app, self._two_cluster_log())
@@ -4459,6 +4534,31 @@ class TestAnalyzeModeSelector:
         info = app._analyze_menu.grid_info()
         assert str(info["row"]) == "0"
         assert str(info["column"]) == "3"
+
+    def test_menu_width_fixed_across_modes(self, app):
+        """修复缺陷R82：三模式切换下拉框定宽不变、最长文本不裁切。
+
+        dynamic_resizing 默认 True 时框宽随当前选项文本伸缩（切
+        「深度扫描」后明显变窄）；解析规则下拉同缺陷一并修复。
+        """
+        app.geometry("1600x900")
+        app.update()
+        w0 = app._analyze_menu.winfo_width()
+        for name in ("深度扫描", "快速聚类", "完整分析（推荐）"):
+            app._on_analyze_changed(name)
+            app.update()
+            assert app._analyze_menu.winfo_width() == w0, \
+                f"切到「{name}」后框宽应恒定" \
+                f"（{app._analyze_menu.winfo_width()} vs {w0}）"
+            assert app._analyze_menu.winfo_reqwidth() <= w0 + 2, \
+                f"「{name}」文本不得裁切"
+        # 解析规则下拉同款定宽（同缺陷一并修复）
+        rw0 = app._rule_menu.winfo_width()
+        app._on_rule_changed("通用 generic")
+        app.update()
+        assert app._rule_menu.winfo_width() == rw0, \
+            f"解析规则下拉切「通用 generic」后框宽应恒定" \
+            f"（{app._rule_menu.winfo_width()} vs {rw0}）"
 
     def test_fast_mode_marks_detail_unexecuted(self, app):
         """fast 模式分析后：详情智能分析区显示「未执行」。"""
