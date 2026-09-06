@@ -4365,6 +4365,49 @@ class TestCharts:
         finally:
             self._close(app)
 
+    def test_brush_time_range_clamped(self, app):
+        """优化缺陷R104：刷选索引→时间范围换算（越界钳制到序列内）。"""
+        panel = self._open_charts(app)
+        try:
+            series = panel._trend_series
+            assert series, "趋势页应有序列数据"
+            w = app._result.global_hist.width
+            t0, t1, s0, s1 = panel._brush_time_range(-5, 999)
+            assert t0 == series[0][0]
+            assert t1 == series[-1][0] + w
+            assert s0 == series[0][0] and s1 == series[-1][0] + w
+        finally:
+            self._close(app)
+
+    def test_brush_release_click_clears_span(self, app):
+        """优化缺陷R104：位移 <0.5 的松开视为单击清除选区，不弹窗。"""
+        panel = self._open_charts(app)
+        try:
+            panel._brush_start = 3.0
+            panel._on_brush_release(SimpleNamespace(xdata=3.2,
+                                                    inaxes=panel._ax))
+            assert panel._brush_start is None
+            assert panel._brush_span is None
+            assert not (getattr(panel, "_win_cmp_dlg", None)
+                        and panel._win_cmp_dlg.winfo_exists())
+        finally:
+            self._close(app)
+
+    def test_window_compare_popup_opens(self, app):
+        """优化缺陷R104：拖拽松开弹出显著突增窗（无显著也给空态）。"""
+        panel = self._open_charts(app)
+        try:
+            panel._brush_start = 0.0
+            n = len(panel._trend_series)
+            panel._on_brush_release(SimpleNamespace(xdata=n - 1,
+                                                    inaxes=panel._ax))
+            app.update()
+            dlg = getattr(panel, "_win_cmp_dlg", None)
+            assert dlg is not None and dlg.winfo_exists()
+            dlg.destroy()
+        finally:
+            self._close(app)
+
     def test_pick_scrolls_lifts_and_clears_keyword(self, app, monkeypatch):
         """修复缺陷R65：条形点击全链路 —— 滚入视口 + 主窗口前置 +
         遮挡目标簇的搜索关键字自动清空（原仅染蓝：视口外/窗口被

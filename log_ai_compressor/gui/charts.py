@@ -91,6 +91,14 @@ class ChartsPanel:
         self.canvas.get_tk_widget().pack(fill="both", expand=True,
                                          padx=4, pady=4)
         self.canvas.mpl_connect("pick_event", self._on_pick)
+        # 优化缺陷R104：时间趋势图刷选故障窗口（拖拽选段 → 显著突增）
+        self.canvas.mpl_connect("button_press_event", self._on_brush_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_brush_move)
+        self.canvas.mpl_connect("button_release_event",
+                                self._on_brush_release)
+        self._brush_start: Optional[float] = None
+        self._brush_span = None
+        self._trend_series: list = []        # 当前趋势图 [(bucket_t, n)]
         self._ax = None
         self._tab = None
         self._show_tab(self.TABS[0])
@@ -103,6 +111,8 @@ class ChartsPanel:
         """切换分页：清图重建单轴大图（画布复用，无重复建窗开销）。"""
         self._tab = name
         self.figure.clear()
+        # 优化缺陷R104：切走趋势页即失效旧序列（刷选只在趋势页生效）
+        self._trend_series = []
         self._ax = self.figure.add_subplot(111)
         self._style_axes(self._ax)
         if name == "时间趋势":
@@ -131,7 +141,10 @@ class ChartsPanel:
     def _draw_trend(self, ax) -> None:
         """错误时间趋势折线图（单位时间错误数）+ 爆发点标注。"""
         series = self._result.global_hist.series()
-        ax.set_title("错误时间趋势")
+        self._trend_series = series
+        self._brush_start = None
+        self._brush_span = None
+        ax.set_title("错误时间趋势（按住拖拽刷选故障窗口 → 显著突增分析）")
         if not series:
             ax.text(0.5, 0.5, "无时间戳数据", ha="center", va="center",
                     color="#9e9e9e", fontsize=12, transform=ax.transAxes)
@@ -223,6 +236,101 @@ class ChartsPanel:
                         xytext=(3, 0), textcoords="offset points",
                         va="center", fontsize=9, color="#e0e0e0")
         ax.grid(axis="x", color="#3a3a40", linewidth=0.6)
+
+    # ------------------------------------------------------------------
+    # 优化缺陷R104：趋势图刷选故障窗口 → 窗口 vs 全量基线显著突增
+    # ------------------------------------------------------------------
+    def _on_brush_press(self, event) -> None:
+        """按下起点（仅趋势页、坐标落在轴区内才进入刷选态）。"""
+        if self._tab != "时间趋势" or not self._trend_series:
+            return
+        if event.inaxes is not self._ax or event.xdata is None:
+            return
+        self._brush_start = event.xdata
+
+    def _on_brush_move(self, event) -> None:
+        """拖动中：蓝色半透明选区跟随（先删旧 span 再画新的）。"""
+        if self._brush_start is None:
+            return
+        if event.inaxes is not self._ax or event.xdata is None:
+            return
+        if self._brush_span is not None:
+            self._brush_span.remove()
+        self._brush_span = self._ax.axvspan(
+            self._brush_start, event.xdata, color="#3B82F6", alpha=0.25)
+        self.canvas.draw_idle()
+
+    def _on_brush_release(self, event) -> None:
+        """松开：选区定案 → 显著突增弹层；位移过小视为点击（清除）。"""
+        if self._brush_start is None:
+            return
+        x0, self._brush_start = self._brush_start, None
+        x1 = event.xdata if event.xdata is not None else x0
+        if abs(x1 - x0) < 0.5:               # 单击：清除选区
+            if self._brush_span is not None:
+                self._brush_span.remove()
+                self._brush_span = None
+                self.canvas.draw_idle()
+            return
+        t0, t1, s0, s1 = self._brush_time_range(x0, x1)
+        self._open_window_compare(t0, t1, s0, s1)
+
+    def _brush_time_range(self, x0: float, x1: float):
+        """选区索引 → 时间范围（桶起始时刻 + 桶宽），钳制到序列内。"""
+        series = self._trend_series
+        n = len(series)
+        i0 = max(0, min(n - 1, int(round(min(x0, x1)))))
+        i1 = max(0, min(n - 1, int(round(max(x0, x1)))))
+        w = self._result.global_hist.width
+        t0, t1 = series[i0][0], series[i1][0] + w
+        s0, s1 = series[0][0], series[-1][0] + w
+        return t0, t1, s0, s1
+
+    def _open_window_compare(self, t0: float, t1: float,
+                             s0: float, s1: float) -> None:
+        """显著突增结果弹层：Poisson z Top 簇，点击定位主列表。"""
+        from log_ai_compressor.core.analysis import significant_in_window
+        hits = significant_in_window(self._result.clusters, t0, t1, s0, s1)
+        old = getattr(self, "_win_cmp_dlg", None)
+        if old is not None and old.winfo_exists():
+            old.destroy()
+        dlg = ctk.CTkToplevel(self._body.winfo_toplevel())
+        self._win_cmp_dlg = dlg
+        dlg.title("故障窗口显著突增")
+        dlg.transient(self._body.winfo_toplevel())
+        rows = max(1, min(len(hits), 10))
+        w, h = 680, min(460, 130 + 44 * rows)
+        dlg.geometry(f"{w}x{h}")
+        ctk.CTkLabel(
+            dlg,
+            text=f"窗口 {_fmt_time(t0)} ~ {_fmt_time(t1)} | 显著突增 "
+                 f"{len(hits)} 种（Poisson z≥2，相对全量基线，"
+                 f"按已记录实例统计）",
+            font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=16, pady=(12, 4))
+        body = ctk.CTkScrollableFrame(dlg)
+        body.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        if not hits:
+            ctk.CTkLabel(
+                body, text="窗口内无显著突增的错误"
+                           "（各类错误密度与全量基线一致）",
+                text_color="#8fa4b8").pack(pady=18)
+        for c, w_cnt, z in hits[:10]:
+            text = (f"z={z:5.1f}  |  窗口内 {w_cnt} 次 / 共 {c.count} 次"
+                    f"  |  {c.summary[:50]}")
+            row = ctk.CTkButton(
+                body, text=text, anchor="w", height=34,
+                fg_color="#334155", hover_color="#3B82F6",
+                command=lambda cid=c.cluster_id: self._jump_cluster(cid))
+            row.pack(fill="x", pady=2)
+        ctk.CTkButton(dlg, text="关闭", width=90, fg_color="#6b7280",
+                      command=dlg.destroy).pack(pady=(0, 12))
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+    def _jump_cluster(self, cluster_id: int) -> None:
+        """突增结果行点击 → 主列表定位（复用 R63 图表联动回调）。"""
+        if self._on_cluster:
+            self._on_cluster(str(cluster_id))
 
     # ------------------------------------------------------------------
     def _on_pick(self, event) -> None:
