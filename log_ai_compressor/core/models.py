@@ -209,7 +209,7 @@ class ErrorCluster:
     # ---- 智能分析结果（analysis 模块填充）----
     is_root_cause: bool = False
     root_cause_reason: str = ""
-    anomaly: str = ""                    # 'burst' / 'rare' / ''
+    anomaly: str = ""                    # 'burst'/'periodic'/'novel'/'rare'/''
     priority: float = 0.0
 
     @property

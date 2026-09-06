@@ -23,7 +23,9 @@ from log_ai_compressor.core.models import (
     format_timestamp,
 )
 
-_ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常", "": ""}
+# 优化缺陷R75：新增 周期发作/新型错误（异常检测强化产出）
+_ANOMALY_LABELS = {"burst": "集中爆发", "rare": "罕见异常",
+                   "periodic": "周期发作", "novel": "新型错误", "": ""}
 
 # 优化缺陷R58：导出内容板块（选项对话框勾选 → 各格式按板块生成）
 SECTIONS_ALL = ("overview", "list", "detail", "instances")
