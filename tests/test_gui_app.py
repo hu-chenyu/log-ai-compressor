@@ -4678,6 +4678,34 @@ class TestAdvancedPanel:
         assert "database" in app._result.clusters[0].summary
         assert "排除[heartbeat]" in str(app._status_label.cget("text"))
 
+    def test_advanced_row_gaps_equal_and_right_aligned(self, app):
+        """优化缺陷R98：高级行四个组间可视区间恒等（ⓘ 列均分剩余
+        宽），且重置按钮右缘与上排排除关键词输入框右缘对齐。"""
+        app.geometry("2200x900")
+        app.update()
+        app.update_idletasks()
+        ap = app._advanced_panel
+        for col in (4, 7, 10, 13):
+            cfg = ap.grid_columnconfigure(col)
+            assert int(cfg["weight"]) == 1 and cfg["uniform"] == "adv_gap"
+        # 四个组间区间：上组 ⓘ 右缘 → 下组标签文本左缘
+        infos = [ap.grid_slaves(row=0, column=c)[0] for c in (4, 7, 10, 13)]
+        heads = [ap.grid_slaves(row=0, column=c)[0]
+                 for c in (5, 8, 11, 14)]
+        gaps = [h.winfo_x() - (i.winfo_x() + i.winfo_width())
+                for h, i in zip(heads, infos)]
+        scale = max(1.0, getattr(app, "_font_scale", 1.0))
+        tol = max(2, int(round(2 * scale)))
+        assert max(gaps) - min(gaps) <= tol, \
+            f"四个组间区间应恒等（实测 {gaps}，容差 {tol}）"
+        # 重置右缘 vs 排除关键词输入框右缘（两面板同右边距 12）
+        reset_right = (app._reset_btn.winfo_rootx()
+                       + app._reset_btn.winfo_width())
+        excl_right = (app._exclude_entry.winfo_rootx()
+                      + app._exclude_entry.winfo_width())
+        assert abs(reset_right - excl_right) <= 2, \
+            f"重置右缘 {reset_right} 应对齐排除框右缘 {excl_right}"
+
     def test_reset_button_restores_defaults(self, app):
         """优化缺陷R95：↺ 一键重置 —— 数据类前置项清空/回默认，
         偏好项（级别/上下文行数/相似度/脱敏）不动。"""
