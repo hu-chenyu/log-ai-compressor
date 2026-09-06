@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from log_ai_compressor.core.analysis import (
     analyze_clusters,
+    cooccurring_clusters,
     simplify_stack,
 )
 from log_ai_compressor.core.models import (
     AnalysisResult,
+    ClusterInstance,
     ClusterSample,
     ErrorCluster,
     LogEntry,
@@ -39,6 +41,53 @@ def make_result(clusters, error_entries=None, global_adds=()):
         error_entries = sum(c.count for c in clusters)
     stats = RunStats(error_entries=error_entries)
     return AnalysisResult(stats=stats, clusters=clusters, global_hist=gh)
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R102：错误共现分析
+# ---------------------------------------------------------------------------
+class TestCooccurrence:
+    def test_time_window_cooccurrence(self):
+        """两簇实例在同一 60s 窗口反复同现，识别为共现。"""
+        a = make_cluster(0, "connection refused", count=3)
+        a.instances = [
+            ClusterInstance(timestamp=100.0, line_no=10, summary="a"),
+            ClusterInstance(timestamp=130.0, line_no=20, summary="a"),
+        ]
+        b = make_cluster(1, "request failed", count=3)
+        b.instances = [
+            ClusterInstance(timestamp=105.0, line_no=15, summary="b"),
+            ClusterInstance(timestamp=135.0, line_no=25, summary="b"),
+        ]
+        c = make_cluster(2, "heartbeat ok", count=1)
+        c.instances = [ClusterInstance(timestamp=500.0, line_no=500,
+                                       summary="c")]
+        result = cooccurring_clusters(a, [a, b, c])
+        assert len(result) == 1
+        assert result[0][0].cluster_id == 1
+        assert result[0][1] == 4          # a2 × b2 = 4 次同窗
+
+    def test_line_window_fallback(self):
+        """无时间戳时按行距窗口判定共现。"""
+        a = make_cluster(0, "a", count=2)
+        a.instances = [ClusterInstance(line_no=10, summary="a"),
+                       ClusterInstance(line_no=80, summary="a")]
+        b = make_cluster(1, "b", count=2)
+        b.instances = [ClusterInstance(line_no=12, summary="b"),
+                       ClusterInstance(line_no=85, summary="b")]
+        c = make_cluster(2, "c", count=1)
+        c.instances = [ClusterInstance(line_no=1000, summary="c")]
+        result = cooccurring_clusters(a, [a, b, c], min_hits=2)
+        assert len(result) == 1
+        assert result[0][0].cluster_id == 1
+
+    def test_below_threshold_no_cooccurrence(self):
+        """同现次数不足 min_hits 时不报。"""
+        a = make_cluster(0, "a")
+        a.instances = [ClusterInstance(timestamp=100.0, summary="a")]
+        b = make_cluster(1, "b")
+        b.instances = [ClusterInstance(timestamp=105.0, summary="b")]
+        assert cooccurring_clusters(a, [a, b], min_hits=2) == []
 
 
 # ---------------------------------------------------------------------------

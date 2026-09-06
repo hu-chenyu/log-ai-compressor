@@ -34,7 +34,7 @@ from log_ai_compressor.constants import (
     DEFAULT_SELECTED_LEVELS,
     HUMAN_NAME,
 )
-from log_ai_compressor.core.analysis import simplify_stack
+from log_ai_compressor.core.analysis import cooccurring_clusters, simplify_stack
 from log_ai_compressor.core.clustering import extract_variable_distribution
 from log_ai_compressor.core.comparator import CompareResult, compare_files
 from log_ai_compressor.core.models import (
@@ -5435,6 +5435,15 @@ class LogCompressorApp(_make_app_base()):
             if rels:
                 meta(f"【相关簇】" + "、".join(rels[:3])
                      + ("…" if len(rels) > 3 else "") + "（模板相似 ≥80%）")
+        # 优化缺陷R102：错误共现（±60s/±100行 同窗反复同现 ≥2 次的
+        # 簇 —— "一起炸"直指同一根因，与"长得像"的相关簇互补）
+        if self._result is not None and cluster.instances:
+            coocs = cooccurring_clusters(cluster, self._result.clusters)
+            if coocs:
+                parts = [f"{c.summary[:20]}（同窗 {n} 次）"
+                         for c, n in coocs[:3]]
+                meta("【共现】常一起出现：" + "、".join(parts)
+                     + ("…" if len(coocs) > 3 else ""))
         # 优化缺陷R101：变量分布（模板槽位实际取值 Top3，如
         # 「数值: 93495 ×3」—— 一眼看清同一错误的哪部分在变）
         var_msgs = []
