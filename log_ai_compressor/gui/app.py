@@ -5263,6 +5263,18 @@ class LogCompressorApp(_make_app_base()):
         if cluster.anomaly:
             notes.append(f"异常：{_ANOMALY_LABELS.get(cluster.anomaly, cluster.anomaly)}")
         meta(("【智能分析】" + "；".join(notes)) if notes else "【智能分析】无特殊标记")
+        # 优化缺陷R78：根因传播链（因果图叙事）与相关簇（模板相似）
+        if cluster.root_timeline:
+            meta(f"【传播链】{cluster.root_timeline}")
+        if cluster.related_clusters:
+            _by_id = {c.cluster_id: c
+                      for c in (self._result.clusters
+                                if self._result else [])}
+            rels = [_by_id[i].summary[:20]
+                    for i in cluster.related_clusters if i in _by_id]
+            if rels:
+                meta(f"【相关簇】" + "、".join(rels[:3])
+                     + ("…" if len(rels) > 3 else "") + "（模板相似 ≥80%）")
 
         sample = cluster.sample
         if sample is None:
