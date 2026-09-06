@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import copy
 import json
+import pickle
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -87,3 +89,96 @@ class ConfigStore:
     def reset(self) -> bool:
         """恢复默认配置。"""
         return self.save(copy.deepcopy(DEFAULT_CONFIG))
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R100：分析历史（最近 N 次结果可回放，重开软件免重跑大文件）
+# ---------------------------------------------------------------------------
+HISTORY_KEEP = 10
+
+
+class HistoryStore:
+    """分析历史存取：结果对象 pickle + index.json 元数据索引。
+
+    - 存储于配置目录 history/ 子目录，最多保留 HISTORY_KEEP 条（超出
+      删最旧，连 pickle 文件一起清）；
+    - pickle 仅加载本应用自己写出的文件（本地桌面场景可信源）；跨
+      版本反序列化失败静默丢弃该条（返回 None，不阻断主流程）；
+    - 一切 IO 异常静默降级（历史是增强功能，永不阻断分析主流程）。
+    """
+
+    def __init__(self, config_path: Optional[Path] = None):
+        base = (Path(config_path).parent if config_path
+                else CONFIG_FILE.parent)
+        self._dir = base / "history"
+        self._index = self._dir / "index.json"
+
+    def _read_index(self) -> list:
+        try:
+            if self._index.is_file():
+                data = json.loads(self._index.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    return [d for d in data if isinstance(d, dict)]
+        except (OSError, ValueError):
+            pass
+        return []
+
+    def _write_index(self, entries: list) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._index.write_text(
+            json.dumps(entries, ensure_ascii=False, indent=1),
+            encoding="utf-8")
+
+    def _remove_file(self, meta: dict) -> None:
+        try:
+            (self._dir / f"{meta.get('id', '')}.pkl").unlink(
+                missing_ok=True)
+        except OSError:
+            pass
+
+    def add(self, result) -> None:
+        """分析完成自动入库（新条目置顶，超出上限删最旧）。"""
+        try:
+            entries = self._read_index()
+            hid = f"{time.time_ns()}"
+            self._dir.mkdir(parents=True, exist_ok=True)
+            with open(self._dir / f"{hid}.pkl", "wb") as fh:
+                pickle.dump(result, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            s = result.stats
+            entries.insert(0, {
+                "id": hid,
+                "saved_at": time.time(),
+                "source": s.source,
+                "total_lines": s.total_lines,
+                "error_lines": s.error_lines,
+                "clusters": len(result.clusters),
+                "rule": s.rule_name,
+            })
+            stale = entries[HISTORY_KEEP:]
+            for meta in stale:
+                self._remove_file(meta)
+            self._write_index(entries[:HISTORY_KEEP])
+        except OSError:
+            pass
+
+    def list(self) -> list:
+        """元数据列表（新→旧）。"""
+        return self._read_index()
+
+    def load(self, hid: str):
+        """按 id 加载完整分析结果（损坏/不兼容返回 None）。"""
+        try:
+            with open(self._dir / f"{hid}.pkl", "rb") as fh:
+                return pickle.load(fh)
+        except Exception:                      # 反序列化失败静默丢弃
+            return None
+
+    def clear(self) -> None:
+        """清空全部历史（索引与 pickle 文件一起删）。"""
+        for meta in self._read_index():
+            self._remove_file(meta)
+        try:
+            self._index.unlink(missing_ok=True)
+        except OSError:
+            pass
+
