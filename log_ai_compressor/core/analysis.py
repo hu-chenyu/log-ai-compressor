@@ -529,6 +529,45 @@ def cooccurring_clusters(
     return results
 
 
+# ---------------------------------------------------------------------------
+# 故障窗口对比（优化缺陷R104：图表弹窗刷选时段 vs 全量基线显著突增）
+# ---------------------------------------------------------------------------
+def significant_in_window(
+        clusters: List[ErrorCluster],
+        win_start: float, win_end: float,
+        span_start: float, span_end: float,
+        min_count: int = 2, min_z: float = 2.0
+) -> List[Tuple[ErrorCluster, int, float]]:
+    """窗口内显著突增的簇（Poisson z-score 相对全量基线）。
+
+    expected = 簇带时间戳实例总数 × 窗口时长占比；
+    z = (窗口内次数 - expected) / √expected —— z 越大说明该错误
+    在窗口内「异常地多」（而非单纯次数多），与 SLS significant_terms
+    同款思路的轻量实现。无时间戳实例不参与（无法定位窗口）。
+
+    返回 [(簇, 窗口内次数, z)] 按 z 降序；窗口与全量无交集返回 []。
+    """
+    span = max(1e-9, span_end - span_start)
+    win = max(0.0, min(win_end, span_end) - max(win_start, span_start))
+    if win <= 0:
+        return []
+    frac = win / span
+    out: List[Tuple[ErrorCluster, int, float]] = []
+    for c in clusters:
+        ts = [i.timestamp for i in c.instances if i.timestamp is not None]
+        if not ts:
+            continue
+        w = sum(1 for t in ts if win_start <= t <= win_end)
+        expected = len(ts) * frac
+        if w < min_count or expected <= 0:
+            continue
+        z = (w - expected) / math.sqrt(expected)
+        if z >= min_z:
+            out.append((c, w, z))
+    out.sort(key=lambda x: x[2], reverse=True)
+    return out
+
+
 def _build_timelines(clusters: List[ErrorCluster], out_edges: dict,
                      by_id: dict) -> None:
     """根因时间线：沿因果图 BFS，生成传播链叙事（仅根因簇有值）。

@@ -5,6 +5,7 @@ from __future__ import annotations
 from log_ai_compressor.core.analysis import (
     analyze_clusters,
     cooccurring_clusters,
+    significant_in_window,
     simplify_stack,
 )
 from log_ai_compressor.core.models import (
@@ -88,6 +89,48 @@ class TestCooccurrence:
         b = make_cluster(1, "b")
         b.instances = [ClusterInstance(timestamp=105.0, summary="b")]
         assert cooccurring_clusters(a, [a, b], min_hits=2) == []
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R104：故障窗口对比（刷选时段 vs 全量基线显著突增）
+# ---------------------------------------------------------------------------
+class TestSignificantInWindow:
+    def test_burst_cluster_significant(self):
+        """窗口内密集爆发的簇显著性置顶，均匀分布的簇不显著。"""
+        # 全量 0~1000s：burst 簇 10 次全在 [400,500]；flat 簇 10 次均匀
+        burst = make_cluster(0, "burst error", count=10)
+        burst.instances = [ClusterInstance(timestamp=400.0 + i * 10,
+                                           line_no=i + 1, summary="b")
+                           for i in range(10)]
+        flat = make_cluster(1, "flat error", count=10)
+        flat.instances = [ClusterInstance(timestamp=i * 100.0,
+                                          line_no=i + 100, summary="f")
+                          for i in range(10)]
+        hits = significant_in_window([burst, flat], 400.0, 500.0,
+                                     0.0, 1000.0)
+        assert [h[0].cluster_id for h in hits] == [0]
+        assert hits[0][1] == 10            # 窗口内次数
+        assert hits[0][2] >= 2.0           # Poisson z
+
+    def test_window_outside_span_empty(self):
+        """窗口与全量无交集 → 空结果。"""
+        c = make_cluster(0, "x", count=2)
+        c.instances = [ClusterInstance(timestamp=10.0, line_no=1),
+                       ClusterInstance(timestamp=20.0, line_no=2)]
+        assert significant_in_window([c], 500.0, 600.0, 0.0, 100.0) == []
+
+    def test_no_timestamp_clusters_skipped(self):
+        """无时间戳实例的簇不参与（无法定位窗口）。"""
+        c = make_cluster(0, "x", count=2)
+        c.instances = [ClusterInstance(line_no=1),
+                       ClusterInstance(line_no=2)]
+        assert significant_in_window([c], 0.0, 50.0, 0.0, 100.0) == []
+
+    def test_min_count_filter(self):
+        """窗口内次数不足 min_count 不报（单次同现不算突增）。"""
+        c = make_cluster(0, "x", count=1)
+        c.instances = [ClusterInstance(timestamp=10.0, line_no=1)]
+        assert significant_in_window([c], 0.0, 50.0, 0.0, 100.0) == []
 
 
 # ---------------------------------------------------------------------------
