@@ -205,6 +205,39 @@ FONT_SIZE_SCALE = {"小": 0.85, "中": 1.0, "大": 1.15, "特大": 1.3}
 _CLUSTER_ICON = {"root": "\u25b2", "burst": "\u25cf",
                  "periodic": "\u25d4", "novel": "\u25c6",
                  "rare": "\u25cb", "normal": "\u2022"}
+
+# 优化缺陷R113：搜索框布尔组合（and/or/not，词边界识别防误切
+# error/android 等内含词；无操作符时退化为普通子串匹配）
+_BOOL_OP_RE = re.compile(r"\b(?:and|or|not)\b", re.IGNORECASE)
+
+
+def _kw_match(hay: str, expr: str) -> bool:
+    """关键字匹配：hay/expr 均已小写；含 and/or/not 时按布尔
+    表达式求值（or 分句 → and 合项 → not 前缀取反），否则子串。"""
+    if not expr:
+        return True
+    if not _BOOL_OP_RE.search(expr):
+        return expr in hay
+    for clause in re.split(r"\bor\b", expr, flags=re.IGNORECASE):
+        ok = True
+        for term in re.split(r"\band\b", clause, flags=re.IGNORECASE):
+            term = term.strip()
+            if not term:
+                continue
+            neg, m = False, re.match(r"not\b\s*", term, re.IGNORECASE)
+            if m:
+                neg, term = True, term[m.end():].strip()
+            hit = bool(term) and term in hay
+            if neg:
+                hit = not hit
+            if not hit:
+                ok = False
+                break
+        if ok:
+            return True
+    return False
+
+
 _LEVEL_COLORS = {
     "ERROR": "#ff5252",   # 红
     "FAIL": "#ff7a45",    # 橙红
@@ -1730,6 +1763,8 @@ class LogCompressorApp(_make_app_base()):
         self._tail_lines: list = []
         self._tail_new_lines = 0
         self._tail_lock = threading.Lock()
+        # 优化缺陷R112：监控新错误提醒基线（上一拍错误条目数）
+        self._tail_prev_errors = 0
         # 优化缺陷R111：已知错误屏蔽（message_template 集合，持久化）
         self._muted = set(self._config.get("muted") or [])
         self._show_muted = False            # 会话态：列表是否显示已屏蔽
@@ -2411,7 +2446,7 @@ class LogCompressorApp(_make_app_base()):
         # 【显示】（摘要/模块/级别/优先级档匹配，不触发重新分析）
         self._search_entry = ctk.CTkEntry(
             panel, textvariable=self._search_var, width=200,
-            placeholder_text="按摘要 / 模块 / 级别过滤列表…")
+            placeholder_text="按摘要/模块/级别过滤，支持 and/or/not…")
         self._search_entry.grid(row=0, column=1, pady=4, sticky="w")
         # 修复缺陷R73：▲/▼ 导航按钮与计数框换位 —— 按钮紧随输入框
         # （与 Enter（下一个）/ Shift+Enter（上一个）同语义），计数
@@ -4605,6 +4640,7 @@ class LogCompressorApp(_make_app_base()):
         self._tail_partial = ""
         self._tail_stop.clear()
         self._tailing = True
+        self._tail_prev_errors = 0      # 优化缺陷R112：提醒基线清零
         self._tail_btn.configure(text="⏹ 停止监控", fg_color="#1f8a4c",
                                  hover_color="#176b3b")
         self._status_label.configure(
@@ -4707,6 +4743,32 @@ class LogCompressorApp(_make_app_base()):
         self._worker = threading.Thread(target=work, daemon=True)
         self._worker.start()
 
+    def _alert_new_errors(self, n: int) -> None:
+        """优化缺陷R112：监控到新错误 —— 提示音 + 任务栏闪烁提醒
+        （窗口未聚焦时才闪，盯着屏幕不打扰）。"""
+        try:
+            self.bell()
+        except tk.TclError:
+            pass
+        try:
+            if self.focus_displayof() is not None:
+                return                            # 已聚焦不闪
+            import ctypes
+
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_uint),
+                            ("hwnd", ctypes.c_void_p),
+                            ("dwFlags", ctypes.c_uint),
+                            ("uCount", ctypes.c_uint),
+                            ("dwTimeout", ctypes.c_uint)]
+
+            # FLASHW_ALL(3)：标题栏 + 任务栏按钮同闪 3 次
+            info = FLASHWINFO(ctypes.sizeof(FLASHWINFO),
+                              self.winfo_frame(), 3, 3, 0)
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+        except (tk.TclError, AttributeError, OSError):
+            pass
+
     def _poll_queue(self) -> None:
         """队列轮询（80ms 周期）。
 
@@ -4724,10 +4786,15 @@ class LogCompressorApp(_make_app_base()):
                     self._on_result(data)
                 elif kind == "tail_done":
                     # 优化缺陷R105：监控刷新（渲染同正常结果，状态栏
-                    # 改监控口径）
+                    # 改监控口径）；优化缺陷R112：新错误任务栏闪烁提醒
                     result, new_n = data
+                    prev_err = self._tail_prev_errors
                     self._on_result(result)
                     if self._tailing:
+                        cur_err = result.stats.error_entries
+                        if cur_err > prev_err:
+                            self._alert_new_errors(cur_err - prev_err)
+                        self._tail_prev_errors = cur_err
                         self._status_label.configure(
                             text=f"📡 监控中 · 本拍 +{new_n} 行 · "
                                  f"{self._tail_path}")
@@ -5020,12 +5087,13 @@ class LogCompressorApp(_make_app_base()):
 
     def _cluster_matches_kw(self, cluster: ErrorCluster, kw: str) -> bool:
         """关键字匹配（摘要/模块/级别/优先级档，小写子串；主窗口
-        与全屏同口径；空关键字全部命中）。"""
+        与全屏同口径；空关键字全部命中）。优化缺陷R113：含
+        and/or/not 操作符时按布尔表达式求值。"""
         if not kw:
             return True
         hay = (f"{cluster.summary} {cluster.module} "
                f"{cluster.level} {cluster.priority_label}").lower()
-        return kw in hay
+        return _kw_match(hay, kw)
 
     def _cluster_matches(self, cluster: ErrorCluster) -> bool:
         """搜索关键字匹配（主窗口关键字；空关键字全部命中）。"""
@@ -5123,8 +5191,8 @@ class LogCompressorApp(_make_app_base()):
             # 级别词（如 error），仅按摘要判定会把按级别命中的簇
             # 全部回退首实例（导航退化为簇级，R56 测试实测暴露）
             hits = [ii for ii, inst in enumerate(cluster.instances)
-                    if kw in (f"{inst.summary} {cluster.level} "
-                              f"{cluster.module}").lower()]
+                    if _kw_match((f"{inst.summary} {cluster.level} "
+                                  f"{cluster.module}").lower(), kw)]
             if hits:
                 seq.extend((ci, ii) for ii in hits)
             elif cluster.instances:
@@ -6503,7 +6571,7 @@ class LogCompressorApp(_make_app_base()):
         search_var = tk.StringVar()
         search = ctk.CTkEntry(bar, textvariable=search_var,
                              font=ctk.CTkFont(size=18),
-                             placeholder_text="按摘要 / 模块 / 级别过滤…")
+                             placeholder_text="按摘要/模块/级别过滤，支持 and/or/not…")
         search.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
         self._fs_search_entry = search
         # 优化缺陷R53：计数影子框（与主窗口同款）—— 输入框右侧恒定
@@ -7119,7 +7187,7 @@ class LogCompressorApp(_make_app_base()):
         search_var = tk.StringVar()
         search = ctk.CTkEntry(bar, textvariable=search_var,
                              font=ctk.CTkFont(size=18),
-                             placeholder_text="按摘要 / 模块 / 级别过滤…")
+                             placeholder_text="按摘要/模块/级别过滤，支持 and/or/not…")
         search.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=8)
         count_label = ctk.CTkLabel(bar, text="", text_color="#8fa4b8")
         count_label.pack(side="right", padx=12)
