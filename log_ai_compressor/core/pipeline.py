@@ -29,7 +29,7 @@ from log_ai_compressor.constants import (
     ERROR_LEVELS,
     PROGRESS_EVERY_LINES,
 )
-from log_ai_compressor.core.analysis import analyze_clusters
+from log_ai_compressor.core.analysis import ANALYSIS_MODE_DEEP, analyze_clusters
 from log_ai_compressor.core.clustering import ErrorClusterer
 from log_ai_compressor.core.encoding import detect_encoding, open_text_stream
 from log_ai_compressor.core.filters import EntryFilter, FilterConfig
@@ -88,6 +88,9 @@ class PipelineConfig:
     filter_config: FilterConfig = field(default_factory=FilterConfig.defaults)
     rule: Optional[str] = None          # 规则集名（generic/embedded/jenkins）或 YAML 路径
     analyze: bool = True                # 是否执行智能分析（根因/异常/优先级）
+    # 优化缺陷R79：智能分析模式 full（完整，默认阈值）/ deep（深度扫描，
+    # 降阈宁多报不漏报）/ fast（快速聚类，等效 analyze=False）
+    analysis_mode: str = "full"
 
 
 class LogPipeline:
@@ -239,7 +242,11 @@ class LogPipeline:
             keywords=self._config.filter_config.normalized_include(),
         )
         if self._config.analyze and result.clusters:
-            analyze_clusters(result)
+            # 优化缺陷R79：深度扫描模式降阈执行（完整模式默认阈值）
+            if self._config.analysis_mode == "deep":
+                analyze_clusters(result, **ANALYSIS_MODE_DEEP)
+            else:
+                analyze_clusters(result)
         notify("done" if not cancelled else "cancelled")
         return result
 
@@ -316,7 +323,7 @@ class LogPipeline:
 # 便捷 API（GUI / CLI / 测试共用）
 # ---------------------------------------------------------------------------
 def _build_config(levels, include, exclude, top_n, context_lines, rule,
-                  analyze) -> PipelineConfig:
+                  analyze, analysis_mode="full") -> PipelineConfig:
     cfg = FilterConfig(
         levels=list(levels) if levels else list(DEFAULT_SELECTED_LEVELS),
         include=list(include or []),
@@ -325,27 +332,33 @@ def _build_config(levels, include, exclude, top_n, context_lines, rule,
         context_lines=context_lines if context_lines is not None
         else FilterConfig.defaults().context_lines,
     )
-    return PipelineConfig(filter_config=cfg, rule=rule, analyze=analyze)
+    # 优化缺陷R79：fast 快速聚类等效关闭智能分析
+    return PipelineConfig(filter_config=cfg, rule=rule,
+                          analyze=analyze and analysis_mode != "fast",
+                          analysis_mode=analysis_mode)
 
 
 def analyze_file(path, *, levels=None, include=None, exclude=None,
                  top_n=None, context_lines=None, rule=None, analyze=True,
+                 analysis_mode: str = "full",
                  progress_cb: Optional[ProgressCallback] = None,
                  cancel_event: Optional[Event] = None) -> AnalysisResult:
     """分析单个日志文件（详见 LogPipeline.run_file）。"""
     pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
-                                         context_lines, rule, analyze),
+                                         context_lines, rule, analyze,
+                                         analysis_mode),
                            progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_file(path)
 
 
 def analyze_text(text: str, *, source: str = "<粘贴文本>", levels=None,
                  include=None, exclude=None, top_n=None, context_lines=None,
-                 rule=None, analyze=True,
+                 rule=None, analyze=True, analysis_mode: str = "full",
                  progress_cb: Optional[ProgressCallback] = None,
                  cancel_event: Optional[Event] = None) -> AnalysisResult:
     """分析粘贴文本（详见 LogPipeline.run_text）。"""
     pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
-                                         context_lines, rule, analyze),
+                                         context_lines, rule, analyze,
+                                         analysis_mode),
                            progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_text(text, source=source)

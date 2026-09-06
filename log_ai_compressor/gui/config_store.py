@@ -29,6 +29,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "splitter_ratio": 0.4,
     # 优化缺陷R71：默认自动识别（150 行分层采样打分选最优规则）
     "rule": "auto",
+    # 优化缺陷R79：智能分析模式（full 完整 / deep 深度 / fast 快速）
+    "analyze_mode": "full",
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},
     "last_files": [],

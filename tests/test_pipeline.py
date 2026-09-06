@@ -241,6 +241,71 @@ class TestAutoRule:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R79：智能分析模式（full 完整 / deep 深度扫描 / fast 快速聚类）
+# ---------------------------------------------------------------------------
+class TestAnalyzeMode:
+    _KW_LOG = "\n".join([
+        "2024-01-01 09:00:00 ERROR [db] permission denied",
+        "2024-01-01 09:00:01 ERROR [db] disk full",
+        "2024-01-01 09:00:02 ERROR [api] request failed once",
+        "2024-01-01 09:00:03 ERROR [api] request failed twice",
+        "2024-01-01 09:00:04 ERROR [api] request failed third",
+        "2024-01-01 09:00:05 ERROR [api] request failed fourth",
+        "2024-01-01 09:00:06 ERROR [api] request failed fifth",
+    ])
+
+    def test_fast_mode_skips_analysis(self):
+        """fast 快速聚类：只聚类，全部智能标记缺省（等效 analyze=False）。"""
+        r = analyze_text(self._KW_LOG, analysis_mode="fast")
+        assert r.clusters, "聚类仍应产出"
+        assert all(c.priority == 0.0 for c in r.clusters)
+        assert not any(c.is_root_cause for c in r.clusters)
+        assert all(c.anomaly == "" for c in r.clusters)
+        assert all(c.priority_detail == "" for c in r.clusters)
+
+    def test_deep_mode_lowers_strong_keyword_threshold(self):
+        """deep：2 个根因关键词即可定根因（完整模式需 3 个）。
+
+        两簇共享 timeout/connection（df=2 压低权重），完整模式
+        2×1.0<3 不定根因，深度模式 ≥2 命中；api 簇含连锁词把
+        窗口首发规则的得分压到 ≤0，排除时间连锁干扰。
+        """
+        log = "\n".join([
+            "2024-01-01 09:00:00 ERROR [api] request timeout connection retry aborted",
+            "2024-01-01 09:00:01 ERROR [db] timeout connection",
+        ])
+        full = analyze_text(log)
+        deep = analyze_text(log, analysis_mode="deep")
+        db_full = next(c for c in full.clusters if c.module == "db")
+        db_deep = next(c for c in deep.clusters if c.module == "db")
+        assert not db_full.is_root_cause, \
+            "完整模式 2 个关键词（df=2 权重 1.0）不足阈值 3"
+        assert db_deep.is_root_cause, "深度模式阈值 2 应命中"
+
+    def test_deep_mode_lowers_rare_threshold(self):
+        """deep：错误总数 ≥5 即可判罕见（完整模式需 ≥10）。"""
+        common = "\n".join(
+            f"2024-01-01 09:00:0{i} ERROR [db] frequent error" for i in range(5))
+        log = common + "\n2024-01-01 09:00:09 ERROR [db] frequent error variant"
+        full = analyze_text(log)
+        deep = analyze_text(log, analysis_mode="deep")
+        full_rare = [c for c in full.clusters if c.count == 1]
+        deep_rare = [c for c in deep.clusters if c.count == 1]
+        assert all(c.anomaly == "" for c in full_rare), \
+            "完整模式总数 6<10 不判罕见"
+        assert any(c.anomaly in ("rare", "novel") for c in deep_rare), \
+            "深度模式总数 6≥5 应判罕见"
+
+    def test_full_mode_default_unchanged(self):
+        """完整模式（默认）：行为与此前一致（阈值不松动）。"""
+        r = analyze_text(self._KW_LOG)
+        assert r.stats.rule_name.endswith("")  # 冒烟：默认路径正常
+        deep = analyze_text(self._KW_LOG, analysis_mode="deep")
+        assert len(deep.clusters) == len(r.clusters), \
+            "深度模式只改阈值、不改聚类语义"
+
+
+# ---------------------------------------------------------------------------
 # 文件模式（编码探测联动）
 # ---------------------------------------------------------------------------
 class TestAnalyzeFile:

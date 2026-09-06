@@ -3520,9 +3520,11 @@ class TestMainWindowSearch:
         assert app._search_count.cget("text"), "计数标签应已出现"
         widgets = [panel.grid_slaves(row=0, column=0)[0],   # 级别过滤
                    panel.grid_slaves(row=0, column=1)[0],   # 复选框组
-                   panel.grid_slaves(row=0, column=3)[0],   # 上下文行数
+                   panel.grid_slaves(row=0, column=2)[0],   # 智能分析
+                   app._analyze_menu,
+                   panel.grid_slaves(row=0, column=6)[0],   # 上下文行数
                    app._ctx_entry,
-                   panel.grid_slaves(row=0, column=5)[0],   # 解析规则
+                   panel.grid_slaves(row=0, column=8)[0],   # 解析规则
                    app._rule_menu]
         prev_right = None
         for w in widgets:
@@ -3533,7 +3535,7 @@ class TestMainWindowSearch:
         lbl = widgets[0]
         assert lbl.winfo_width() >= lbl.winfo_reqwidth() - 2, \
             "级别过滤标签不得被裁切"
-        ctx_lbl = widgets[2]
+        ctx_lbl = widgets[4]
         assert ctx_lbl.winfo_width() >= ctx_lbl.winfo_reqwidth() - 2, \
             "上下文行数标签不得被裁切"
         # 最长选项 embedded 时下拉不被裁切
@@ -4427,6 +4429,46 @@ class TestRuleAutoDetect:
             app.update()
             time.sleep(0.02)
         assert app._result is not None, "重跑应完成"
+
+
+class TestAnalyzeModeSelector:
+    """优化缺陷R79：智能分析模式选择器（完整/深度/快速）。"""
+
+    def test_dropdown_defaults_to_full(self, app):
+        """默认选中「完整分析（推荐）」，下拉列表只剩另外两个。"""
+        assert app._analyze_key == "full"
+        assert app._analyze_menu.get() == "完整分析（推荐）"
+        values = list(app._analyze_menu.cget("values"))
+        assert "完整分析（推荐）" not in values, \
+            "选中项不应出现在下拉列表"
+        assert values == ["深度扫描", "快速聚类"]
+
+    def test_switch_hides_selected_and_persists(self, app):
+        """切换到「深度扫描」：键更新 + 该项从列表消失 + 配置持久化。"""
+        app._on_analyze_changed("深度扫描")
+        assert app._analyze_key == "deep"
+        values = list(app._analyze_menu.cget("values"))
+        assert "深度扫描" not in values
+        assert "完整分析（推荐）" in values
+        assert app._current_config_dict()["analyze_mode"] == "deep"
+
+    def test_menu_in_filter_row_after_level_box(self, app):
+        """模式选择器紧随级别组（落在原空位，列 3）。"""
+        panel = app._ctx_entry.master
+        assert app._analyze_menu.master is panel
+        info = app._analyze_menu.grid_info()
+        assert str(info["row"]) == "0"
+        assert str(info["column"]) == "3"
+
+    def test_fast_mode_marks_detail_unexecuted(self, app):
+        """fast 模式分析后：详情智能分析区显示「未执行」。"""
+        app._on_analyze_changed("快速聚类")
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._select_cluster(0)
+        app.update()
+        text = app._detail_box.get("1.0", "end")
+        assert "快速聚类模式（未执行智能分析）" in text
         assert "可能规则不匹配" not in str(app._status_label.cget("text"))
 
 
