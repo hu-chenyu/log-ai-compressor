@@ -57,6 +57,10 @@ OWN_BASELINE_MIN_PEAK = 5      # 自持基线：峰值桶最小计数（防小�
 PERIODIC_MIN_SAMPLES = 4       # 周期发作：最少时间戳样本数
 PERIODIC_MAX_CV = 0.10         # 周期发作：间隔变异系数上限（越小越规律）
 NOVEL_JACCARD_MAX = 0.5        # 新型错误：与既有簇模板相似度上限
+# 优化缺陷R102：错误共现分析（时间窗/行距内两簇实例反复同现 → 同根因）
+COOC_WINDOW_SEC = 60.0         # 共现判定时间窗（±秒）
+COOC_WINDOW_LINES = 100        # 无时间戳时共现判定行距（±行）
+COOC_MIN_HITS = 2              # 至少同现次数（1 次可能是巧合）
 
 # 关键因果行（降噪时永不折叠）
 _CAUSED_BY_RE = re.compile(r"^\s*Caused by\s*[:：]", re.IGNORECASE)
@@ -472,6 +476,57 @@ def _link_related_clusters(clusters: List[ErrorCluster]) -> None:
             by_id[b].related_clusters.append(by_id[a].cluster_id)
     for c in clusters:
         c.related_clusters.sort()
+
+
+# ---------------------------------------------------------------------------
+# 错误共现（优化缺陷R102：同窗反复同现的簇 → 直指同一根因）
+# ---------------------------------------------------------------------------
+def cooccurring_clusters(
+        target: ErrorCluster, clusters: List[ErrorCluster],
+        window_sec: float = COOC_WINDOW_SEC,
+        window_lines: int = COOC_WINDOW_LINES,
+        min_hits: int = COOC_MIN_HITS
+) -> List[Tuple[ErrorCluster, int]]:
+    """与 target 在同一时间窗/行距内反复同现的簇（按同现次数降序）。
+
+    判定：target 的每个实例，在对方实例时间轴（或行号轴，无时间
+    戳时）±窗口内存在实例计 1 次同现；累计 ≥ min_hits 判共现。
+    与【相关簇】（模板词相似，"长得像"）互补 —— 共现是"一起炸"。
+
+    性能：实例列表按摄入顺序天然有序，bisect 双边计数，
+    O((n+m)·log m)；实例记录有界，开销可忽略。
+    """
+    import bisect
+
+    def _axis(c: ErrorCluster):
+        """返回 (时间戳有序数组, 行号有序数组)；时间轴可能不完整。"""
+        ts = [i.timestamp for i in c.instances if i.timestamp is not None]
+        ts.sort()
+        lines = [i.line_no for i in c.instances if i.line_no > 0]
+        lines.sort()
+        return ts, lines
+
+    def _window_count(sorted_vals: List[float], center: float,
+                      half: float) -> int:
+        lo = bisect.bisect_left(sorted_vals, center - half)
+        hi = bisect.bisect_right(sorted_vals, center + half)
+        return hi - lo
+
+    results: List[Tuple[ErrorCluster, int]] = []
+    for other in clusters:
+        if other is target or not other.instances:
+            continue
+        o_ts, o_lines = _axis(other)
+        hits = 0
+        for inst in target.instances:
+            if inst.timestamp is not None and o_ts:
+                hits += _window_count(o_ts, inst.timestamp, window_sec)
+            elif inst.line_no > 0 and o_lines:
+                hits += _window_count(o_lines, inst.line_no, window_lines)
+        if hits >= min_hits:
+            results.append((other, hits))
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
 
 
 def _build_timelines(clusters: List[ErrorCluster], out_edges: dict,
