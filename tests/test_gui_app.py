@@ -4951,6 +4951,69 @@ class TestBooleanSearch:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R114：过滤预设保存（⚙ 弹层预设区）
+# ---------------------------------------------------------------------------
+class TestFilterPresets:
+    def _fill_filters(self, app):
+        app._time_start_entry.insert(0, "09:00:00")
+        app._include_entry.insert(0, "timeout, refused")
+        app._exclude_entry.insert(0, "debug")
+        app._use_regex_var.set(True)
+
+    def test_save_empty_name_rejected(self, app):
+        app._save_preset()
+        assert not app._presets
+        assert "先输入名称" in app._status_label.cget("text")
+
+    def test_save_and_persist(self, app):
+        self._fill_filters(app)
+        app._preset_name_entry.insert(0, " nightly ")
+        app._save_preset()
+        snap = app._presets.get("nightly")
+        assert snap is not None, "名称应去空白保存"
+        assert snap["time_start"] == "09:00:00"
+        assert snap["include"] == "timeout, refused"
+        assert snap["use_regex"] is True
+        cfg = app._current_config_dict()
+        assert "nightly" in cfg["filter_presets"]
+        # 保存后名称框清空、下拉含新项
+        assert app._preset_name_entry.get() == ""
+        assert "nightly" in app._preset_menu.cget("values")
+
+    def test_apply_restores_controls(self, app):
+        self._fill_filters(app)
+        app._preset_name_entry.insert(0, "p1")
+        app._save_preset()
+        # 改乱现场后套用
+        app._include_entry.delete(0, "end")
+        app._time_start_entry.delete(0, "end")
+        app._use_regex_var.set(False)
+        app._apply_preset("p1")
+        assert app._include_entry.get() == "timeout, refused"
+        assert app._time_start_entry.get() == "09:00:00"
+        assert app._use_regex_var.get() is True
+        assert "已套用" in app._status_label.cget("text")
+
+    def test_apply_unknown_noop(self, app):
+        app._apply_preset("（暂无预设）")
+        app._apply_preset("不存在的名字")
+
+    def test_delete_preset(self, app):
+        app._preset_name_entry.insert(0, "p2")
+        app._save_preset()
+        app._apply_preset("p2")
+        app._delete_preset()
+        assert "p2" not in app._presets
+        assert "已删除" in app._status_label.cget("text")
+        # 无预设时下拉回占位
+        assert app._preset_menu.cget("values") == ["（暂无预设）"]
+
+    def test_delete_without_selection_warns(self, app):
+        app._delete_preset()
+        assert "先从下拉选中" in app._status_label.cget("text")
+
+
+# ---------------------------------------------------------------------------
 # 优化缺陷R105：实时 Tail 监控
 # ---------------------------------------------------------------------------
 class TestTailMonitor:
