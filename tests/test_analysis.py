@@ -140,6 +140,66 @@ class TestRootCause:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R76：根因强化（因果 DAG + 关键词 IDF 加权）
+# ---------------------------------------------------------------------------
+class TestRootCauseEnhanced:
+    def test_cross_reference_edge_marks_source_root(self):
+        """B 消息复述 A 的模板词（含稀有词）→ A→B 边，A 判图源头根因。"""
+        src = make_cluster(0, "auth token expired", first_line=10)
+        derived = make_cluster(
+            1, "request aborted because auth token expired", first_line=50)
+        result = make_result([derived, src])
+        analyze_clusters(result)
+        assert src.is_root_cause
+        assert "因果链源头" in src.root_cause_reason
+        assert not derived.is_root_cause
+        assert "连锁衍生" in derived.root_cause_reason
+        assert "auth token expired" in derived.root_cause_reason
+
+    def test_cross_reference_requires_rare_token(self):
+        """共享词在 ≥3 簇出现（泛词）→ 不建边、不误判根因。"""
+        a = make_cluster(0, "timeout foo bar", first_line=1)
+        b = make_cluster(1, "timeout foo baz", first_line=2)
+        c = make_cluster(2, "timeout foo qux", first_line=3)
+        result = make_result([a, b, c])
+        analyze_clusters(result)
+        assert not a.is_root_cause
+        assert not b.is_root_cause
+        assert not c.is_root_cause
+
+    def test_cross_reference_requires_temporal_order(self):
+        """互引用仅指向后发错误（先发不因后发的复述担责）。"""
+        later = make_cluster(0, "auth token expired", first_line=50)
+        earlier = make_cluster(1, "request aborted because auth token expired",
+                               first_line=10)
+        result = make_result([later, earlier])
+        analyze_clusters(result)
+        assert not earlier.is_root_cause or \
+            "因果链源头" not in earlier.root_cause_reason
+
+    def test_idf_weights_rare_keyword_stronger(self):
+        """罕见关键词（df 低）权重大于常见关键词。"""
+        from log_ai_compressor.core.analysis import _keyword_weights
+        clusters = [make_cluster(i, s) for i, s in enumerate(
+            ["deadlock detected", "timeout a", "timeout b", "timeout c"])]
+        w = _keyword_weights(clusters)
+        assert w["deadlock"] > w["timeout"]
+        # 单簇单命中权重恰为 1.0（与旧计数制兼容，阈值 3 语义不变）
+        single = _keyword_weights([make_cluster(0, "deadlock detected")])
+        assert abs(single["deadlock"] - 1.0) < 1e-9
+
+    def test_derived_reason_names_upstream(self):
+        """图内衍生错误的原因注明上游摘要（修上游别修它）。"""
+        src = make_cluster(0, "disk quota exceeded", first_line=10)
+        derived = make_cluster(1, "write failed: disk quota exceeded",
+                               first_line=20)
+        result = make_result([src, derived])
+        analyze_clusters(result)
+        assert "上游" in derived.root_cause_reason
+        assert "disk quota exceeded" in derived.root_cause_reason
+
+
+# ---------------------------------------------------------------------------
 # 异常检测
 # ---------------------------------------------------------------------------
 class TestAnomaly:
