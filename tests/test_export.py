@@ -297,6 +297,16 @@ class TestTokenEstimate:
         text = token_status_text(result, brief_summary(result, top_n=5))
         assert "压缩" not in text
 
+    def test_ratio_never_shows_100_percent(self):
+        """修复缺陷R106：99.7% 不得四舍五入显示为「100%」。"""
+        from log_ai_compressor.core.models import (
+            AnalysisResult, RunStats)
+        # raw=340000 chars → 85000 tokens；comp 222 tokens → 99.74%
+        r = AnalysisResult(stats=RunStats(source="x", raw_chars=340000))
+        text = token_status_text(r, "a" * 888)   # 888/4 = 222 tokens
+        assert "100%" not in text
+        assert "99.7%" in text
+
     def test_status_text_no_raw(self):
         """原始字符数为 0（手工构造结果）时不出压缩率，不报错。"""
         from log_ai_compressor.core.models import (

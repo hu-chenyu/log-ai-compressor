@@ -1748,6 +1748,13 @@ class LogCompressorApp(_make_app_base()):
         self.title(f"{HUMAN_NAME}  v{__version__}")
         width = window.get("width", 1280)
         height = window.get("height", 1000)
+        # 修复缺陷R107：恢复尺寸钳制到屏幕内（配置里存了超屏尺寸时
+        # 右侧控件与底栏会被屏幕边缘裁掉，用户看不到状态栏/新按钮）
+        try:
+            width = min(width, self.winfo_screenwidth() - 40)
+            height = min(height, self.winfo_screenheight() - 90)
+        except tk.TclError:
+            pass
         self.geometry(f"{width}x{height}")
         self.minsize(1000, 680)
         # 修复缺陷R9：DPI 缩放系数 —— CTkLabel 对 CTkFont 自动施加控件
