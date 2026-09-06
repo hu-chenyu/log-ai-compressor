@@ -3137,13 +3137,17 @@ class TestMainWindowSearch:
     def test_level_filter_even_gaps_and_alignment(self, app):
         """修复缺陷R74：可视区间完全相等 + DEBUG 文本右缘对齐全屏按钮右缘。
 
-        复选框按各自文本实测宽紧凑定宽（尾部余量一致）；四个可视
-        区间（文本右缘到下一个ⓘ左缘）统一增减保持完全相等；DEBUG
-        的 G 右缘精确对齐左列「⛶ 全屏」按钮右缘，分隔条拖动后
-        自动重同步。
+        修复缺陷R83：对齐目标线首次同步即冻结 —— 分隔条拖动/窗口
+        缩放后过滤行绝对固定不再漂移（原实时跟踪全屏按钮线，整行
+        被拖着走，用户判定为缺陷）。紧凑区 padx 触底 0（同前）。
         """
+        app._level_gap_target = None     # 重置冻结，确定性从本几何冻结
         app.geometry("2560x1475")
         app.update()
+        # update_idletasks 双连：先跑 after_idle 的 R74 同步（写复选
+        # 框 padx），再结算这些网格写入 —— 量测须基于一致快照
+        app.update_idletasks()
+        app.update_idletasks()
         panel = app._ctx_entry.master
         level_box = panel.grid_slaves(row=0, column=1)[0]
         children = level_box.winfo_children()
@@ -3177,24 +3181,42 @@ class TestMainWindowSearch:
         gaps = visual_gaps()
         assert max(gaps) - min(gaps) <= 2, \
             f"可视区间应完全相等（实测 {gaps}）"
-        # DEBUG 文本右缘 == 全屏按钮右缘（整数 padx 取整残差 ≤4px）
-        assert abs(debug_text_right() - target_x()) <= 4, \
-            f"应对齐全屏按钮右缘（{debug_text_right()} vs {target_x()}）"
-        # 分隔条移动后重同步：仍对齐且区间仍相等
+        pads0 = [int(cb.grid_info()["padx"][1]) for cb in cbs[:4]]
+        if any(p > 0 for p in pads0):
+            # 膨胀区：冻结点即对齐点（DEBUG 右缘 == 全屏按钮右缘）
+            assert abs(debug_text_right() - target_x()) <= 4, \
+                f"冻结时应保持对齐（{debug_text_right()} vs {target_x()}）"
+        else:
+            # 紧凑区（高 DPI 窄窗）：padx 触底 0，行天然固定
+            assert pads0 == [0, 0, 0, 0]
+        pos0 = debug_text_right()
+
+        # 修复缺陷R83：分隔条右移后 —— DEBUG 右缘不再跟随，保持冻结
         app._splitter_ratio = 0.62
         app._layout_splitter()
         app.update()
-        assert abs(debug_text_right() - target_x()) <= 4, \
-            f"分隔条移动后应重同步对齐（{debug_text_right()} vs {target_x()}）"
+        app.update_idletasks()
+        app.update_idletasks()
+        assert abs(debug_text_right() - pos0) <= 2, \
+            f"分隔条右移后行应绝对固定（{debug_text_right()} vs 冻结 {pos0}）"
         gaps2 = visual_gaps()
         assert max(gaps2) - min(gaps2) <= 2, \
             f"分隔条移动后区间仍应相等（实测 {gaps2}）"
-        # 拖到极左（目标线左于组体自然宽）：padx 触底不崩溃
+        # 分隔条拖到极左：冻结目标线后不再触底，位置仍固定
         app._splitter_ratio = 0.05
         app._layout_splitter()
         app.update()
-        pads = [int(cb.grid_info()["padx"][1]) for cb in cbs[:4]]
-        assert pads == [0, 0, 0, 0], "目标线过左时间距 padx 应触底 0"
+        app.update_idletasks()
+        app.update_idletasks()
+        assert abs(debug_text_right() - pos0) <= 2, \
+            f"分隔条极左后行应仍固定（{debug_text_right()} vs 冻结 {pos0}）"
+        # 窗口缩放：位置仍固定（宽度收窄但保持整行不裁切）
+        app.geometry("2000x1100")
+        app.update()
+        app.update_idletasks()
+        app.update_idletasks()
+        assert abs(debug_text_right() - pos0) <= 2, \
+            f"窗口缩放后行应仍固定（{debug_text_right()} vs 冻结 {pos0}）"
 
     def test_filter_row_group_gaps_equal(self, app):
         """修复缺陷R81：三个组间可视区间完全相等（静态 padx 补偿）。
