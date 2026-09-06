@@ -2282,8 +2282,42 @@ class LogCompressorApp(_make_app_base()):
         self._settings_btn = ctk.CTkButton(
             panel, text="⚙", width=36,
             command=self._toggle_settings_popup)
-        self._settings_btn.grid(row=0, column=15, padx=(2, 12), sticky="w")
+        self._settings_btn.grid(row=0, column=15, padx=(2, 0), sticky="w")
+        # 优化缺陷R95：↺ 重置按钮（⚙ 右侧）—— 一键清空数据类前置
+        # 设置并恢复选择器默认（时间范围/关键词残留会静默隐藏错误，
+        # 状态栏标签虽兜底但不直观；留空不限回归一键可达）
+        self._reset_btn = ctk.CTkButton(
+            panel, text="↺", width=36,
+            command=self._reset_advanced_options)
+        self._reset_btn.grid(row=0, column=16, padx=(6, 12), sticky="w")
+        Tooltip(self._reset_btn, lambda: (
+            "重置前置设置为默认：\n"
+            "清空 时间范围 / 包含·排除关键词\n"
+            "行数上限 → 全部（推荐）\n"
+            "智能分析 → 完整分析（推荐）\n"
+            "解析规则 → 自动识别（推荐）\n"
+            "编码 → 自动探测（推荐），关键词正则 → 关\n"
+            "（级别勾选/上下文行数/相似度/脱敏为偏好项，不动）"))
         self._build_settings_popup()
+
+    def _reset_advanced_options(self) -> None:
+        """↺ 重置：前置设置一键回默认（优化缺陷R95）。
+
+        只动「开始分析才生效」的数据类前置项；级别勾选/上下文行数/
+        相似度/脱敏属用户偏好（持久化），不在重置范围。选择器复用
+        各 _on_*_changed 回调（键更新 + 选中项回列表 + 状态栏说明），
+        最后统一覆盖状态栏为重置回执。
+        """
+        for entry in (self._time_start_entry, self._time_end_entry,
+                      self._include_entry, self._exclude_entry):
+            entry.delete(0, "end")
+        self._use_regex_var.set(False)
+        self._on_maxlines_changed(MAXLINES_DISPLAY["all"])
+        self._on_analyze_changed(ANALYZE_DISPLAY["full"])
+        self._on_rule_changed(RULE_DISPLAY["auto"])
+        self._on_encoding_changed(ENCODING_DISPLAY[0])
+        self._status_label.configure(
+            text="前置设置已重置：时间范围/关键词已清空，其余回默认")
 
     def _on_maxlines_changed(self, choice: str) -> None:
         """行数上限档位切换（优化缺陷R85）：全部/10万/50万/100万。
