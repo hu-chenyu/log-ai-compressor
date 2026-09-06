@@ -3278,8 +3278,12 @@ class TestMainWindowSearch:
             f"其他选项标签 padx 应为 (24,2)×scale（实测 {lbl_pad}）"
         btn_pad = tuple(int(v) for v in
                         app._settings_btn.grid_info()["padx"])
-        assert btn_pad == (s2, int(round(12 * scale))), \
-            f"⚙ 按钮 padx 应为 (2,12)×scale（实测 {btn_pad}）"
+        assert btn_pad == (s2, 0), \
+            f"⚙ 按钮 padx 应为 (2,0)×scale（R95 ↺ 接管行尾，实测 {btn_pad}）"
+        rst_pad = tuple(int(v) for v in
+                        app._reset_btn.grid_info()["padx"])
+        assert rst_pad == (int(round(6 * scale)), int(round(12 * scale))), \
+            f"↺ 按钮 padx 应为 (6,12)×scale（行尾余量，实测 {rst_pad}）"
         entry_pad = tuple(int(v) for v in
                           app._ctx_entry.grid_info()["padx"])
         assert entry_pad[1] == 0, "输入框右 padx 应为 0（区间由组首承担）"
@@ -4809,6 +4813,52 @@ class TestAdvancedPanel:
         assert len(app._result.clusters) == 1
         assert "database" in app._result.clusters[0].summary
         assert "排除[heartbeat]" in str(app._status_label.cget("text"))
+
+    def test_reset_button_restores_defaults(self, app):
+        """优化缺陷R95：↺ 一键重置 —— 数据类前置项清空/回默认，
+        偏好项（级别/上下文行数/相似度/脱敏）不动。"""
+        # 制造残留状态
+        app._time_start_entry.insert(0, "12:00:00")
+        app._time_end_entry.insert(0, "18:00:00")
+        app._include_entry.insert(0, "database")
+        app._exclude_entry.insert(0, "heartbeat")
+        app._use_regex_var.set(True)
+        app._on_maxlines_changed("前 10 万行")
+        app._on_analyze_changed("深度扫描")
+        app._on_rule_changed("通用 generic")
+        app._on_encoding_changed("GBK / GB18030")
+        app._on_similarity_changed("严格")
+        ctx_before = app._ctx_entry.get()
+        levels_before = {lv: var.get() for lv, var in
+                         app._level_vars.items()}
+        app._reset_advanced_options()
+        app.update()
+        # 数据类：清空 / 回默认
+        assert app._time_start_entry.get() == ""
+        assert app._time_end_entry.get() == ""
+        assert app._include_entry.get() == ""
+        assert app._exclude_entry.get() == ""
+        assert app._use_regex_var.get() is False
+        assert app._maxlines_key == "all"
+        assert app._maxlines_menu.get() == "全部（推荐）"
+        assert app._analyze_key == "full"
+        assert app._analyze_menu.get() == "完整分析（推荐）"
+        assert app._rule_key == "auto"
+        assert app._rule_menu.get() == "自动识别（推荐）"
+        assert app._encoding_display == "自动探测（推荐）"
+        assert app._advanced_params()["encoding"] is None
+        # 选中项回列表后，旧选项重新可选
+        assert "前 10 万行" in list(app._maxlines_menu.cget("values"))
+        assert "深度扫描" in list(app._analyze_menu.cget("values"))
+        assert "通用 generic" in list(app._rule_menu.cget("values"))
+        # 状态栏重置回执
+        assert "已重置" in str(app._status_label.cget("text"))
+        # 偏好项不动
+        assert app._ctx_entry.get() == ctx_before
+        assert {lv: var.get() for lv, var in
+                app._level_vars.items()} == levels_before
+        assert app._similarity_key == "strict", "相似度为偏好项不重置"
+        assert app._redact_var.get() is True
 
     def test_max_lines_limit_hit_marks_progress(self, app):
         """limit_hit 结果：进度标签显示「已达行数上限」而非「已取消」。"""
