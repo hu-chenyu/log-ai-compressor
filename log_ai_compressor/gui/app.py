@@ -1707,7 +1707,7 @@ class VirtualClusterList:
 # 片空白浪费 —— 按页预设紧凑高度，切换时适配，空间让给结果区。
 # 高度值实测校准（逻辑 px，随 DPI 缩放）：页内容需求 + 按钮区
 # 开销 60 + 4 余量，保证各页内容无裁切（_r21_dbg.py 实测）
-_TAB_PAGE_HEIGHTS = {"文件导入": 110, "文本粘贴": 198, "多文件对比": 202}
+_TAB_PAGE_HEIGHTS = {"文件导入": 126, "文本粘贴": 198, "多文件对比": 202}
 
 
 class LogCompressorApp(_make_app_base()):
@@ -2023,7 +2023,7 @@ class LogCompressorApp(_make_app_base()):
             self, height=_TAB_PAGE_HEIGHTS["文件导入"],
             command=self._fit_tab_height)
         # 修复缺陷R9：顶部区域压缩（结果区获得更大高度）
-        self._tabview.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 2))
+        self._tabview.grid(row=1, column=0, sticky="ew", padx=10, pady=(3, 1))
         for name in ("文件导入", "文本粘贴", "多文件对比"):
             self._tabview.add(name)
         self._build_file_tab()
@@ -2225,7 +2225,9 @@ class LogCompressorApp(_make_app_base()):
         分析的错误，重启清零；生效时状态栏常驻标签兜底提示）。
         """
         panel = ctk.CTkFrame(self)
-        panel.grid(row=3, column=0, sticky="ew", padx=10, pady=3)
+        # 修复缺陷R109：行面板 pady 3→1（三行省 12px 补底栏完成串
+        # 行高，页签行 126 恢复后文件输入框不再被裁）
+        panel.grid(row=3, column=0, sticky="ew", padx=10, pady=1)
         self._bg_widgets.append((panel, "card"))
         self._advanced_panel = panel
 
@@ -2394,7 +2396,8 @@ class LogCompressorApp(_make_app_base()):
         """
         panel = ctk.CTkFrame(self)
         # 优化缺陷R85：高级选项行插入后行号 3→4
-        panel.grid(row=4, column=0, sticky="ew", padx=10, pady=3)
+        # 修复缺陷R109：行面板 pady 3→1（同高级行，补底栏完成串行高）
+        panel.grid(row=4, column=0, sticky="ew", padx=10, pady=1)
         self._bg_widgets.append((panel, "card"))
 
         ctk.CTkLabel(panel, text="搜索").grid(row=0, column=0,
@@ -2445,7 +2448,8 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R9：顶部区域压缩（pady 4→3，按钮高度 34→30）
         # 修复缺陷R72：实时筛选行插入后行号 3→4
         # 优化缺陷R85：高级选项行插入后行号 4→5
-        panel.grid(row=5, column=0, sticky="ew", padx=10, pady=3)
+        # 修复缺陷R109：行面板 pady 3→1（补底栏完成串行高）
+        panel.grid(row=5, column=0, sticky="ew", padx=10, pady=1)
         self._bg_widgets.append((panel, "card"))
         for col in range(7):
             panel.grid_columnconfigure(col, weight=1)
@@ -3612,12 +3616,12 @@ class LogCompressorApp(_make_app_base()):
         # 优化缺陷R105：底栏第一行「完成」状态串（自按钮行下沉，
         # 整行展示 token/压缩率不被挤压）
         self._done_label = ctk.CTkLabel(bar, text="", anchor="w")
-        self._done_label.grid(row=0, column=0, padx=12, pady=(3, 0),
+        self._done_label.grid(row=0, column=0, padx=12, pady=(1, 0),
                               sticky="w")
         self._muted_labels.append(self._done_label)
         self._status_label = ctk.CTkLabel(bar, text="就绪 · 支持文件导入 / 文本粘贴 / 多文件对比",
                                           anchor="w")
-        self._status_label.grid(row=1, column=0, padx=12, pady=(0, 3),
+        self._status_label.grid(row=1, column=0, padx=12, pady=(0, 1),
                                 sticky="w")
         self._muted_labels.append(self._status_label)
 
