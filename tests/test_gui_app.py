@@ -4796,7 +4796,7 @@ class TestAdvancedPanel:
         assert app._redact_var.get() is True
 
     def test_max_lines_limit_hit_marks_progress(self, app):
-        """limit_hit 结果：进度标签显示「已达行数上限」而非「已取消」。"""
+        """limit_hit 结果：完成串（底栏）显示「已达行数上限」而非「已取消」。"""
         from log_ai_compressor.core.models import (
             AnalysisResult, RunStats, TimeHistogram)
         stats = RunStats(source="<测试>", total_lines=10, error_lines=1,
@@ -4806,9 +4806,97 @@ class TestAdvancedPanel:
         app._last_common = {"max_lines": 100000}
         app._on_result(result)
         app.update()
-        text = str(app._progress_label.cget("text"))
+        # 优化缺陷R105：完成串自按钮行下沉底栏 _done_label
+        text = str(app._done_label.cget("text"))
         assert "已达行数上限" in text
         assert "已取消" not in text, "上限收束不得显示「已取消」"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R105：实时 Tail 监控
+# ---------------------------------------------------------------------------
+class TestTailMonitor:
+    def _write(self, path, lines):
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    def test_tail_button_present(self, app):
+        """按钮行第六颗按钮：📡 实时监控。"""
+        assert app._tail_btn.winfo_exists()
+        assert "监控" in app._tail_btn.cget("text")
+
+    def test_tail_requires_file_tab(self, app, monkeypatch):
+        """非文件导入页签：拦截提示，不启动监控。"""
+        warned = []
+        monkeypatch.setattr(
+            "log_ai_compressor.gui.app.messagebox.showwarning",
+            lambda *a: warned.append(a))
+        app._tabview.set("文本粘贴")
+        app._on_tail_toggle()
+        assert warned and not app._tailing
+
+    def test_tail_requires_single_file(self, app, monkeypatch):
+        """文件为空或多选：拦截提示，不启动监控。"""
+        warned = []
+        monkeypatch.setattr(
+            "log_ai_compressor.gui.app.messagebox.showwarning",
+            lambda *a: warned.append(a))
+        app._tabview.set("文件导入")
+        app._file_entry.delete(0, "end")
+        app._on_tail_toggle()
+        assert warned and not app._tailing
+
+    def test_tail_detects_new_lines(self, app, tmp_path):
+        """监控端到端：追加错误行后自动重算，结果行数增长；停止复原。"""
+        log = tmp_path / "tail.log"
+        self._write(log, ["2024-01-01 09:00:00 INFO boot ok"])
+        app._tabview.set("文件导入")
+        app._file_entry.delete(0, "end")
+        app._file_entry.insert(0, str(log))
+        app._on_tail_toggle()
+        assert app._tailing
+        try:
+            # 等后台线程读到首批内容
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                app.update()
+                with app._tail_lock:
+                    n = len(app._tail_lines)
+                if n >= 1:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError("尾部线程未读到首批行")
+            # 追加错误行 → 等自动重算出结果
+            self._write(log, [
+                "2024-01-01 09:00:01 ERROR [db] connection refused",
+                "2024-01-01 09:00:02 ERROR [db] connection refused",
+            ])
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                app.update()
+                if (app._result is not None
+                        and app._result.stats.total_lines >= 3
+                        and not (app._worker and app._worker.is_alive())):
+                    break
+                time.sleep(0.15)
+            else:
+                raise AssertionError("监控刷新未产生新结果")
+            assert app._result.stats.error_entries == 2
+            assert "监控中" in str(app._status_label.cget("text"))
+            # 监控刷新不入历史（防刷屏）
+            assert app._history.list() == []
+        finally:
+            app._stop_tail()
+        assert not app._tailing
+        assert "实时监控" in app._tail_btn.cget("text")
+
+    def test_done_label_written_on_result(self, app):
+        """优化缺陷R105：完成串写底栏 _done_label，进度标签回「就绪」。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        assert "完成：" in str(app._done_label.cget("text"))
+        assert str(app._progress_label.cget("text")) == "就绪"
 
 
 # ---------------------------------------------------------------------------

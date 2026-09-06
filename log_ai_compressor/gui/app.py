@@ -1707,7 +1707,7 @@ class VirtualClusterList:
 # 片空白浪费 —— 按页预设紧凑高度，切换时适配，空间让给结果区。
 # 高度值实测校准（逻辑 px，随 DPI 缩放）：页内容需求 + 按钮区
 # 开销 60 + 4 余量，保证各页内容无裁切（_r21_dbg.py 实测）
-_TAB_PAGE_HEIGHTS = {"文件导入": 126, "文本粘贴": 198, "多文件对比": 202}
+_TAB_PAGE_HEIGHTS = {"文件导入": 110, "文本粘贴": 198, "多文件对比": 202}
 
 
 class LogCompressorApp(_make_app_base()):
@@ -1719,6 +1719,17 @@ class LogCompressorApp(_make_app_base()):
         # 优化缺陷R100：分析历史（随配置目录隔离，测试可注入临时目录）
         self._history = HistoryStore(self._store.path)
         self._from_history = False          # 历史回放中标记（防重复入库）
+        # 优化缺陷R105：实时 Tail 监控状态（后台轮询线程 + 行缓冲）
+        self._tailing = False
+        self._tail_thread: Optional[threading.Thread] = None
+        self._tail_stop = threading.Event()
+        self._tail_path = ""
+        self._tail_encoding = "utf-8"
+        self._tail_offset = 0
+        self._tail_partial = ""
+        self._tail_lines: list = []
+        self._tail_new_lines = 0
+        self._tail_lock = threading.Lock()
         # 修复缺陷R1：四态主题（兼容旧配置的 light/dark 值）
         raw_theme = str(self._config.get("appearance", "dark")).lower()
         self._theme = _THEME_ALIASES.get(raw_theme, "dark")
@@ -2428,7 +2439,9 @@ class LogCompressorApp(_make_app_base()):
         self._start_btn = ctk.CTkButton(
             panel, text="开始分析", font=ctk.CTkFont(size=14, weight="bold"),
             height=30, command=self._on_start)
-        self._start_btn.grid(row=0, column=0, padx=6, pady=6, sticky="ew")
+        # 优化缺陷R105：按钮行 pady 6→3（底栏新增完成串行占 22px，
+        # 从此处与页签行 reclaim，保列表可视行数 ≥6）
+        self._start_btn.grid(row=0, column=0, padx=6, pady=3, sticky="ew")
         self._cancel_btn = ctk.CTkButton(
             panel, text="取消", state="disabled", fg_color="#7b3535",
             hover_color="#94424a", command=self._on_cancel, height=30)
@@ -2443,15 +2456,21 @@ class LogCompressorApp(_make_app_base()):
         self._chart_btn = ctk.CTkButton(panel, text="统计图表", state="disabled",
                                         height=30, command=self._show_charts)
         self._chart_btn.grid(row=0, column=4, padx=6, sticky="ew")
+        # 优化缺陷R105：实时 Tail 监控（第六颗按钮，盯文件尾部增量）
+        self._tail_btn = ctk.CTkButton(panel, text="📡 实时监控", height=30,
+                                       command=self._on_tail_toggle)
+        self._tail_btn.grid(row=0, column=5, padx=6, sticky="ew")
         self._accent_buttons.append((self._start_btn, "accent"))
         self._accent_buttons.append((self._export_btn, "accent"))
         self._accent_buttons.append((self._copy_btn, "accent"))
         self._accent_buttons.append((self._chart_btn, "accent"))
+        self._accent_buttons.append((self._tail_btn, "accent"))
         self._accent_buttons.append((self._cancel_btn, "danger"))
 
+        # 优化缺陷R105：「完成」状态串下沉底栏（按钮行第六颗按钮
+        # 占位后进度区只剩一列，完成串改在底栏整行展示）
         progress_frame = ctk.CTkFrame(panel, fg_color="transparent")
-        progress_frame.grid(row=0, column=5, columnspan=2, padx=10,
-                            sticky="ew")
+        progress_frame.grid(row=0, column=6, padx=10, sticky="ew")
         progress_frame.grid_columnconfigure(0, weight=1)
         self._progress_label = ctk.CTkLabel(progress_frame, text="就绪",
                                             anchor="w")
@@ -3576,9 +3595,16 @@ class LogCompressorApp(_make_app_base()):
         bar.grid(row=7, column=0, sticky="ew")
         self._bg_widgets.append((bar, "header"))
         bar.grid_columnconfigure(0, weight=1)
+        # 优化缺陷R105：底栏第一行「完成」状态串（自按钮行下沉，
+        # 整行展示 token/压缩率不被挤压）
+        self._done_label = ctk.CTkLabel(bar, text="", anchor="w")
+        self._done_label.grid(row=0, column=0, padx=12, pady=(3, 0),
+                              sticky="w")
+        self._muted_labels.append(self._done_label)
         self._status_label = ctk.CTkLabel(bar, text="就绪 · 支持文件导入 / 文本粘贴 / 多文件对比",
                                           anchor="w")
-        self._status_label.grid(row=0, column=0, padx=12, pady=4, sticky="w")
+        self._status_label.grid(row=1, column=0, padx=12, pady=(0, 3),
+                                sticky="w")
         self._muted_labels.append(self._status_label)
 
     # ==================================================================
@@ -4432,6 +4458,7 @@ class LogCompressorApp(_make_app_base()):
 
         self._cancel_event.clear()
         self._set_running(True)
+        self._done_label.configure(text="")     # 优化缺陷R105：新分析清空旧完成串
         self._progress_label.configure(text="解析中…")
         self._progress_bar.configure(mode="indeterminate")
         self._progress_bar.start()
@@ -4496,6 +4523,144 @@ class LogCompressorApp(_make_app_base()):
         self._progress_label.configure(text="正在取消…")
         self._cancel_btn.configure(state="disabled")
 
+    # ------------------------------------------------------------------
+    # 优化缺陷R105：实时 Tail 监控（盯文件尾部增量，新错误实时重算）
+    # ------------------------------------------------------------------
+    _TAIL_POLL_SEC = 1.0        # 尾部增量轮询间隔（后台线程）
+    _TAIL_REFRESH_MS = 1500     # GUI 刷新节拍（有新行且空闲才重算）
+
+    def _on_tail_toggle(self) -> None:
+        """📡 实时监控开关：开启盯当前文件，再点停止。"""
+        if self._tailing:
+            self._stop_tail("实时监控已停止")
+            return
+        if self._tabview.get() != "文件导入":
+            messagebox.showwarning("实时监控",
+                                   "实时监控仅支持「文件导入」页签")
+            return
+        parts = [p.strip() for p in self._file_entry.get().split(";")
+                 if p.strip()]
+        if len(parts) != 1 or not os.path.isfile(parts[0]):
+            messagebox.showwarning(
+                "实时监控", "请先选择单个日志文件（多选轮转合并不支持监控）")
+            return
+        self._tail_path = parts[0]
+        # 编码：手动指定优先，否则一次性探测（监控期间不变）
+        enc = _ENCODING_VALUES.get(self._encoding_display)
+        if enc is None:
+            from pathlib import Path as _P
+            from log_ai_compressor.core.encoding import detect_encoding
+            enc = detect_encoding(_P(parts[0]))
+        self._tail_encoding = enc
+        with self._tail_lock:
+            self._tail_lines = []
+            self._tail_new_lines = 0
+        self._tail_offset = 0
+        self._tail_partial = ""
+        self._tail_stop.clear()
+        self._tailing = True
+        self._tail_btn.configure(text="⏹ 停止监控", fg_color="#1f8a4c",
+                                 hover_color="#176b3b")
+        self._status_label.configure(
+            text=f"📡 监控中：{parts[0]}（有新错误会自动刷新，再点按钮停止）")
+        self._tail_thread = threading.Thread(target=self._tail_loop,
+                                             daemon=True)
+        self._tail_thread.start()
+        self.after(self._TAIL_REFRESH_MS, self._tail_tick)
+
+    def _stop_tail(self, note: str = "实时监控已停止") -> None:
+        """停止监控：轮询线程退出、进行中的重算取消、按钮复原。"""
+        self._tailing = False
+        self._tail_stop.set()
+        if self._worker and self._worker.is_alive():
+            self._cancel_event.set()
+        p = self._palette()
+        self._tail_btn.configure(text="📡 实时监控",
+                                 fg_color=p["accent"],
+                                 hover_color=p["accent_hover"])
+        self._status_label.configure(text=note)
+
+    def _tail_loop(self) -> None:
+        """后台线程：轮询文件大小，增量字节解码后追加到行缓冲。
+
+        尾部不完整行（无 \n 结尾）留在 _tail_partial 与下一段拼接；
+        文件变小视为轮转/截断，行缓冲清零从头再读。
+        """
+        while not self._tail_stop.is_set():
+            try:
+                size = os.path.getsize(self._tail_path)
+                if size < self._tail_offset:
+                    with self._tail_lock:
+                        self._tail_lines = []
+                        self._tail_new_lines = 0
+                    self._tail_offset = 0
+                    self._tail_partial = ""
+                if size > self._tail_offset:
+                    with open(self._tail_path, "rb") as fh:
+                        fh.seek(self._tail_offset)
+                        chunk = fh.read(size - self._tail_offset)
+                    self._tail_offset = size
+                    text = self._tail_partial + chunk.decode(
+                        self._tail_encoding, errors="replace")
+                    lines = text.split("\n")
+                    self._tail_partial = lines.pop()     # 尾段可能不完整
+                    if lines:
+                        with self._tail_lock:
+                            self._tail_lines.extend(lines)
+                            self._tail_new_lines += len(lines)
+            except OSError:
+                pass
+            self._tail_stop.wait(self._TAIL_POLL_SEC)
+
+    def _tail_tick(self) -> None:
+        """GUI 节拍：有新行且分析空闲 → 按当前过滤器全量重算。
+
+        重算口径与「开始分析」完全一致（级别/上下文/关键词/规则等
+        实时采集），结果走 tail_done 队列事件回主线程渲染。
+        """
+        if not self._tailing:
+            return
+        self.after(self._TAIL_REFRESH_MS, self._tail_tick)
+        if self._worker and self._worker.is_alive():
+            return                                    # 上次重算未完成
+        with self._tail_lock:
+            if self._tail_new_lines <= 0:
+                return
+            new_n = self._tail_new_lines
+            self._tail_new_lines = 0
+            snapshot = list(self._tail_lines)
+        try:
+            advanced = self._advanced_params()
+        except ValueError:
+            return
+        common = dict(
+            levels=[lv for lv, var in self._level_vars.items() if var.get()],
+            context_lines=self._current_context_lines(),
+            rule=self._rule_key,
+            analysis_mode=self._analyze_key,
+            similarity=self._similarity_key,
+            **advanced,
+        )
+        common.pop("encoding", None)     # analyze_text 不收 encoding
+        self._cancel_event.clear()
+        self._set_running(True)
+        self._progress_bar.configure(mode="indeterminate")
+        self._progress_bar.start()
+        tail_path = self._tail_path
+
+        def work() -> None:
+            try:
+                result = analyze_text(
+                    "\n".join(snapshot), source=tail_path,
+                    analyze=True, cancel_event=self._cancel_event,
+                    **common)
+                self._queue.put(("tail_done", (result, new_n)))
+            except Exception as exc:
+                self._queue.put(("error", f"监控刷新失败：{exc}"))
+
+        self._worker = threading.Thread(target=work, daemon=True)
+        self._worker.start()
+
     def _poll_queue(self) -> None:
         """队列轮询（80ms 周期）。
 
@@ -4511,6 +4676,15 @@ class LogCompressorApp(_make_app_base()):
                     self._update_progress(data)
                 elif kind == "done":
                     self._on_result(data)
+                elif kind == "tail_done":
+                    # 优化缺陷R105：监控刷新（渲染同正常结果，状态栏
+                    # 改监控口径）
+                    result, new_n = data
+                    self._on_result(result)
+                    if self._tailing:
+                        self._status_label.configure(
+                            text=f"📡 监控中 · 本拍 +{new_n} 行 · "
+                                 f"{self._tail_path}")
                 elif kind == "compare_done":
                     self._on_compare_result(data)
                 elif kind == "error":
@@ -4561,11 +4735,14 @@ class LogCompressorApp(_make_app_base()):
         # 优化缺陷R99：导出对话框预估行全文（原始 → 压缩 双向）
         self._token_report = token_report_line(
             result, brief_summary(result, top_n=len(result.clusters)))
-        self._progress_label.configure(
+        # 优化缺陷R105：「完成」状态串写底栏 _done_label（原进度区
+        # 只剩一列宽，按钮行第六颗按钮后不再够用）
+        self._done_label.configure(
             text=f"完成：{s.total_lines:,} 行 | 错误 {s.error_lines:,} 行 | "
                  f"{len(result.clusters)} 种 | {token_text} | "
                  f"{_rate_text(s.lines_per_second)}"
                  f"{suffix}")
+        self._progress_label.configure(text="就绪")
         # 优化缺陷R85：生效中的前置过滤器常驻状态栏标签（防静默隐藏
         # 错误 —— 三项均不持久化，重启清零，本标签为可见性兜底）
         tags = []
@@ -4590,8 +4767,8 @@ class LogCompressorApp(_make_app_base()):
                  f"{s.analysis_cost * 1000:.0f}ms{tag_text}")
         self._render_cluster_list()
         self._save_config()
-        # 优化缺陷R100：分析完成自动入历史（回放自身不重复入库）
-        if not self._from_history:
+        # 优化缺陷R100：分析完成自动入历史（回放自身/监控刷新不重复入库）
+        if not self._from_history and not self._tailing:
             self._history.add(result)
         # 优化缺陷R71：规则体检（疑似不匹配时覆盖状态栏为可点击提示）
         self._check_rule_health(result)
@@ -6970,6 +7147,9 @@ class LogCompressorApp(_make_app_base()):
 
     def _on_close(self) -> None:
         self._save_config()
+        # 优化缺陷R105：退出前停监控（释放文件句柄与后台线程）
+        if self._tailing:
+            self._stop_tail()
         # 修复缺陷R6：清理虚拟列表与全屏缓存窗口（释放控件/句柄）
         self._fs_list_refresh = None
         for win in (self._fs_list_win, self._fs_detail_win,
