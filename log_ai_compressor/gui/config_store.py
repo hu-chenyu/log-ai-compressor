@@ -31,6 +31,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rule": "auto",
     # 优化缺陷R79：智能分析模式（full 完整 / deep 深度 / fast 快速）
     "analyze_mode": "full",
+    # 优化缺陷R84：相似度阈值档位（standard 标准 / strict 严格 / lenient 宽松）
+    "similarity": "standard",
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},
     "last_files": [],

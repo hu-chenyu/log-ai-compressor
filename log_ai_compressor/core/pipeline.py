@@ -25,9 +25,11 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from log_ai_compressor.constants import (
     CANCEL_CHECK_EVERY_LINES,
+    CLUSTER_SIMILARITY_THRESHOLD,
     DEFAULT_SELECTED_LEVELS,
     ERROR_LEVELS,
     PROGRESS_EVERY_LINES,
+    SIMILARITY_PRESETS,
 )
 from log_ai_compressor.core.analysis import ANALYSIS_MODE_DEEP, analyze_clusters
 from log_ai_compressor.core.clustering import ErrorClusterer
@@ -91,6 +93,9 @@ class PipelineConfig:
     # 优化缺陷R79：智能分析模式 full（完整，默认阈值）/ deep（深度扫描，
     # 降阈宁多报不漏报）/ fast（快速聚类，等效 analyze=False）
     analysis_mode: str = "full"
+    # 优化缺陷R84：相似度阈值档位 strict（严格0.95）/ standard（标准
+    # 0.85，默认）/ lenient（宽松0.70）—— 控制错误聚类合并激进度
+    similarity: str = "standard"
 
 
 class LogPipeline:
@@ -156,7 +161,10 @@ class LogPipeline:
     def _process_lines(self, lines: Iterable[str], stats: RunStats) -> AnalysisResult:
         t0 = time.perf_counter()
         parser = LogParser(self._ruleset)
-        clusterer = ErrorClusterer()
+        # 优化缺陷R84：相似度档位映射阈值（未知键回退标准，配置兼容）
+        clusterer = ErrorClusterer(
+            similarity_threshold=SIMILARITY_PRESETS.get(
+                self._config.similarity, CLUSTER_SIMILARITY_THRESHOLD))
 
         from log_ai_compressor.core.models import TimeHistogram
         from log_ai_compressor.constants import GLOBAL_HIST_MAX_BUCKETS
@@ -323,7 +331,8 @@ class LogPipeline:
 # 便捷 API（GUI / CLI / 测试共用）
 # ---------------------------------------------------------------------------
 def _build_config(levels, include, exclude, top_n, context_lines, rule,
-                  analyze, analysis_mode="full") -> PipelineConfig:
+                  analyze, analysis_mode="full",
+                  similarity="standard") -> PipelineConfig:
     cfg = FilterConfig(
         levels=list(levels) if levels else list(DEFAULT_SELECTED_LEVELS),
         include=list(include or []),
@@ -335,18 +344,20 @@ def _build_config(levels, include, exclude, top_n, context_lines, rule,
     # 优化缺陷R79：fast 快速聚类等效关闭智能分析
     return PipelineConfig(filter_config=cfg, rule=rule,
                           analyze=analyze and analysis_mode != "fast",
-                          analysis_mode=analysis_mode)
+                          analysis_mode=analysis_mode,
+                          similarity=similarity)
 
 
 def analyze_file(path, *, levels=None, include=None, exclude=None,
                  top_n=None, context_lines=None, rule=None, analyze=True,
                  analysis_mode: str = "full",
+                 similarity: str = "standard",
                  progress_cb: Optional[ProgressCallback] = None,
                  cancel_event: Optional[Event] = None) -> AnalysisResult:
     """分析单个日志文件（详见 LogPipeline.run_file）。"""
     pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
                                          context_lines, rule, analyze,
-                                         analysis_mode),
+                                         analysis_mode, similarity),
                            progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_file(path)
 
@@ -354,11 +365,12 @@ def analyze_file(path, *, levels=None, include=None, exclude=None,
 def analyze_text(text: str, *, source: str = "<粘贴文本>", levels=None,
                  include=None, exclude=None, top_n=None, context_lines=None,
                  rule=None, analyze=True, analysis_mode: str = "full",
+                 similarity: str = "standard",
                  progress_cb: Optional[ProgressCallback] = None,
                  cancel_event: Optional[Event] = None) -> AnalysisResult:
     """分析粘贴文本（详见 LogPipeline.run_text）。"""
     pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
                                          context_lines, rule, analyze,
-                                         analysis_mode),
+                                         analysis_mode, similarity),
                            progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_text(text, source=source)

@@ -202,6 +202,11 @@ DEFAULT_CONTEXT_LINES = 50     # 典型样例前后上下文行数
 MIN_CONTEXT_LINES = 5          # 上下文行数下限（GUI 输入钳制）
 DEFAULT_TOP_N = 20             # 默认展示 / 导出的 Top N 错误数（无上限）
 CLUSTER_SIMILARITY_THRESHOLD = 0.85   # 聚类编辑距离相似度阈值
+# 优化缺陷R84：相似度阈值三档预设（严格=几乎相同才并簇 / 标准=默认
+# / 宽松=相似即并、压缩更激进），GUI 选择器与管线共用
+SIMILARITY_PRESETS = {"strict": 0.95,
+                      "standard": CLUSTER_SIMILARITY_THRESHOLD,
+                      "lenient": 0.70}
 MAX_SIMILARITY_COMPARE = 256          # 相似度回退比较的最大模板数（性能保护）
 TIMESTAMP_CACHE_SIZE = 65536          # 时间戳解析缓存上限（防内存膨胀）
 PROGRESS_EVERY_LINES = 16384          # 进度回调触发行数间隔

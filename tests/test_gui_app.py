@@ -3222,7 +3222,7 @@ class TestMainWindowSearch:
         """修复缺陷R81：三个组间可视区间完全相等（静态 padx 补偿）。
 
         两层验证：
-        1) 真实行构造锚点 —— 三组首左 padx 为 (19,24,24)、输入框右
+        1) 真实行构造锚点 —— 组首左 padx 为 (19,24,24,24)、输入框右
            padx 0、列 5 弹性权重已废（区间不再随窗口漂移）；
         2) 复刻行实测 —— 同款 CTk 控件 + 相同 padx + R74 紧凑宽
            复选框（尾距恒 4 逻辑 px），在本机 DPI 下量三个内容级
@@ -3236,14 +3236,15 @@ class TestMainWindowSearch:
         # 1) 真实行构造锚点（grid_info 的 padx 为 Tk 物理 px ——
         # 创建时已经 CTk 按 DPI 缩放，须乘 scale 比对）
         pads = [panel.grid_slaves(row=0, column=c)[0].grid_info()["padx"]
-                for c in (2, 6, 8)]
+                for c in (2, 6, 8, 11)]
         pads = [tuple(int(v) for v in p) for p in pads]
         s2 = int(round(2 * scale))
         expected = [(int(round(19 * scale)), s2),
                     (int(round(24 * scale)), s2),
+                    (int(round(24 * scale)), s2),
                     (int(round(24 * scale)), s2)]
         assert pads == expected, \
-            f"组首左 padx 应为补偿值 (19,24,24)×scale（实测 {pads}）"
+            f"组首左 padx 应为补偿值 (19,24,24,24)×scale（实测 {pads}）"
         entry_pad = tuple(int(v) for v in
                           app._ctx_entry.grid_info()["padx"])
         assert entry_pad[1] == 0, "输入框右 padx 应为 0（区间由组首承担）"
@@ -4592,6 +4593,49 @@ class TestAnalyzeModeSelector:
         text = app._detail_box.get("1.0", "end")
         assert "快速聚类模式（未执行智能分析）" in text
         assert "可能规则不匹配" not in str(app._status_label.cget("text"))
+
+
+class TestSimilaritySelector:
+    """优化缺陷R84：相似度阈值选择器（标准/严格/宽松）。"""
+
+    def test_dropdown_defaults_to_standard(self, app):
+        """默认选中「标准（推荐）」，下拉列表只剩另外两档。"""
+        assert app._similarity_key == "standard"
+        assert app._similarity_menu.get() == "标准（推荐）"
+        values = list(app._similarity_menu.cget("values"))
+        assert "标准（推荐）" not in values, "选中项不应出现在下拉列表"
+        assert values == ["严格", "宽松"]
+
+    def test_switch_hides_selected_and_persists(self, app):
+        """切换到「严格」：键更新 + 该项从列表消失 + 配置持久化。"""
+        app._on_similarity_changed("严格")
+        assert app._similarity_key == "strict"
+        values = list(app._similarity_menu.cget("values"))
+        assert "严格" not in values
+        assert "标准（推荐）" in values
+        assert app._current_config_dict()["similarity"] == "strict"
+
+    def test_menu_in_filter_row_right_end(self, app):
+        """相似度选择器落在过滤行右端空位（列 12，ⓘ 列 13）。"""
+        panel = app._ctx_entry.master
+        assert app._similarity_menu.master is panel
+        info = app._similarity_menu.grid_info()
+        assert str(info["row"]) == "0"
+        assert str(info["column"]) == "12"
+
+    def test_strict_mode_splits_clusters_in_analysis(self, app):
+        """切「严格」后分析：0.884 相似对拆 2 簇（标准并为 1 簇）。"""
+        app._on_similarity_changed("严格")
+        _run_paste_analysis(app, "\n".join([
+            "2024-01-01 09:00:00 ERROR [db] request timeout while "
+            "reading from db server",
+            "2024-01-01 09:00:01 ERROR [db] request timeout while "
+            "writing to db server",
+        ]))
+        app.update()
+        assert app._result is not None
+        assert len(app._result.clusters) == 2, \
+            "严格(0.95)应拆分 0.884 相似对（标准并 1 簇）"
 
 
 # ---------------------------------------------------------------------------
