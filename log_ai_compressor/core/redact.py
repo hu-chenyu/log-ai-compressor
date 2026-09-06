@@ -30,16 +30,26 @@ _MASK_PHONE = re.compile(r"\b1[3-9]\d{9}\b")
 _MASK_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b")
 
 
-def redact_text(text: str) -> str:
+def redact_text(text: str, custom_rules: list = None) -> str:
     """出站打码（顺序敏感：Bearer > 密钥键值 > URL 账号 > 邮箱 > 电话 > IP）。
 
     Bearer 必须先于密钥键值：「Authorization: Bearer xxx」若先走键值
     规则会把 Bearer 当作值吞掉（Authorization=[密钥]），真正的 token
     反而残留（自测发现的顺序缺陷）。
+
+    优化缺陷R103：用户自定义正则追加到最后一道防线，每行一条
+    （非法正则已在界面层拦截）。命中统一替换为 [自定义]。
     """
     text = _MASK_BEARER.sub(r"\1 [密钥]", text)
     text = _MASK_SECRET_KV.sub(lambda m: m.group(1) + "=[密钥]", text)
     text = _MASK_URL_CRED.sub(r"\1[账号]@", text)
     text = _MASK_EMAIL.sub("[邮箱]", text)
     text = _MASK_PHONE.sub("[电话]", text)
-    return _MASK_IPV4.sub("[IP]", text)
+    text = _MASK_IPV4.sub("[IP]", text)
+    for rule in (custom_rules or []):
+        if rule:
+            try:
+                text = re.sub(rule, "[自定义]", text)
+            except re.error:
+                pass
+    return text

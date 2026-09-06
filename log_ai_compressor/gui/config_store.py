@@ -35,6 +35,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "analyze_mode": "full",
     # 优化缺陷R84：相似度阈值档位（standard 标准 / strict 严格 / lenient 宽松）
     "similarity": "standard",
+    # 优化缺陷R103：自定义脱敏正则（⚙ 弹层多行文本，每行一条）
+    "redact_custom": "",
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},
     "last_files": [],

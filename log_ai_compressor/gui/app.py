@@ -3607,6 +3607,9 @@ class LogCompressorApp(_make_app_base()):
         if cfg.get("similarity") in SIMILARITY_KEYS:
             # 优化缺陷R84：恢复相似度阈值档位（默认标准）
             self._on_similarity_changed(SIMILARITY_DISPLAY[cfg["similarity"]])
+        if cfg.get("redact_custom"):
+            # 优化缺陷R103：恢复自定义脱敏规则（多行文本原样回填）
+            self._redact_custom_box.insert("1.0", str(cfg["redact_custom"]))
         # 修复缺陷R10：字体大小档位恢复（__init__ 已按档位建字体，
         # 此处仅同步选择器显示；字号一致时回调为空操作）
         if cfg.get("font_size") in FONT_SIZE_SCALE:
@@ -3627,6 +3630,9 @@ class LogCompressorApp(_make_app_base()):
             "analyze_mode": self._analyze_key,
             # 优化缺陷R84：相似度阈值档位持久化
             "similarity": self._similarity_key,
+            # 优化缺陷R103：自定义脱敏规则持久化
+            "redact_custom": self._redact_custom_box.get(
+                "1.0", "end").strip(),
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
             # 修复缺陷R10：字体大小档位持久化（下次启动自动恢复）
@@ -3881,17 +3887,38 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkCheckBox(
             frame, text="导出/复制时脱敏", variable=self._redact_var,
             checkbox_width=18, checkbox_height=18).grid(
-            row=4, column=1, padx=(4, 0), pady=(2, 12), sticky="w")
+            row=4, column=1, padx=(4, 0), pady=(2, 2), sticky="w")
         redact_help = ctk.CTkLabel(
             frame, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        redact_help.grid(row=4, column=2, padx=(6, 12), pady=(2, 12),
+        redact_help.grid(row=4, column=2, padx=(6, 12), pady=(2, 2),
                          sticky="w")
         Tooltip(redact_help, lambda: (
             "投喂外部大模型前的合规打码（纯本地规则，离线可用）\n"
             "密钥/凭据 → [密钥]    URL 账号段 → [账号]\n"
             "邮箱 → [邮箱]    手机号 → [电话]    IPv4 → [IP]\n"
             "仅作用于导出报告与复制摘要；界面内的分析结果保持原样"))
+
+        # 自定义脱敏规则（优化缺陷R103：内置规则覆盖不了的内部敏感
+        # 词 —— 工单号/内部域名等，用户每行写一条正则）
+        ctk.CTkLabel(frame, text="自定义脱敏").grid(
+            row=5, column=0, padx=(12, 4), pady=(2, 12), sticky="nw")
+        self._redact_custom_box = ctk.CTkTextbox(
+            frame, width=170, height=64,
+            font=ctk.CTkFont(family="Consolas", size=11))
+        self._redact_custom_box.grid(row=5, column=1, padx=(4, 0),
+                                     pady=(2, 12), sticky="w")
+        custom_help = ctk.CTkLabel(
+            frame, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        custom_help.grid(row=5, column=2, padx=(6, 12), pady=(2, 12),
+                         sticky="nw")
+        Tooltip(custom_help, lambda: (
+            "每行一条正则，命中统一打码为 [自定义]\n"
+            "例：PMS-\\d{6}      —— 内部工单号\n"
+            "例：[\\w.-]+\\.corp  —— 内部域名\n"
+            "非法行在导出/复制时忽略并在状态栏提示\n"
+            "与上方开关联动：开关关闭时自定义规则也不生效"))
         # 全局点击收起（同主题弹窗 R15 机制，与焦点解耦）
         self.bind_all("<Button-1>", self._on_settings_global_click,
                       add=True)
@@ -5891,7 +5918,8 @@ class LogCompressorApp(_make_app_base()):
             return
         folder = os.path.dirname(written[0])
         self._status_label.configure(
-            text=f"已导出 {len(written)} 个报告文件至 {folder}")
+            text=f"已导出 {len(written)} 个报告文件至 {folder}"
+                 + self._redact_invalid_note())
         if messagebox.askyesno(
                 "导出成功",
                 f"已导出 {len(written)} 个文件：\n"
@@ -5939,11 +5967,48 @@ class LogCompressorApp(_make_app_base()):
             out = base + ext
             content = build()
             if redact:
-                content = redact_text(content)
+                content = self._redact_out(content)
             with open(out, "w", encoding="utf-8") as fh:
                 fh.write(content)
             written.append(out)
         return written
+
+    # ------------------------------------------------------------------
+    # 优化缺陷R103：自定义脱敏规则（⚙ 弹层多行正则，每行一条）
+    # ------------------------------------------------------------------
+    def _custom_redact_rules(self):
+        """读取自定义规则：返回 (有效正则列表, 无效行数)。
+
+        非法行不静默丢弃 —— 计数后由出站动作在状态栏提示用户。
+        """
+        box = getattr(self, "_redact_custom_box", None)
+        if box is None:
+            return [], 0
+        valid, invalid = [], 0
+        for line in box.get("1.0", "end").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                re.compile(line)
+                valid.append(line)
+            except re.error:
+                invalid += 1
+        return valid, invalid
+
+    def _redact_out(self, text: str) -> str:
+        """出站脱敏统一入口：内置规则 + 自定义正则（无效行数记入
+        _last_redact_invalid，供状态栏提示）。"""
+        rules, self._last_redact_invalid = self._custom_redact_rules()
+        return redact_text(text, custom_rules=rules)
+
+    def _redact_invalid_note(self) -> str:
+        """自定义正则无效行的状态栏附注（无无效行/开关关时为空）。"""
+        bad = getattr(self, "_last_redact_invalid", 0)
+        if bad and getattr(self, "_redact_var", None) \
+                and self._redact_var.get():
+            return f"（{bad} 行自定义正则无效已忽略）"
+        return ""
 
     def _on_copy_summary(self) -> None:
         if self._result is None:
@@ -5952,11 +6017,12 @@ class LogCompressorApp(_make_app_base()):
                                 top_n=len(self._result.clusters))
         # 优化缺陷R86：出站脱敏（同导出，⚙ 弹层开关默认开）
         if getattr(self, "_redact_var", None) and self._redact_var.get():
-            summary = redact_text(summary)
+            summary = self._redact_out(summary)
         self.clipboard_clear()
         self.clipboard_append(summary)
         self._status_label.configure(
-            text="摘要已复制到剪贴板，可直接粘贴投喂 AI 助手")
+            text="摘要已复制到剪贴板，可直接粘贴投喂 AI 助手"
+                 + self._redact_invalid_note())
 
     def _show_charts(self) -> None:
         if self._result is None and not self._compare_results:
