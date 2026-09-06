@@ -2081,11 +2081,13 @@ class LogCompressorApp(_make_app_base()):
         panel.grid(row=2, column=0, sticky="ew", padx=10, pady=3)
         self._bg_widgets.append((panel, "card"))
         # 修复缺陷R72：搜索组迁出至独立「实时筛选行」—— 本行只剩
-        # 「按开始分析才生效」的控件（级别/智能分析模式/上下文行数/
-        # 解析规则），整行请求宽远低于可用宽，超宽切边问题根除；
+        # 「按开始分析才生效」的控件（级别/上下文行数/关键词黑白名单），
+        # 整行请求宽远低于可用宽，超宽切边问题根除；
         # 修复缺陷R81：原列 5 弹性空白列废止 —— 它吸收窗口余量导致
         # ⓘ→上下文行数 区间随窗口漂移、与其余两区间（12/18）恒不等；
-        # 三个组间区间改由各组首标签静态 padx 补偿实现（见下）
+        # 三个组间区间改由各组首标签静态 padx 补偿实现（见下）；
+        # 优化缺陷R93：智能分析/解析规则迁至高级选项行，关键词黑白
+        # 名单自 ⚙ 弹层迁回本行（用户审美换位）
 
         ctk.CTkLabel(panel, text="级别过滤", font=ctk.CTkFont(weight="bold")
                      ).grid(row=0, column=0, padx=(12, 4), sticky="w")
@@ -2146,53 +2148,25 @@ class LogCompressorApp(_make_app_base()):
         self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
         self._ctx_entry.grid(row=0, column=3, padx=(2, 0), sticky="w")
 
-        # 优化缺陷R79：智能分析模式选择器 —— 上下文行数组之后（换位后），
-        # 与解析规则同款交互（选中项从下拉消失 + ⓘ 悬停说明）
-        # 修复缺陷R81：组首左 padx 24（静态等距见上）
-        ctk.CTkLabel(panel, text="智能分析").grid(
+        # 优化缺陷R93：关键词黑白名单紧随上下文行数（用户审美：自 ⚙
+        # 弹层迁回主行，智能分析/解析规则对调迁至高级选项行换位）；
+        # 组首左 padx 24 静态等距（同 R81 补偿体系）
+        # 包含=白名单任一命中保留，排除=黑名单任一命中剔除；
+        # 匹配范围 模块+消息+堆栈（默认小写子串，⚙ 弹层可切正则）
+        ctk.CTkLabel(panel, text="包含关键词").grid(
+            row=0, column=4, padx=(24, 2), sticky="w")
+        self._include_entry = ctk.CTkEntry(
+            panel, width=140, placeholder_text="逗号/空格分隔，留空不限")
+        self._include_entry.grid(row=0, column=5, padx=(2, 0), sticky="w")
+        ctk.CTkLabel(panel, text="排除关键词").grid(
             row=0, column=6, padx=(24, 2), sticky="w")
-        self._analyze_key = "full"
-        # 修复缺陷R82：dynamic_resizing=False + 定宽 150（切档不伸缩）；
-        # 150 按最长选项「完整分析（推荐）」（8 全角字符+箭头）定
-        self._analyze_menu = ctk.CTkOptionMenu(
-            panel, width=150, dynamic_resizing=False,
-            values=[ANALYZE_DISPLAY[k] for k in ANALYZE_KEYS
-                    if k != "full"],
-            command=self._on_analyze_changed)
-        self._analyze_menu.set(ANALYZE_DISPLAY["full"])
-        self._analyze_menu.grid(row=0, column=7, padx=(2, 0), sticky="w")
-        analyze_help = ctk.CTkLabel(
-            panel, text="ⓘ", text_color="#4dd0e1",
-            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        analyze_help.grid(row=0, column=8, padx=(4, 0), sticky="w")
-        self._analyze_help_tooltip = Tooltip(
-            analyze_help,
-            lambda: (ANALYZE_DESCRIPTIONS.get(self._analyze_key, "")
-                     + "\n" + _ANOMALY_LEGEND))
+        self._exclude_entry = ctk.CTkEntry(
+            panel, width=140, placeholder_text="逗号/空格分隔，留空不限")
+        # 行尾余量：末列右 padx 12（与原规则 ⓘ 行尾余量同义）
+        self._exclude_entry.grid(row=0, column=7, padx=(2, 12), sticky="w")
 
-        # 修复缺陷R44：上下文行数输入框已前移至列 3（换位，见上）
-        # 修复缺陷R81：组首左 padx 24（静态等距见上）
-        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=9, padx=(24, 2),
-                                                  sticky="w")
-        # 优化缺陷R71：下拉显示中文名，默认「自动识别（推荐）」；
-        # 当前选中项不出现在下拉列表（与主题选择器同款交互）
-        # 修复缺陷R82：dynamic_resizing=False —— 定宽 150 不随选项伸缩
-        self._rule_key = "auto"
-        self._rule_menu = ctk.CTkOptionMenu(
-            panel, width=150, dynamic_resizing=False,
-            values=[RULE_DISPLAY[k] for k in RULE_KEYS if k != "auto"],
-            command=self._on_rule_changed)
-        self._rule_menu.set(RULE_DISPLAY["auto"])
-        self._rule_menu.grid(row=0, column=10, padx=(2, 0), sticky="w")
-        # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
-        # 优化缺陷R85：ⓘ 右 12 恢复行尾余量（其他选项组迁至高级选项行）
-        rule_help = ctk.CTkLabel(
-            panel, text="ⓘ", text_color="#4dd0e1",
-            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        rule_help.grid(row=0, column=11, padx=(4, 12), sticky="w")
-        self._rule_help_tooltip = Tooltip(
-            rule_help,
-            lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
+        # 优化缺陷R93：智能分析/解析规则两选组已迁至高级选项行
+        # （与关键词黑白名单换位，见 _build_advanced_panel）
 
     # ------------------------------------------------------------------
     # 优化缺陷R85：高级选项行（时间范围 / 行数上限 / 其他选项⚙）——
@@ -2203,8 +2177,9 @@ class LogCompressorApp(_make_app_base()):
 
         优化缺陷R85：时间范围过滤（①）+ 行数上限采样（④）；「其他
         选项 ⚙」从过滤行行尾迁入本行行尾（用户审美），弹层机制不变。
-        优化缺陷R92：关键词黑白名单（⑤）撤入 ⚙ 设置弹层（整行超宽
-        出屏，截图遮挡），本行只留三组轻量控件。
+        优化缺陷R93：智能分析/解析规则两选组自过滤行迁入本行（与
+        关键词黑白名单换位，用户审美），本行现为 时间范围/行数上限/
+        智能分析/解析规则/其他选项⚙ 五组。
         本行各项均不持久化（数据类过滤器：残留旧值会静默隐藏未来
         分析的错误，重启清零；生效时状态栏常驻标签兜底提示）。
         """
@@ -2251,14 +2226,56 @@ class LogCompressorApp(_make_app_base()):
         Tooltip(maxlines_help, lambda:
                 MAXLINES_DESCRIPTIONS.get(self._maxlines_key, ""))
 
-        # 优化缺陷R92：关键词黑白名单两框撤入 ⚙ 设置弹层（本行曾
-        # 因此超宽出屏）；「其他选项 ⚙」顺位前移，弹层机制不变
-        ctk.CTkLabel(panel, text="其他选项").grid(
+        # 优化缺陷R93：智能分析/解析规则两选组自过滤行迁入（与关键词
+        # 黑白名单换位，用户审美），控件/交互/持久化逻辑原样搬移
+        ctk.CTkLabel(panel, text="智能分析").grid(
             row=0, column=8, padx=(24, 2), sticky="w")
+        self._analyze_key = "full"
+        # 修复缺陷R82：dynamic_resizing=False + 定宽 150（切档不伸缩）；
+        # 150 按最长选项「完整分析（推荐）」（8 全角字符+箭头）定
+        self._analyze_menu = ctk.CTkOptionMenu(
+            panel, width=150, dynamic_resizing=False,
+            values=[ANALYZE_DISPLAY[k] for k in ANALYZE_KEYS
+                    if k != "full"],
+            command=self._on_analyze_changed)
+        self._analyze_menu.set(ANALYZE_DISPLAY["full"])
+        self._analyze_menu.grid(row=0, column=9, padx=(2, 0), sticky="w")
+        analyze_help = ctk.CTkLabel(
+            panel, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        analyze_help.grid(row=0, column=10, padx=(4, 0), sticky="w")
+        self._analyze_help_tooltip = Tooltip(
+            analyze_help,
+            lambda: (ANALYZE_DESCRIPTIONS.get(self._analyze_key, "")
+                     + "\n" + _ANOMALY_LEGEND))
+
+        # 优化缺陷R71：下拉显示中文名，默认「自动识别（推荐）」；
+        # 当前选中项不出现在下拉列表（与主题选择器同款交互）
+        ctk.CTkLabel(panel, text="解析规则").grid(
+            row=0, column=11, padx=(24, 2), sticky="w")
+        self._rule_key = "auto"
+        self._rule_menu = ctk.CTkOptionMenu(
+            panel, width=150, dynamic_resizing=False,
+            values=[RULE_DISPLAY[k] for k in RULE_KEYS if k != "auto"],
+            command=self._on_rule_changed)
+        self._rule_menu.set(RULE_DISPLAY["auto"])
+        self._rule_menu.grid(row=0, column=12, padx=(2, 0), sticky="w")
+        # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
+        rule_help = ctk.CTkLabel(
+            panel, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        rule_help.grid(row=0, column=13, padx=(4, 0), sticky="w")
+        self._rule_help_tooltip = Tooltip(
+            rule_help,
+            lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
+
+        # 「其他选项 ⚙」行尾（弹层机制不变；R93 换位后列 14/15）
+        ctk.CTkLabel(panel, text="其他选项").grid(
+            row=0, column=14, padx=(24, 2), sticky="w")
         self._settings_btn = ctk.CTkButton(
             panel, text="⚙", width=36,
             command=self._toggle_settings_popup)
-        self._settings_btn.grid(row=0, column=9, padx=(2, 12), sticky="w")
+        self._settings_btn.grid(row=0, column=15, padx=(2, 12), sticky="w")
         self._build_settings_popup()
 
     def _on_maxlines_changed(self, choice: str) -> None:
@@ -3723,12 +3740,13 @@ class LogCompressorApp(_make_app_base()):
     def _build_settings_popup(self) -> None:
         """构建 ⚙ 设置弹层（优化缺陷R84）：低频分析前置设置收纳处。
 
-        入住项：相似度阈值（R84 自过滤行撤入）、关键词黑白名单 +
-        正则开关（R92 自高级行撤入，根治整行超宽出屏）、编码指定
-        （R88）、出站脱敏开关（R86）。弹层机制与主题下拉同款（修复
-        缺陷R15 验证过）：无边框 CTkToplevel + 全局点击收起（150ms
-        打开豁免 + 落点在弹层内豁免），与焦点完全解耦；主窗最小化
-        （<Unmap>）时同步收起（topmost 不随主窗隐藏）。
+        入住项：相似度阈值（R84 自过滤行撤入）、关键词正则开关
+        （R91）、编码指定（R88）、出站脱敏开关（R86）；关键词黑白
+        名单两框已于 R93 迁回过滤行（用户审美，与智能分析/解析
+        规则换位）。弹层机制与主题下拉同款（修复缺陷R15 验证过）：
+        无边框 CTkToplevel + 全局点击收起（150ms 打开豁免 + 落点
+        在弹层内豁免），与焦点完全解耦；主窗最小化（<Unmap>）时
+        同步收起（topmost 不随主窗隐藏）。
         """
         win = ctk.CTkToplevel(self)
         win.overrideredirect(True)
@@ -3761,35 +3779,20 @@ class LogCompressorApp(_make_app_base()):
             sim_help,
             lambda: SIMILARITY_DESCRIPTIONS.get(self._similarity_key, ""))
 
-        # 关键词黑白名单（优化缺陷R92：自高级行撤入；包含=白名单任一
-        # 命中保留，排除=黑名单任一命中剔除；范围 模块+消息+堆栈）
-        ctk.CTkLabel(frame, text="包含关键词").grid(
-            row=2, column=0, padx=(12, 4), pady=2, sticky="w")
-        self._include_entry = ctk.CTkEntry(
-            frame, width=230,
-            placeholder_text="逗号/空格分隔，留空不限")
-        self._include_entry.grid(row=2, column=1, padx=(4, 0), pady=2,
-                                 sticky="w")
-        ctk.CTkLabel(frame, text="排除关键词").grid(
-            row=3, column=0, padx=(12, 4), pady=2, sticky="w")
-        self._exclude_entry = ctk.CTkEntry(
-            frame, width=230,
-            placeholder_text="逗号/空格分隔，留空不限")
-        self._exclude_entry.grid(row=3, column=1, padx=(4, 0), pady=2,
-                                 sticky="w")
-
         # 关键词正则开关（优化缺陷R91：默认小写子串；勾选后各项按
-        # 正则编译，非法正则在开始分析时拦截提示）
+        # 正则编译，非法正则在开始分析时拦截提示；R93 关键词两框已
+        # 迁回过滤行，开关留弹层 —— 低频开关不占用主行宽度）
         self._use_regex_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             frame, text="关键词按正则匹配", variable=self._use_regex_var,
             checkbox_width=18, checkbox_height=18).grid(
-            row=4, column=1, padx=(4, 0), pady=2, sticky="w")
+            row=2, column=1, padx=(4, 0), pady=2, sticky="w")
         regex_help = ctk.CTkLabel(
             frame, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        regex_help.grid(row=4, column=2, padx=(6, 12), pady=2, sticky="w")
+        regex_help.grid(row=2, column=2, padx=(6, 12), pady=2, sticky="w")
         Tooltip(regex_help, lambda: (
+            "作用于过滤行的包含/排除关键词：\n"
             "不勾选（默认）：关键词按小写子串匹配，逗号/空格分隔多个\n"
             "勾选后：每项按正则表达式匹配（不区分大小写），例如\n"
             "  timeout|refused   —— 命中两者之一\n"
@@ -3798,19 +3801,19 @@ class LogCompressorApp(_make_app_base()):
 
         # 编码指定（优化缺陷R88：None=自动探测；手动覆盖乱码场景）
         ctk.CTkLabel(frame, text="编码").grid(
-            row=5, column=0, padx=(12, 4), pady=2, sticky="w")
+            row=3, column=0, padx=(12, 4), pady=2, sticky="w")
         self._encoding_display = ENCODING_DISPLAY[0]
         self._encoding_menu = ctk.CTkOptionMenu(
             frame, width=150, dynamic_resizing=False,
             values=list(ENCODING_DISPLAY[1:]),
             command=self._on_encoding_changed)
         self._encoding_menu.set(ENCODING_DISPLAY[0])
-        self._encoding_menu.grid(row=5, column=1, padx=(4, 0), pady=2,
+        self._encoding_menu.grid(row=3, column=1, padx=(4, 0), pady=2,
                                  sticky="w")
         enc_help = ctk.CTkLabel(
             frame, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        enc_help.grid(row=5, column=2, padx=(6, 12), pady=2, sticky="w")
+        enc_help.grid(row=3, column=2, padx=(6, 12), pady=2, sticky="w")
         Tooltip(enc_help, lambda: (
             "自动探测覆盖 UTF-8/GBK/UTF-16/UTF-32 及 BOM，日常无需指定\n"
             "老系统中文日志出现乱码时，手动指定 GBK / GB18030 重跑\n"
@@ -3822,11 +3825,11 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkCheckBox(
             frame, text="导出/复制时脱敏", variable=self._redact_var,
             checkbox_width=18, checkbox_height=18).grid(
-            row=6, column=1, padx=(4, 0), pady=(2, 12), sticky="w")
+            row=4, column=1, padx=(4, 0), pady=(2, 12), sticky="w")
         redact_help = ctk.CTkLabel(
             frame, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        redact_help.grid(row=6, column=2, padx=(6, 12), pady=(2, 12),
+        redact_help.grid(row=4, column=2, padx=(6, 12), pady=(2, 12),
                          sticky="w")
         Tooltip(redact_help, lambda: (
             "投喂外部大模型前的合规打码（纯本地规则，离线可用）\n"
