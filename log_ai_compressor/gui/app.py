@@ -2285,6 +2285,12 @@ class LogCompressorApp(_make_app_base()):
             panel, text="↺ 重置", width=64,
             command=self._reset_advanced_options)
         self._reset_btn.grid(row=0, column=16, padx=(6, 12), sticky="w")
+        # 优化缺陷R98：四个 ⓘ 列均分行尾剩余宽（uniform 同组）——
+        # 四个组间可视区间恒等（基线 padx 24 + 等份余量），且重置
+        # 按钮被顶到行尾、右缘与上排排除关键词输入框右缘对齐
+        # （两面板同 padx=10 sticky=ew，右边距同 12 → 同一垂线）
+        for _col in (4, 7, 10, 13):
+            panel.grid_columnconfigure(_col, weight=1, uniform="adv_gap")
         Tooltip(self._reset_btn, lambda: (
             "重置前置设置为默认：\n"
             "清空 时间范围 / 包含·排除关键词\n"
