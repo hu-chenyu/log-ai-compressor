@@ -42,7 +42,12 @@ from log_ai_compressor.core.models import (
     ErrorCluster,
     format_timestamp,
 )
-from log_ai_compressor.core.pipeline import analyze_file, analyze_text
+from log_ai_compressor.core.pipeline import (
+    analyze_file,
+    analyze_files,
+    analyze_text,
+)
+from log_ai_compressor.core.redact import redact_text
 from log_ai_compressor.rules.engine import detect_rule, stratified_sample
 from log_ai_compressor.export.reporters import (
     SECTIONS_ALL,
@@ -153,6 +158,15 @@ MAXLINES_DESCRIPTIONS = {
             "达上限时状态栏标记「已达行数上限」",
     "500k": "前 50 万行：大文件折中 —— 覆盖更全但仍可能漏掉尾部错误",
     "1m": "前 100 万行：近全量快速预览",
+}
+# 优化缺陷R88：编码指定（⚙ 弹层；None=自动探测兜底，老系统中文
+# 日志乱码时手动指定覆盖探测结果）
+ENCODING_DISPLAY = ("自动探测（推荐）", "UTF-8", "GBK / GB18030", "UTF-16")
+_ENCODING_VALUES = {
+    "自动探测（推荐）": None,
+    "UTF-8": "utf-8",
+    "GBK / GB18030": "gb18030",
+    "UTF-16": "utf-16",
 }
 ANOMALY_DESCRIPTIONS = {
     "burst": "集中爆发：错误峰值超过全局 3σ 或簇自身基线（中位数+3×MAD）",
@@ -351,6 +365,21 @@ def _widget_alive(widget) -> bool:
         return bool(widget.winfo_exists())
     except (tk.TclError, AttributeError):
         return False
+
+
+def _sort_rotation_oldest_first(paths) -> list:
+    """轮转文件按内容时间排序（最旧在前，优化缺陷R89）。
+
+    依据：轮转文件的修改时间与其内容时间一致（旧轮转先写完），
+    mtime 升序即内容时间序；mtime 取不到时按文件名兜底，保证
+    顺序确定不崩溃。
+    """
+    def key(p):
+        try:
+            return (0, os.path.getmtime(p))
+        except OSError:
+            return (1, str(p))
+    return sorted(paths, key=key)
 
 
 # ---------------------------------------------------------------------------
@@ -1996,7 +2025,8 @@ class LogCompressorApp(_make_app_base()):
         tab = self._tabview.tab("文件导入")
         tab.grid_columnconfigure(0, weight=1)
         hint_text = ("选择或将日志文件拖入窗口任意位置（支持超大文件、"
-                     "UTF-8/GBK 自动适配）")
+                     ".gz/.zip 直读、UTF-8/GBK 自动适配；选择文件时"
+                     "可多选轮转日志合并分析）")
         if not _HAS_DND:
             hint_text += "  |  拖拽未启用：pip install tkinterdnd2 后重启"
         hint = ctk.CTkLabel(tab, text=hint_text)
@@ -2165,16 +2195,17 @@ class LogCompressorApp(_make_app_base()):
             lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
 
     # ------------------------------------------------------------------
-    # 优化缺陷R85：高级选项行（时间范围 / 行数上限 / 关键词黑白名单 /
-    # 其他选项⚙）—— 全部「开始分析」时生效的前置设置
+    # 优化缺陷R85：高级选项行（时间范围 / 行数上限 / 其他选项⚙）——
+    # 全部「开始分析」时生效的前置设置
     # ------------------------------------------------------------------
     def _build_advanced_panel(self) -> None:
         """高级选项行：低频前置过滤（主流日志工具的第一前置项组）。
 
-        优化缺陷R85：时间范围过滤（①）+ 行数上限采样（④）+ 关键词
-        黑白名单（⑤，R43 删除后按用户决策回归于此行）；「其他选项
-        ⚙」从过滤行行尾迁入本行行尾（用户审美），弹层机制不变。
-        本行三项均不持久化（数据类过滤器：残留旧值会静默隐藏未来
+        优化缺陷R85：时间范围过滤（①）+ 行数上限采样（④）；「其他
+        选项 ⚙」从过滤行行尾迁入本行行尾（用户审美），弹层机制不变。
+        优化缺陷R92：关键词黑白名单（⑤）撤入 ⚙ 设置弹层（整行超宽
+        出屏，截图遮挡），本行只留三组轻量控件。
+        本行各项均不持久化（数据类过滤器：残留旧值会静默隐藏未来
         分析的错误，重启清零；生效时状态栏常驻标签兜底提示）。
         """
         panel = ctk.CTkFrame(self)
@@ -2220,26 +2251,14 @@ class LogCompressorApp(_make_app_base()):
         Tooltip(maxlines_help, lambda:
                 MAXLINES_DESCRIPTIONS.get(self._maxlines_key, ""))
 
-        # 关键词黑白名单（①④⑤之⑤：包含=白名单任一命中，排除=黑
-        # 名单任一命中即剔除；匹配范围 模块+消息+堆栈，小写子串）
-        ctk.CTkLabel(panel, text="包含关键词").grid(
-            row=0, column=8, padx=(24, 2), sticky="w")
-        self._include_entry = ctk.CTkEntry(
-            panel, width=140, placeholder_text="逗号/空格分隔，留空不限")
-        self._include_entry.grid(row=0, column=9, padx=(2, 0), sticky="w")
-        ctk.CTkLabel(panel, text="排除关键词").grid(
-            row=0, column=10, padx=(24, 2), sticky="w")
-        self._exclude_entry = ctk.CTkEntry(
-            panel, width=140, placeholder_text="逗号/空格分隔，留空不限")
-        self._exclude_entry.grid(row=0, column=11, padx=(2, 0), sticky="w")
-
-        # 「其他选项 ⚙」自过滤行行尾迁入（优化缺陷R84 弹层机制不变）
+        # 优化缺陷R92：关键词黑白名单两框撤入 ⚙ 设置弹层（本行曾
+        # 因此超宽出屏）；「其他选项 ⚙」顺位前移，弹层机制不变
         ctk.CTkLabel(panel, text="其他选项").grid(
-            row=0, column=12, padx=(24, 2), sticky="w")
+            row=0, column=8, padx=(24, 2), sticky="w")
         self._settings_btn = ctk.CTkButton(
             panel, text="⚙", width=36,
             command=self._toggle_settings_popup)
-        self._settings_btn.grid(row=0, column=13, padx=(2, 12), sticky="w")
+        self._settings_btn.grid(row=0, column=9, padx=(2, 12), sticky="w")
         self._build_settings_popup()
 
     def _on_maxlines_changed(self, choice: str) -> None:
@@ -3589,20 +3608,26 @@ class LogCompressorApp(_make_app_base()):
                 return "epoch", _time.mktime(_time.strptime(text, fmt))
             except ValueError:
                 pass
-        raise ValueError(f"无法识别的时间格式：{text}")
+        raise ValueError(f"无法识别的时间格式：{text}（支持 HH:MM:SS 或 "
+                         f"YYYY-MM-DD HH:MM:SS，留空不限）")
 
     def _advanced_params(self) -> dict:
-        """采集高级选项行参数（开始分析时下发管线）。
+        """采集高级选项行 + ⚙ 弹层参数（开始分析时下发管线）。
 
         优化缺陷R85：时间范围（epoch/tod 双模式，任端可空）+ 行数
         上限（档位键映射数值）+ 包含/排除关键词（逗号/空格/中文逗号
-        分隔，小写子串语义见 EntryFilter）。时间输入非法时抛
-        ValueError —— _on_start 拦截提示并放弃启动（边界校验）。
+        分隔，小写子串语义见 EntryFilter）。
+        优化缺陷R91/R92：关键词两框已撤入 ⚙ 弹层并新增正则开关 —
+        勾选时各项预编译校验，非法正则抛 ValueError（与非法时间输入
+        同路：_on_start 拦截提示并放弃启动，边界校验不静默丢弃）。
+        优化缺陷R88：编码指定（None=自动探测）。
         """
         params: dict = {
             "time_start": None, "time_end": None,
             "tod_start": None, "tod_end": None,
             "max_lines": MAXLINES_VALUES.get(self._maxlines_key),
+            "use_regex": bool(self._use_regex_var.get()),
+            "encoding": _ENCODING_VALUES.get(self._encoding_display),
         }
         for entry, prefix in ((self._time_start_entry, "start"),
                               (self._time_end_entry, "end")):
@@ -3618,6 +3643,16 @@ class LogCompressorApp(_make_app_base()):
                         if k.strip()]
             if keywords:
                 params[key] = keywords
+        if params["use_regex"]:
+            bad = []
+            for key in ("include", "exclude"):
+                for kw in params.get(key) or []:
+                    try:
+                        re.compile(kw)
+                    except re.error as exc:
+                        bad.append(f"{kw}（{exc}）")
+            if bad:
+                raise ValueError("关键词正则无法编译：" + "、".join(bad))
         return params
 
     def _on_rule_changed(self, choice: str) -> None:
@@ -3688,11 +3723,12 @@ class LogCompressorApp(_make_app_base()):
     def _build_settings_popup(self) -> None:
         """构建 ⚙ 设置弹层（优化缺陷R84）：低频分析前置设置收纳处。
 
-        首个入住项：相似度阈值选择器（原过滤行整组撤入，根治整行
-        超宽出屏）。弹层机制与主题下拉同款（修复缺陷R15 验证过）：
-        无边框 CTkToplevel + 全局点击收起（150ms 打开豁免 + 落点
-        在弹层内豁免），与焦点完全解耦；主窗最小化（<Unmap>）时
-        同步收起（topmost 不随主窗隐藏）。
+        入住项：相似度阈值（R84 自过滤行撤入）、关键词黑白名单 +
+        正则开关（R92 自高级行撤入，根治整行超宽出屏）、编码指定
+        （R88）、出站脱敏开关（R86）。弹层机制与主题下拉同款（修复
+        缺陷R15 验证过）：无边框 CTkToplevel + 全局点击收起（150ms
+        打开豁免 + 落点在弹层内豁免），与焦点完全解耦；主窗最小化
+        （<Unmap>）时同步收起（topmost 不随主窗隐藏）。
         """
         win = ctk.CTkToplevel(self)
         win.overrideredirect(True)
@@ -3707,7 +3743,7 @@ class LogCompressorApp(_make_app_base()):
             row=0, column=0, columnspan=3, padx=12, pady=(10, 2),
             sticky="w")
         ctk.CTkLabel(frame, text="相似度").grid(
-            row=1, column=0, padx=(12, 4), pady=(2, 12), sticky="w")
+            row=1, column=0, padx=(12, 4), pady=2, sticky="w")
         self._similarity_key = "standard"
         self._similarity_menu = ctk.CTkOptionMenu(
             frame, width=150, dynamic_resizing=False,
@@ -3716,19 +3752,102 @@ class LogCompressorApp(_make_app_base()):
             command=self._on_similarity_changed)
         self._similarity_menu.set(SIMILARITY_DISPLAY["standard"])
         self._similarity_menu.grid(row=1, column=1, padx=(4, 0),
-                                   pady=(2, 12), sticky="w")
+                                   pady=2, sticky="w")
         sim_help = ctk.CTkLabel(
             frame, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        sim_help.grid(row=1, column=2, padx=(6, 12), pady=(2, 12),
-                      sticky="w")
+        sim_help.grid(row=1, column=2, padx=(6, 12), pady=2, sticky="w")
         self._similarity_help_tooltip = Tooltip(
             sim_help,
             lambda: SIMILARITY_DESCRIPTIONS.get(self._similarity_key, ""))
+
+        # 关键词黑白名单（优化缺陷R92：自高级行撤入；包含=白名单任一
+        # 命中保留，排除=黑名单任一命中剔除；范围 模块+消息+堆栈）
+        ctk.CTkLabel(frame, text="包含关键词").grid(
+            row=2, column=0, padx=(12, 4), pady=2, sticky="w")
+        self._include_entry = ctk.CTkEntry(
+            frame, width=230,
+            placeholder_text="逗号/空格分隔，留空不限")
+        self._include_entry.grid(row=2, column=1, padx=(4, 0), pady=2,
+                                 sticky="w")
+        ctk.CTkLabel(frame, text="排除关键词").grid(
+            row=3, column=0, padx=(12, 4), pady=2, sticky="w")
+        self._exclude_entry = ctk.CTkEntry(
+            frame, width=230,
+            placeholder_text="逗号/空格分隔，留空不限")
+        self._exclude_entry.grid(row=3, column=1, padx=(4, 0), pady=2,
+                                 sticky="w")
+
+        # 关键词正则开关（优化缺陷R91：默认小写子串；勾选后各项按
+        # 正则编译，非法正则在开始分析时拦截提示）
+        self._use_regex_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            frame, text="关键词按正则匹配", variable=self._use_regex_var,
+            checkbox_width=18, checkbox_height=18).grid(
+            row=4, column=1, padx=(4, 0), pady=2, sticky="w")
+        regex_help = ctk.CTkLabel(
+            frame, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        regex_help.grid(row=4, column=2, padx=(6, 12), pady=2, sticky="w")
+        Tooltip(regex_help, lambda: (
+            "不勾选（默认）：关键词按小写子串匹配，逗号/空格分隔多个\n"
+            "勾选后：每项按正则表达式匹配（不区分大小写），例如\n"
+            "  timeout|refused   —— 命中两者之一\n"
+            "  ERR-\\d{4}         —— 命中 ERR-0001 这类错误码\n"
+            "非法正则在开始分析时拦截提示，不会静默丢弃"))
+
+        # 编码指定（优化缺陷R88：None=自动探测；手动覆盖乱码场景）
+        ctk.CTkLabel(frame, text="编码").grid(
+            row=5, column=0, padx=(12, 4), pady=2, sticky="w")
+        self._encoding_display = ENCODING_DISPLAY[0]
+        self._encoding_menu = ctk.CTkOptionMenu(
+            frame, width=150, dynamic_resizing=False,
+            values=list(ENCODING_DISPLAY[1:]),
+            command=self._on_encoding_changed)
+        self._encoding_menu.set(ENCODING_DISPLAY[0])
+        self._encoding_menu.grid(row=5, column=1, padx=(4, 0), pady=2,
+                                 sticky="w")
+        enc_help = ctk.CTkLabel(
+            frame, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        enc_help.grid(row=5, column=2, padx=(6, 12), pady=2, sticky="w")
+        Tooltip(enc_help, lambda: (
+            "自动探测覆盖 UTF-8/GBK/UTF-16/UTF-32 及 BOM，日常无需指定\n"
+            "老系统中文日志出现乱码时，手动指定 GBK / GB18030 重跑\n"
+            "多文件合并分析时，全部文件按同一编码读取"))
+
+        # 出站脱敏开关（优化缺陷R86：导出报告/复制摘要时打码；本地
+        # 分析结果保持原样便于排查，仅出站文本过 redact_text）
+        self._redact_var = tk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            frame, text="导出/复制时脱敏", variable=self._redact_var,
+            checkbox_width=18, checkbox_height=18).grid(
+            row=6, column=1, padx=(4, 0), pady=(2, 12), sticky="w")
+        redact_help = ctk.CTkLabel(
+            frame, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        redact_help.grid(row=6, column=2, padx=(6, 12), pady=(2, 12),
+                         sticky="w")
+        Tooltip(redact_help, lambda: (
+            "投喂外部大模型前的合规打码（纯本地规则，离线可用）\n"
+            "密钥/凭据 → [密钥]    URL 账号段 → [账号]\n"
+            "邮箱 → [邮箱]    手机号 → [电话]    IPv4 → [IP]\n"
+            "仅作用于导出报告与复制摘要；界面内的分析结果保持原样"))
         # 全局点击收起（同主题弹窗 R15 机制，与焦点解耦）
         self.bind_all("<Button-1>", self._on_settings_global_click,
                       add=True)
         self.bind("<Unmap>", lambda e: self._close_settings_popup())
+
+    def _on_encoding_changed(self, choice: str) -> None:
+        """编码指定切换（优化缺陷R88）：选中项从下拉列表移除（与
+        相似度选择器同款交互）；在下一次「开始分析」生效。"""
+        if choice not in _ENCODING_VALUES:
+            return
+        self._encoding_display = choice
+        self._encoding_menu.set(choice)
+        self._encoding_menu.configure(
+            values=[d for d in ENCODING_DISPLAY if d != choice])
+        self._status_label.configure(text=f"编码 {choice}：下一次分析生效")
 
     def _toggle_settings_popup(self) -> None:
         """⚙ 按钮：切换设置弹层开合（贴按钮正下方、右对齐防出右屏）。"""
@@ -3797,12 +3916,23 @@ class LogCompressorApp(_make_app_base()):
 
     def _browse_file(self, entry: Optional[ctk.CTkEntry] = None) -> None:
         target = entry or self._file_entry
-        path = filedialog.askopenfilename(
-            title="选择日志文件",
-            filetypes=[("日志文件", "*.log *.txt *.out"), ("所有文件", "*.*")])
-        if path:
+        # 优化缺陷R87：文件类型补 .gz/.zip（压缩包透明解压直读）
+        filetypes = [("日志文件", "*.log *.txt *.out *.gz *.zip"),
+                     ("所有文件", "*.*")]
+        if entry is not None:
+            # 对比区输入框：维持单选
+            path = filedialog.askopenfilename(
+                title="选择日志文件", filetypes=filetypes)
+            paths = (path,) if path else ()
+        else:
+            # 优化缺陷R89：主导入框支持多选 → 轮转文件合并分析
+            # （";" 分隔填入，开始分析时按 mtime 最旧在前排序）
+            paths = filedialog.askopenfilenames(
+                title="选择日志文件（可多选轮转文件合并分析）",
+                filetypes=filetypes)
+        if paths:
             target.delete(0, "end")
-            target.insert(0, path)
+            target.insert(0, "; ".join(paths))
 
     def _on_drop_file(self, event) -> None:
         """拖拽导入：整窗接收，按当前 Tab 路由填充文件路径。"""
@@ -4202,13 +4332,12 @@ class LogCompressorApp(_make_app_base()):
 
         payload: dict = {"mode": mode}
         # 全部 UI 状态必须在主线程采集（Tk 控件禁止跨线程访问）
-        # 优化缺陷R85：时间输入边界校验 —— 非法格式提示并放弃启动
+        # 优化缺陷R85：前置输入边界校验 —— 非法格式提示并放弃启动
+        # （时间格式 / R91 非法正则同路拦截）
         try:
             advanced = self._advanced_params()
         except ValueError as exc:
-            self._status_label.configure(
-                text=f"时间范围输入有误：{exc}（支持 HH:MM:SS 或 "
-                     f"YYYY-MM-DD HH:MM:SS，留空不限）")
+            self._status_label.configure(text=f"前置设置有误：{exc}")
             return
         payload["common"] = dict(
             levels=[lv for lv, var in self._level_vars.items() if var.get()],
@@ -4228,7 +4357,14 @@ class LogCompressorApp(_make_app_base()):
             if not path:
                 messagebox.showwarning("提示", "请先选择日志文件")
                 return
-            payload["file"] = path
+            # 优化缺陷R89：文件对话框多选（";" 分隔）→ 轮转文件合并
+            # 分析（按 mtime 最旧在前排序，跨轮转因果链不断）
+            parts = [p.strip() for p in path.split(";") if p.strip()]
+            if len(parts) > 1:
+                payload["rotate_files"] = _sort_rotation_oldest_first(
+                    parts)
+            else:
+                payload["file"] = path
         elif mode == "文本粘贴":
             # 修复缺陷#11：粘贴文本读取健壮性处理
             # - Tk Text 的 get("1.0","end") 恒返回尾部换行（strip 去除）；
@@ -4279,7 +4415,8 @@ class LogCompressorApp(_make_app_base()):
                 # 智能标记），不下发 analysis_mode（compare_files 不收）；
                 # 优化缺陷R84：similarity 同样不下发（compare_files 不收）；
                 # 优化缺陷R85：时间范围/行数上限不下发（compare_files
-                # 不收）；include/exclude 为其原生参数，照常透传
+                # 不收）；include/exclude 为其原生参数，照常透传；
+                # 优化缺陷R88/R91：编码指定与关键词正则开关已透传支持
                 cmp_common = {k: v for k, v in payload["common"].items()
                               if k not in ("analysis_mode", "similarity",
                                            "time_start", "time_end",
@@ -4287,15 +4424,28 @@ class LogCompressorApp(_make_app_base()):
                                            "max_lines")}
                 results = compare_files(payload["files"], **cmp_common)
                 self._queue.put(("compare_done", results))
+            elif payload["mode"] == "文件导入" and "rotate_files" in payload:
+                # 优化缺陷R89：轮转文件合并分析（已按最旧在前排序）
+                result = analyze_files(payload["rotate_files"],
+                                       analyze=True,
+                                       progress_cb=progress,
+                                       cancel_event=self._cancel_event,
+                                       **common)
+                self._queue.put(("done", result))
             elif payload["mode"] == "文件导入":
                 result = analyze_file(payload["file"], analyze=True,
                                       progress_cb=progress,
                                       cancel_event=self._cancel_event, **common)
                 self._queue.put(("done", result))
             else:
+                # 文本已是 str 无编码概念：剔除 encoding（analyze_text
+                # 不收；文件/轮转/对比模式才透传编码指定）
+                text_common = {k: v for k, v in common.items()
+                               if k != "encoding"}
                 result = analyze_text(payload["text"], analyze=True,
                                       progress_cb=progress,
-                                      cancel_event=self._cancel_event, **common)
+                                      cancel_event=self._cancel_event,
+                                      **text_common)
                 self._queue.put(("done", result))
         except FileNotFoundError as exc:
             self._queue.put(("error", f"文件不存在：{exc}"))
@@ -4385,6 +4535,9 @@ class LogCompressorApp(_make_app_base()):
             tags.append(f"包含[{','.join(common['include'])}]")
         if common.get("exclude"):
             tags.append(f"排除[{','.join(common['exclude'])}]")
+        if common.get("use_regex"):
+            # 优化缺陷R91：正则模式常驻标签（同三项前置过滤的兜底语义）
+            tags.append("正则")
         tag_text = (" | 生效过滤: " + " ".join(tags)) if tags else ""
         self._status_label.configure(
             text=f"{s.source} | 编码 {s.encoding} | 规则 {s.rule_name} | "
@@ -6198,13 +6351,20 @@ class LogCompressorApp(_make_app_base()):
                                             sections=sections)),
         }
         written = []
+        # 优化缺陷R86：出站脱敏（⚙ 弹层开关，默认开）—— 分析结果
+        # 本地保持原样，仅写盘文本过 redact_text
+        redact = bool(getattr(self, "_redact_var", None)
+                      and self._redact_var.get())
         for fmt in ("html", "md", "json", "txt"):
             if fmt not in formats:
                 continue
             ext, build = writers[fmt]
             out = base + ext
+            content = build()
+            if redact:
+                content = redact_text(content)
             with open(out, "w", encoding="utf-8") as fh:
-                fh.write(build())
+                fh.write(content)
             written.append(out)
         return written
 
@@ -6213,6 +6373,9 @@ class LogCompressorApp(_make_app_base()):
             return
         summary = brief_summary(self._result,
                                 top_n=len(self._result.clusters))
+        # 优化缺陷R86：出站脱敏（同导出，⚙ 弹层开关默认开）
+        if getattr(self, "_redact_var", None) and self._redact_var.get():
+            summary = redact_text(summary)
         self.clipboard_clear()
         self.clipboard_append(summary)
         self._status_label.configure(
