@@ -118,6 +118,22 @@ ANALYZE_DESCRIPTIONS = {
 }
 _ANOMALY_LEGEND = ("标记图例：▲ 根因（紫） · ● 集中爆发 · ◔ 周期发作 · "
                    "◆ 新型错误 · ○ 罕见异常")
+# 优化缺陷R84：相似度阈值三档（标准默认 + 中文显示名映射，
+# 与智能分析/解析规则同款交互：选中项从下拉消失 + ⓘ 悬停说明）
+SIMILARITY_KEYS = ("standard", "strict", "lenient")
+SIMILARITY_DISPLAY = {
+    "standard": "标准（推荐）",
+    "strict": "严格",
+    "lenient": "宽松",
+}
+_SIMILARITY_BY_DISPLAY = {v: k for k, v in SIMILARITY_DISPLAY.items()}
+SIMILARITY_DESCRIPTIONS = {
+    "standard": "标准（推荐）：相似度 ≥0.85 才并簇，准确率优先，日常用它",
+    "strict": "严格：≥0.95 才并簇 —— 只看几乎一样的；不同错误被合并"
+              "成一簇时用它（簇变多、更准）",
+    "lenient": "宽松：≥0.70 即并簇 —— 相似就合并；同一错误被拆成多簇"
+               "时用它（簇变少、压缩更狠）",
+}
 ANOMALY_DESCRIPTIONS = {
     "burst": "集中爆发：错误峰值超过全局 3σ 或簇自身基线（中位数+3×MAD）",
     "periodic": "周期发作：实例间隔变异系数 ≤0.10（定时任务/心跳失败指纹）",
@@ -2128,13 +2144,35 @@ class LogCompressorApp(_make_app_base()):
         self._rule_menu.set(RULE_DISPLAY["auto"])
         self._rule_menu.grid(row=0, column=9, padx=(2, 0), sticky="w")
         # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
+        # 修复缺陷R81：ⓘ 右 padx 12→0（让位相似度组，行尾余量移交）
         rule_help = ctk.CTkLabel(
             panel, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        rule_help.grid(row=0, column=10, padx=(4, 12), sticky="w")
+        rule_help.grid(row=0, column=10, padx=(4, 0), sticky="w")
         self._rule_help_tooltip = Tooltip(
             rule_help,
             lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
+
+        # 优化缺陷R84：相似度阈值选择器 —— 过滤行右侧空位（列 11~13），
+        # 与解析规则/智能分析同款交互（选中项从下拉消失 + ⓘ 悬停说明）；
+        # 修复缺陷R81：组首左 padx 24（静态等距同款）；ⓘ 右 12 为行尾
+        ctk.CTkLabel(panel, text="相似度").grid(
+            row=0, column=11, padx=(24, 2), sticky="w")
+        self._similarity_key = "standard"
+        self._similarity_menu = ctk.CTkOptionMenu(
+            panel, width=150, dynamic_resizing=False,
+            values=[SIMILARITY_DISPLAY[k] for k in SIMILARITY_KEYS
+                    if k != "standard"],
+            command=self._on_similarity_changed)
+        self._similarity_menu.set(SIMILARITY_DISPLAY["standard"])
+        self._similarity_menu.grid(row=0, column=12, padx=(2, 0), sticky="w")
+        sim_help = ctk.CTkLabel(
+            panel, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        sim_help.grid(row=0, column=13, padx=(4, 12), sticky="w")
+        self._similarity_help_tooltip = Tooltip(
+            sim_help,
+            lambda: SIMILARITY_DESCRIPTIONS.get(self._similarity_key, ""))
 
     # ------------------------------------------------------------------
     # 修复缺陷R72：实时筛选行（搜索组从级别过滤行迁出）
@@ -3383,6 +3421,9 @@ class LogCompressorApp(_make_app_base()):
         if cfg.get("analyze_mode") in ANALYZE_KEYS:
             # 优化缺陷R79：恢复智能分析模式（默认完整分析）
             self._on_analyze_changed(ANALYZE_DISPLAY[cfg["analyze_mode"]])
+        if cfg.get("similarity") in SIMILARITY_KEYS:
+            # 优化缺陷R84：恢复相似度阈值档位（默认标准）
+            self._on_similarity_changed(SIMILARITY_DISPLAY[cfg["similarity"]])
         # 修复缺陷R10：字体大小档位恢复（__init__ 已按档位建字体，
         # 此处仅同步选择器显示；字号一致时回调为空操作）
         if cfg.get("font_size") in FONT_SIZE_SCALE:
@@ -3401,6 +3442,8 @@ class LogCompressorApp(_make_app_base()):
             "rule": self._rule_key,
             # 优化缺陷R79：智能分析模式持久化
             "analyze_mode": self._analyze_key,
+            # 优化缺陷R84：相似度阈值档位持久化
+            "similarity": self._similarity_key,
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
             # 修复缺陷R10：字体大小档位持久化（下次启动自动恢复）
@@ -3472,6 +3515,28 @@ class LogCompressorApp(_make_app_base()):
         # 注：不在此 _save_config —— _restore_config 启动回放本方法时
         # 窗口尚未映射，winfo_height 只有 ~200，会冲掉已保存的窗口
         # 尺寸（修复缺陷R80）；持久化由后续保存点（分析完成/关窗）负责
+
+    def _on_similarity_changed(self, choice: str) -> None:
+        """相似度阈值切换（优化缺陷R84）：标准/严格/宽松。
+
+        与智能分析/解析规则选择器同款交互：选项为中文显示名（内部
+        映射档位键）；当前选中项从下拉列表移除；状态栏即时展示该
+        档说明（与 ⓘ 悬停 tooltip 互补）。阈值在下一次「开始分析」
+        生效（聚类器构造时映射为数值阈值）。
+        """
+        key = _SIMILARITY_BY_DISPLAY.get(choice)
+        if key is None:
+            return
+        self._similarity_key = key
+        self._similarity_menu.set(SIMILARITY_DISPLAY[key])
+        self._similarity_menu.configure(
+            values=[SIMILARITY_DISPLAY[k] for k in SIMILARITY_KEYS
+                    if k != key])
+        desc = SIMILARITY_DESCRIPTIONS.get(key)
+        if desc:
+            self._status_label.configure(
+                text=f"相似度 {SIMILARITY_DISPLAY[key]}：{desc}")
+        # 注：不在此 _save_config（同 R80 窗口尺寸覆盖教训）
 
     # ==================================================================
     # 文件选择 / 拖拽
@@ -3905,6 +3970,8 @@ class LogCompressorApp(_make_app_base()):
             rule=self._rule_key,
             # 优化缺陷R79：智能分析模式随分析任务下发（full/deep/fast）
             analysis_mode=self._analyze_key,
+            # 优化缺陷R84：相似度阈值档位随分析任务下发（strict/standard/lenient）
+            similarity=self._similarity_key,
         )
         if mode == "文件导入":
             path = self._file_entry.get().strip()
@@ -3959,9 +4026,10 @@ class LogCompressorApp(_make_app_base()):
         try:
             if payload["mode"] == "多文件对比":
                 # 修复缺陷R80：对比模式内置 analyze=False（diff 不需要
-                # 智能标记），不下发 analysis_mode（compare_files 不收）
+                # 智能标记），不下发 analysis_mode（compare_files 不收）；
+                # 优化缺陷R84：similarity 同样不下发（compare_files 不收）
                 cmp_common = {k: v for k, v in payload["common"].items()
-                              if k != "analysis_mode"}
+                              if k not in ("analysis_mode", "similarity")}
                 results = compare_files(payload["files"], **cmp_common)
                 self._queue.put(("compare_done", results))
             elif payload["mode"] == "文件导入":

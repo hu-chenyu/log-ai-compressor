@@ -306,6 +306,53 @@ class TestAnalyzeMode:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R84：相似度阈值三档（严格 0.95 / 标准 0.85 / 宽松 0.70）
+# ---------------------------------------------------------------------------
+class TestSimilarityMode:
+    # 相似度 0.884 的消息对：标准(0.85)并 1 簇，严格(0.95)拆 2 簇
+    _PAIR_STD = (
+        "2024-01-01 09:00:00 ERROR [db] request timeout while reading from db server",
+        "2024-01-01 09:00:01 ERROR [db] request timeout while writing to db server",
+    )
+    # 相似度 0.822 的消息对：宽松(0.70)并 1 簇，标准(0.85)拆 2 簇
+    _PAIR_LENIENT = (
+        "2024-01-01 09:00:00 ERROR [disk] disk quota exceeded on volume alpha",
+        "2024-01-01 09:00:01 ERROR [disk] disk quota exceeded on partition alpha",
+    )
+
+    def test_standard_merges_pair_but_strict_splits(self):
+        """0.884 相似对：标准并 1 簇 / 严格拆 2 簇。"""
+        log = "\n".join(self._PAIR_STD)
+        std = analyze_text(log)                       # 默认标准
+        strict = analyze_text(log, similarity="strict")
+        assert len(std.clusters) == 1, "标准(0.85)应合并 0.884 相似对"
+        assert len(strict.clusters) == 2, "严格(0.95)应拆分 0.884 相似对"
+
+    def test_lenient_merges_pair_but_standard_splits(self):
+        """0.822 相似对：宽松并 1 簇 / 标准拆 2 簇。"""
+        log = "\n".join(self._PAIR_LENIENT)
+        std = analyze_text(log)
+        lenient = analyze_text(log, similarity="lenient")
+        assert len(std.clusters) == 2, "标准(0.85)应拆分 0.822 相似对"
+        assert len(lenient.clusters) == 1, "宽松(0.70)应合并 0.822 相似对"
+
+    def test_unknown_key_falls_back_to_standard(self):
+        """非法档位键回退标准阈值（老配置/手改配置兼容）。"""
+        log = "\n".join(self._PAIR_STD)
+        r = analyze_text(log, similarity="bogus")
+        assert len(r.clusters) == 1, "未知键应回退标准(0.85)行为"
+
+    def test_exact_duplicates_merge_at_all_levels(self):
+        """完全相同的错误三档都并 1 簇（精确命中不受阈值影响）。"""
+        log = "\n".join(
+            ["2024-01-01 09:00:00 ERROR [db] identical failure"] * 3)
+        for key in ("standard", "strict", "lenient"):
+            r = analyze_text(log, similarity=key)
+            assert len(r.clusters) == 1 and r.clusters[0].count == 3
+
+
+
+# ---------------------------------------------------------------------------
 # 文件模式（编码探测联动）
 # ---------------------------------------------------------------------------
 class TestAnalyzeFile:
