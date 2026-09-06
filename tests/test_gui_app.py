@@ -4331,8 +4331,31 @@ class TestCharts:
         """图表 dpi 随窗口缩放（高 DPI 下文字不缩半）。"""
         panel = self._open_charts(app)
         try:
+
             expected = int(round(96 * max(1.0, app._font_scale)))
             assert panel.figure.get_dpi() == expected
+        finally:
+            self._close(app)
+
+    def test_save_png_exports_current_tab(self, app, monkeypatch, tmp_path):
+        """优化缺陷R115：保存 PNG —— 当前分页导出为真实图片文件。"""
+        panel = self._open_charts(app)
+        try:
+            out = tmp_path / "trend.png"
+            monkeypatch.setattr(
+                "tkinter.filedialog.asksaveasfilename",
+                lambda **kw: str(out))
+            panel._save_png()
+            assert out.exists() and out.stat().st_size > 1000, \
+                "PNG 应为有效图片文件"
+            assert panel._save_btn.cget("text") == "✓ 已保存"
+            # 取消对话框不落盘
+            monkeypatch.setattr(
+                "tkinter.filedialog.asksaveasfilename",
+                lambda **kw: "")
+            out2 = tmp_path / "nope.png"
+            panel._save_png()
+            assert not out2.exists()
         finally:
             self._close(app)
 

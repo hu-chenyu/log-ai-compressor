@@ -76,6 +76,11 @@ class ChartsPanel:
         # 顶部切换栏（蓝色选中段，与应用主题一致）
         bar = ctk.CTkFrame(parent, fg_color="transparent")
         bar.pack(fill="x", padx=10, pady=(10, 0))
+        # 优化缺陷R115：图表导出 PNG（当前分页单图，150dpi 深底色）
+        self._save_btn = ctk.CTkButton(
+            bar, text="💾 保存 PNG", width=100, height=26,
+            command=self._save_png)
+        self._save_btn.pack(side="right")
         self._switch = ctk.CTkSegmentedButton(
             bar, values=list(self.TABS), command=self._on_tab)
         self._switch.set(self.TABS[0])
@@ -106,6 +111,31 @@ class ChartsPanel:
     # ------------------------------------------------------------------
     def _on_tab(self, name: str) -> None:
         self._show_tab(name)
+
+    def _save_png(self) -> None:
+        """优化缺陷R115：当前分页图表导出 PNG（文件对话框选路径）。
+
+        150dpi 保证贴工单/报告清晰；facecolor 与界面一致的深底色
+        （导出所见即所得）；按钮短暂变 ✓ 作成功反馈（图表窗无状态栏）。
+        """
+        from tkinter import filedialog
+        tab = (self._tab or "图表").replace(" ", "")
+        try:
+            path = filedialog.asksaveasfilename(
+                parent=self.canvas.get_tk_widget().winfo_toplevel(),
+                title="导出图表 PNG",
+                defaultextension=".png",
+                initialfile=f"错误统计_{tab}.png",
+                filetypes=[("PNG 图片", "*.png")])
+        except Exception:           # 无窗口环境兜底（测试/异常桌面）
+            return
+        if not path:
+            return
+        self.figure.savefig(path, dpi=150,
+                            facecolor=self.figure.get_facecolor())
+        self._save_btn.configure(text="✓ 已保存")
+        self._save_btn.after(
+            1500, lambda: self._save_btn.configure(text="💾 保存 PNG"))
 
     def _show_tab(self, name: str) -> None:
         """切换分页：清图重建单轴大图（画布复用，无重复建窗开销）。"""
@@ -362,10 +392,38 @@ class CompareChartsPanel:
         dpi = int(round(96 * max(1.0, dpi_scale)))
         self.figure = Figure(figsize=(11, 3.8), dpi=dpi,
                               facecolor="#2b2b30")
+        # 优化缺陷R115：对比图表导出 PNG（与分析图表同入口）
+        bar = ctk.CTkFrame(parent, fg_color="transparent")
+        bar.pack(fill="x", padx=10, pady=(8, 0))
+        self._save_btn = ctk.CTkButton(
+            bar, text="💾 保存 PNG", width=100, height=26,
+            command=self._save_png)
+        self._save_btn.pack(side="right")
         self.canvas = FigureCanvasTkAgg(self.figure, master=parent)
         self._build()
         self.canvas.get_tk_widget().pack(fill="both", expand=True,
                                          padx=4, pady=4)
+
+    # ------------------------------------------------------------------
+    def _save_png(self) -> None:
+        """优化缺陷R115：对比图表导出 PNG（文件对话框选路径）。"""
+        from tkinter import filedialog
+        try:
+            path = filedialog.asksaveasfilename(
+                parent=self.canvas.get_tk_widget().winfo_toplevel(),
+                title="导出图表 PNG",
+                defaultextension=".png",
+                initialfile="多文件错误对比.png",
+                filetypes=[("PNG 图片", "*.png")])
+        except Exception:
+            return
+        if not path:
+            return
+        self.figure.savefig(path, dpi=150,
+                            facecolor=self.figure.get_facecolor())
+        self._save_btn.configure(text="✓ 已保存")
+        self._save_btn.after(
+            1500, lambda: self._save_btn.configure(text="💾 保存 PNG"))
 
     # ------------------------------------------------------------------
     def _style_axes(self, ax) -> None:
