@@ -2015,9 +2015,9 @@ class LogCompressorApp(_make_app_base()):
         # 修复缺陷R72：搜索组迁出至独立「实时筛选行」—— 本行只剩
         # 「按开始分析才生效」的控件（级别/智能分析模式/上下文行数/
         # 解析规则），整行请求宽远低于可用宽，超宽切边问题根除；
-        # 弹性空白列吸收窗口余量（原 R49/R51/R52 的搜索框等距/防切
-        # 机制随搜索组一并迁出，不再适用本行）
-        panel.grid_columnconfigure(5, weight=1, minsize=self._dpx(12))
+        # 修复缺陷R81：原列 5 弹性空白列废止 —— 它吸收窗口余量导致
+        # ⓘ→上下文行数 区间随窗口漂移、与其余两区间（12/18）恒不等；
+        # 三个组间区间改由各组首标签静态 padx 补偿实现（见下）
 
         ctk.CTkLabel(panel, text="级别过滤", font=ctk.CTkFont(weight="bold")
                      ).grid(row=0, column=0, padx=(12, 4), sticky="w")
@@ -2072,11 +2072,20 @@ class LogCompressorApp(_make_app_base()):
         # 优化缺陷R79：智能分析模式选择器 —— 紧随级别组（R74 对齐
         # 机制不变：DEBUG 的 G 右缘仍贴全屏按钮线，本组落在原空位），
         # 与解析规则同款交互（选中项从下拉消失 + ⓘ 悬停说明）
+        # 修复缺陷R81：三个组间可视区间静态等距 —— 组首左 padx 按
+        # 前组尾距差补偿（复选框紧凑宽有效尾距 ≈5 逻辑 px：R74 构造
+        # 尾部 4 + 文本取整残差 + 内部 tk 标签边距，实测 2x 下 11
+        # 物理 px；CTk6 标签/ⓘ 文本贴控件边、输入框边缘即视觉边
+        # 缘，三者内边距同构互抵），19+5 = 24 = 24 = 24 逻辑 px
+        # 恒等（残差 ≤1 物理 px），不随窗口/DPI 漂移
         ctk.CTkLabel(panel, text="智能分析").grid(
-            row=0, column=2, padx=(12, 2), sticky="w")
+            row=0, column=2, padx=(19, 2), sticky="w")
         self._analyze_key = "full"
+        # 修复缺陷R82：dynamic_resizing=False + 定宽 150 —— 默认动态
+        # 定宽随当前选项文本伸缩（切「深度扫描」后框明显变窄）；
+        # 150 按最长选项「完整分析（推荐）」（8 全角字符+箭头）定
         self._analyze_menu = ctk.CTkOptionMenu(
-            panel, width=130,
+            panel, width=150, dynamic_resizing=False,
             values=[ANALYZE_DISPLAY[k] for k in ANALYZE_KEYS
                     if k != "full"],
             command=self._on_analyze_changed)
@@ -2096,19 +2105,24 @@ class LogCompressorApp(_make_app_base()):
         # 优化缺陷R43：包含/排除关键字、Top N 输入区删除（用户决策）
         # 优化缺陷R44：上下文行数输入框回归 —— 置于级别过滤与解析
         # 规则之间的空白区（≥0 有效，负数按 0 行处理）
+        # 修复缺陷R81：组首左 padx 24（静态等距见上）；
+        # 输入框右 padx 12→0 —— 区间统一由组首标签左 padx 承担
         ctk.CTkLabel(panel, text="上下文行数").grid(
-            row=0, column=6, padx=(0, 2), sticky="e")
+            row=0, column=6, padx=(24, 2), sticky="e")
         self._ctx_entry = ctk.CTkEntry(panel, width=60)
         self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
-        self._ctx_entry.grid(row=0, column=7, padx=(2, 12), sticky="w")
+        self._ctx_entry.grid(row=0, column=7, padx=(2, 0), sticky="w")
 
-        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=8, padx=(6, 2),
+        # 修复缺陷R81：组首左 padx 6→24（静态等距见上）
+        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=8, padx=(24, 2),
                                                   sticky="e")
         # 优化缺陷R71：下拉显示中文名，默认「自动识别（推荐）」；
         # 当前选中项不出现在下拉列表（与主题选择器同款交互）
+        # 修复缺陷R82：dynamic_resizing=False —— 与智能分析下拉同
+        # 缺陷（切「通用 generic」后框变窄），定宽 150 不变
         self._rule_key = "auto"
         self._rule_menu = ctk.CTkOptionMenu(
-            panel, width=150,
+            panel, width=150, dynamic_resizing=False,
             values=[RULE_DISPLAY[k] for k in RULE_KEYS if k != "auto"],
             command=self._on_rule_changed)
         self._rule_menu.set(RULE_DISPLAY["auto"])
