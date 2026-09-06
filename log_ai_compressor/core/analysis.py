@@ -3,16 +3,20 @@
 
 算法设计
 --------
-1. **根因判定（因果关联）**——三路证据融合：
+1. **根因判定（因果图）**——保守强证据建边 + 加权评分：
    a. Caused-by 链：带 "Caused by:" 堆栈的错误指向其紧邻的前置错误；
-   b. 时间连锁：突发时间窗口内最先出现且含根因特征关键词的错误；
-   c. 强关键词：根因特征词（timeout/refused/permission...）高频命中。
-   未命中根因但含被动失败关键词（retry/after/downstream...）的簇
-   标记为疑似连锁衍生。
-2. **统计异常检测**：
-   - 集中爆发（burst）：全局错误直方图中超过 均值+3σ 的桶，
-     簇峰值时间落入爆发区间则标注；
-   - 罕见异常（rare）：总数可观而仅出现 1 次的错误。
+   b. 消息互引用：模板词高包含且含稀有词的后发错误（优化缺陷R76）；
+   c. 时间连锁：突发时间窗口内最先出现且含根因特征关键词的错误；
+   图源头（出度>0 入度=0）判根因；关键词按 IDF 加权（罕见词证据
+   权重大，优化缺陷R76）；入度>0 或含被动失败关键词的簇标记为
+   疑似连锁衍生。
+2. **统计异常检测（优化缺陷R75 强化）**：
+   - 集中爆发（burst）双通道：全局错误直方图中超过 均值+3σ 的桶，
+     簇峰值时间落入爆发区间；或簇自持基线（与自身中位数+MAD 比）
+     峰值超限 —— 全局平稳但单簇陡增亦可抓；
+   - 周期发作（periodic）：实例间隔变异系数 ≤0.10（定时任务指纹）；
+   - 新型错误（novel）：罕见且与既有簇模板 Jaccard <0.5；
+   - 罕见异常（rare）：总数可观而仅出现 1 次的老错误变体。
 3. **优先级综合评分**：级别权重 40% + 频次（对数归一）30% +
    根因 20% + 异常 10%；五级别分档钳制（ERROR 保 P0 / FAIL 钳
    P1 / WARN 钳 P2 / INFO 钳 P3 / DEBUG 封顶 P4，修复缺陷R40）。
@@ -229,11 +233,34 @@ def _is_novel(c: ErrorCluster, clusters: List[ErrorCluster],
 # ---------------------------------------------------------------------------
 # 根因判定
 # ---------------------------------------------------------------------------
-def _keyword_score(cluster: ErrorCluster) -> int:
-    """根因关键词得分（命中数 - 连锁关键词命中数）。"""
+def _keyword_weights(clusters: List[ErrorCluster]) -> dict:
+    """根因/连锁关键词 IDF 权重表（log2 归一）。
+
+    优化缺陷R76：关键词不再一人一票 —— 罕见词（如 deadlock 只在一
+    个簇出现）证据权重高于常见词（如 timeout 遍布各簇）：
+    w = log2(1 + C/df)，单簇单命中权重恰为 1.0（与旧计数制兼容，
+    强关键词阈值 3 语义不变），簇越多、命中越稀有关键词权重越大。
+    """
+    n = max(1, len(clusters))
+    all_kw = tuple(ROOT_CAUSE_KEYWORDS) + tuple(CASCADE_KEYWORDS)
+    df = {kw: 0 for kw in all_kw}
+    for c in clusters:
+        text = f"{c.summary} {c.template}".lower()
+        for kw in all_kw:
+            if kw in text:
+                df[kw] += 1
+    # df=0（全语料未出现）权重置 0 —— 该词不参与任何簇的评分
+    return {kw: (math.log2(1.0 + n / cnt) if cnt else 0.0)
+            for kw, cnt in df.items()}
+
+
+def _keyword_score(cluster: ErrorCluster, weights: dict) -> float:
+    """根因关键词加权得分（根因词权重和 - 连锁词权重和）。"""
     text = f"{cluster.summary} {cluster.template}".lower()
-    score = sum(1 for kw in ROOT_CAUSE_KEYWORDS if kw in text)
-    penalty = sum(1 for kw in CASCADE_KEYWORDS if kw in text)
+    score = sum(weights.get(kw, 1.0) for kw in ROOT_CAUSE_KEYWORDS
+                if kw in text)
+    penalty = sum(weights.get(kw, 1.0) for kw in CASCADE_KEYWORDS
+                  if kw in text)
     return score - penalty
 
 
@@ -249,19 +276,84 @@ def _cluster_sort_key(c: ErrorCluster) -> Tuple[int, float]:
     return (1, float(c.first_line))
 
 
-def _mark_root_causes(clusters: List[ErrorCluster]) -> None:
-    ordered = sorted(clusters, key=_cluster_sort_key)
+def _add_cross_reference_edges(ordered: List[ErrorCluster],
+                               add_edge) -> None:
+    """消息互引用边：A 的模板词 60% 出现在后发的 B 中且含稀有词 → A→B。
 
-    # 1) Caused-by 因果链：链尾错误指向其前置错误为根因
+    优化缺陷R76：衍生错误常在消息中复述上游签名（"auth failed"
+    衍生出 "request aborted because auth failed"）；稀有词（簇间
+    文档频率 ≤2）防 "error/failed" 等泛词造成的全连接假边。
+    O(C²)，C 为簇数（有界），仅做集合运算，开销可忽略。
+    """
+    token_sets = {id(c): _tokens(c.message_template or c.summary)
+                  for c in ordered}
+    df: dict = {}
+    for ts in token_sets.values():
+        for t in ts:
+            df[t] = df.get(t, 0) + 1
+    for i, a in enumerate(ordered):
+        ta = token_sets[id(a)]
+        if len(ta) < 2:
+            continue
+        for b in ordered[i + 1:]:
+            tb = token_sets[id(b)]
+            if not tb:
+                continue
+            inter = ta & tb
+            if (len(inter) / len(ta) >= 0.6
+                    and any(df.get(t, 0) <= 2 for t in inter)):
+                add_edge(id(a), id(b))
+
+
+def _mark_root_causes(clusters: List[ErrorCluster]) -> None:
+    """因果图根因判定（优化缺陷R76：从关键词投票升级为因果 DAG）。
+
+    建边（均为保守强证据，宁缺毋错）：
+    a. Caused-by 链：带 "Caused by:" 堆栈的错误 → 其紧邻前置错误；
+    b. 消息互引用：模板词高包含 + 稀有词的后发错误；
+    判定：
+    1. 图源头（出度>0 且入度=0）→ 根因（Caused-by 源优先注明）；
+    2. 时间连锁：60s 窗口首发 + IDF 加权根因分 >0 → 根因；
+    3. 强关键词：加权分 ≥ 阈值 → 根因；
+    4. 入度>0 或含连锁关键词 → 疑似连锁衍生（修上游，别修它）。
+    """
+    ordered = sorted(clusters, key=_cluster_sort_key)
+    weights = _keyword_weights(clusters)
+    by_id = {id(c): c for c in ordered}
+    out_edges: dict = {}
+    in_edges: dict = {}
+    caused_by_src: set = set()
+
+    def _add(src: int, dst: int) -> None:
+        if src == dst:
+            return
+        out_edges.setdefault(src, set()).add(dst)
+        in_edges.setdefault(dst, set()).add(src)
+
+    # a) Caused-by 因果链
     for c in ordered:
         stack = c.sample.entry.stack if c.sample else []
         if any(_CAUSED_BY_RE.match(line) for line in stack):
             prior = _nearest_prior(ordered, c)
-            if prior is not None and not prior.is_root_cause:
-                prior.is_root_cause = True
-                prior.root_cause_reason = "被 Caused-by 因果链指向"
+            if prior is not None:
+                _add(id(prior), id(c))
+                caused_by_src.add(id(prior))
 
-    # 2) 时间连锁：突发窗口内首发 + 根因关键词
+    # b) 消息互引用边
+    _add_cross_reference_edges(ordered, _add)
+
+    # 1) 图源头 → 根因
+    for c in ordered:
+        outs = out_edges.get(id(c), set())
+        if outs and not in_edges.get(id(c)):
+            c.is_root_cause = True
+            if id(c) in caused_by_src:
+                c.root_cause_reason = "被 Caused-by 因果链指向"
+            else:
+                c.root_cause_reason = (
+                    f"因果链源头（{len(outs)} 个错误由其衍生）")
+
+    # 2) 时间连锁：突发窗口内首发 + 加权根因分 >0
     windows = {}
     for c in ordered:
         if c.first_seen is None:
@@ -270,17 +362,26 @@ def _mark_root_causes(clusters: List[ErrorCluster]) -> None:
         windows.setdefault(key, []).append(c)
     for group in windows.values():
         earliest = group[0]  # ordered 已按时间排序，组内首个即窗口内首发
-        if not earliest.is_root_cause and _keyword_score(earliest) > 0:
+        if (not earliest.is_root_cause
+                and _keyword_score(earliest, weights) > 0):
             earliest.is_root_cause = True
-            earliest.root_cause_reason = "时间连锁源头（窗口内首发且含根因特征）"
+            earliest.root_cause_reason = (
+                "时间连锁源头（窗口内首发且含根因特征）")
 
-    # 3) 强关键词 / 连锁衍生标记
+    # 3) 强关键词 / 4) 连锁衍生标记
     for c in ordered:
-        if not c.is_root_cause and _keyword_score(c) >= STRONG_KEYWORD_SCORE:
+        if (not c.is_root_cause
+                and _keyword_score(c, weights) >= STRONG_KEYWORD_SCORE):
             c.is_root_cause = True
             c.root_cause_reason = "高频根因特征关键词"
-        elif not c.is_root_cause and not c.root_cause_reason and _has_cascade_keyword(c):
-            c.root_cause_reason = "疑似连锁衍生错误（被动失败特征）"
+        elif not c.is_root_cause and not c.root_cause_reason:
+            ins = in_edges.get(id(c))
+            if ins:
+                src = by_id[next(iter(ins))]
+                c.root_cause_reason = (
+                    f"疑似连锁衍生（上游：{src.summary[:40]}）")
+            elif _has_cascade_keyword(c):
+                c.root_cause_reason = "疑似连锁衍生错误（被动失败特征）"
 
 
 def _nearest_prior(ordered: Sequence[ErrorCluster],
