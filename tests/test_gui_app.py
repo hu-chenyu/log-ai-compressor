@@ -1557,8 +1557,9 @@ class TestContextLines:
         assert DEFAULT_CONTEXT_LINES == 50
 
     def test_filter_inputs_removed(self, app):
-        """优化缺陷R43：过滤输入区自级别过滤行删除（R85 黑白名单经
-        用户决策在高级选项行回归 —— 过滤行本体仍无这些输入框）。
+        """优化缺陷R43/R93：Top N 输入框已删除；关键词黑白名单经
+        用户决策在过滤行上下文行数右侧回归（R93 自 ⚙ 弹层迁回），
+        智能分析/解析规则不再占用过滤行。
         """
         filter_panel = app._ctx_entry.master
         slaves_texts = []
@@ -1567,10 +1568,15 @@ class TestContextLines:
                 slaves_texts.append(str(w.cget("text")))
             except (tk.TclError, ValueError, AttributeError):
                 continue
-        assert not any("包含" in t or "排除" in t for t in slaves_texts), \
-            "级别过滤行不得再有包含/排除输入区"
+        assert not any("智能分析" in t or "解析规则" in t
+                       for t in slaves_texts), \
+            "级别过滤行不得再有智能分析/解析规则选组（已迁高级选项行）"
+        assert any("包含关键词" in t for t in slaves_texts), \
+            "R93：包含关键词应在过滤行（上下文行数右侧）"
+        assert any("排除关键词" in t for t in slaves_texts), \
+            "R93：排除关键词应在过滤行"
         assert not hasattr(app, "_topn_entry"), "Top N 输入框应已删除"
-        # 分析参数默认不含关键词（高级选项行留空 = 不限）
+        # 分析参数默认不含关键词（过滤行留空 = 不限）
         assert app._include_entry.get() == ""
         assert app._exclude_entry.get() == ""
         common_levels = [lv for lv, var in app._level_vars.items()
@@ -3252,9 +3258,9 @@ class TestMainWindowSearch:
         scale = max(1.0, getattr(app, "_font_scale", 1.0))
         # 1) 真实行构造锚点（grid_info 的 padx 为 Tk 物理 px ——
         # 创建时已经 CTk 按 DPI 缩放，须乘 scale 比对）
-        # 列 2 上下文行数 / 列 6 智能分析 / 列 9 解析规则（换位后）
+        # 列 2 上下文行数 / 列 4 包含关键词 / 列 6 排除关键词（R93 换位后）
         pads = [panel.grid_slaves(row=0, column=c)[0].grid_info()["padx"]
-                for c in (2, 6, 9)]
+                for c in (2, 4, 6)]
         pads = [tuple(int(v) for v in p) for p in pads]
         s2 = int(round(2 * scale))
         expected = [(int(round(19 * scale)), s2),
@@ -3262,11 +3268,11 @@ class TestMainWindowSearch:
                     (int(round(24 * scale)), s2)]
         assert pads == expected, \
             f"组首左 padx 应为补偿值 (19,24,24)×scale（实测 {pads}）"
-        # 「其他选项」标签与 ⚙ 按钮已迁至高级选项行（优化缺陷R85；
-        # R92 关键词两框撤入弹层后列号 12/13 → 8/9）
+        # 「其他选项」标签与 ⚙ 按钮在高级选项行行尾（优化缺陷R85；
+        # R93 智能分析/解析规则迁入后列号 → 14/15）
         ap = app._advanced_panel
         lbl_pad = tuple(int(v) for v in
-                        ap.grid_slaves(row=0, column=8)[0]
+                        ap.grid_slaves(row=0, column=14)[0]
                         .grid_info()["padx"])
         assert lbl_pad == (int(round(24 * scale)), s2), \
             f"其他选项标签 padx 应为 (24,2)×scale（实测 {lbl_pad}）"
@@ -3277,9 +3283,9 @@ class TestMainWindowSearch:
         entry_pad = tuple(int(v) for v in
                           app._ctx_entry.grid_info()["padx"])
         assert entry_pad[1] == 0, "输入框右 padx 应为 0（区间由组首承担）"
-        col5 = panel.grid_columnconfigure(5)
-        assert int(col5["weight"]) == 0 and int(col5["minsize"]) == 0, \
-            "列 5 弹性权重/minsize 应已废止"
+        # 智能分析/解析规则组已迁至高级选项行（R93 换位）
+        assert app._analyze_menu.master is ap
+        assert app._rule_menu.master is ap
 
         # 2) 复刻行实测（与真实行同控件类、同 padx、同 DPI）
         import customtkinter as ctk
@@ -3294,17 +3300,17 @@ class TestMainWindowSearch:
         tw = tkfont.Font(font=cb._text_label.cget("font")).measure("DEBUG")
         cb.configure(width=int(tw / scale + 0.999) + 28)
         cb.grid(row=0, column=0, padx=(1, 0), sticky="w")
-        ctk.CTkLabel(f, text="智能分析").grid(row=0, column=1,
-                                              padx=(19, 2), sticky="w")
-        info = ctk.CTkLabel(f, text="ⓘ",
-                            font=ctk.CTkFont(size=13, weight="bold"))
-        info.grid(row=0, column=2, padx=(4, 0), sticky="w")
-        ctk.CTkLabel(f, text="上下文行数").grid(row=0, column=3,
+        # R93 换位后真实行序列：上下文行数 → 输入框 → 包含 → 输入框 → 排除
+        ctk.CTkLabel(f, text="上下文行数").grid(row=0, column=1,
+                                                padx=(19, 2), sticky="w")
+        entry1 = ctk.CTkEntry(f, width=60)
+        entry1.grid(row=0, column=2, padx=(2, 0), sticky="w")
+        ctk.CTkLabel(f, text="包含关键词").grid(row=0, column=3,
                                                 padx=(24, 2), sticky="w")
-        entry = ctk.CTkEntry(f, width=60)
-        entry.grid(row=0, column=4, padx=(2, 0), sticky="w")
-        ctk.CTkLabel(f, text="解析规则").grid(row=0, column=5,
-                                              padx=(24, 2), sticky="w")
+        entry2 = ctk.CTkEntry(f, width=140)
+        entry2.grid(row=0, column=4, padx=(2, 0), sticky="w")
+        ctk.CTkLabel(f, text="排除关键词").grid(row=0, column=5,
+                                                padx=(24, 2), sticky="w")
         top.update()
         top.update_idletasks()
 
@@ -3314,8 +3320,8 @@ class TestMainWindowSearch:
         heads = [f.grid_slaves(row=0, column=c)[0] for c in (1, 3, 5)]
         tl = cb._text_label
         left1 = cb.winfo_x() + tl.winfo_x() + tl.winfo_reqwidth()
-        left2 = info.winfo_x() + info.winfo_width()
-        left3 = entry.winfo_x() + entry.winfo_width()
+        left2 = entry1.winfo_x() + entry1.winfo_width()
+        left3 = entry2.winfo_x() + entry2.winfo_width()
         gaps = [h.winfo_x() - l for h, l in zip(heads, (left1, left2, left3))]
         top.destroy()
         # 复选框尾距含文本宽向上取整残差 δ∈[0,1) 逻辑 px（×scale 物理）
@@ -3645,14 +3651,15 @@ class TestMainWindowSearch:
         app._apply_search_filter()
         app.update()
         assert app._search_count.cget("text"), "计数标签应已出现"
+        # R93 换位后过滤行控件序列：级别组 → 上下文行数 → 关键词两框
         widgets = [panel.grid_slaves(row=0, column=0)[0],   # 级别过滤
                    panel.grid_slaves(row=0, column=1)[0],   # 复选框组
                    panel.grid_slaves(row=0, column=2)[0],   # 上下文行数
                    app._ctx_entry,
-                   panel.grid_slaves(row=0, column=6)[0],   # 智能分析
-                   app._analyze_menu,
-                   panel.grid_slaves(row=0, column=9)[0],   # 解析规则
-                   app._rule_menu]
+                   panel.grid_slaves(row=0, column=4)[0],   # 包含关键词
+                   app._include_entry,
+                   panel.grid_slaves(row=0, column=6)[0],   # 排除关键词
+                   app._exclude_entry]
         prev_right = None
         for w in widgets:
             x, ww = w.winfo_x(), w.winfo_width()
@@ -4580,15 +4587,26 @@ class TestAnalyzeModeSelector:
         assert app._current_config_dict()["analyze_mode"] == "deep"
 
     def test_menu_in_filter_row_after_level_box(self, app):
-        """换位后：上下文行数紧随级别组（列 3），模式选择器在列 7。"""
-        panel = app._ctx_entry.master
+        """R93 换位后：关键词两框在过滤行（列 5/7），模式选择器
+        与解析规则迁至高级选项行（列 9/12）。"""
+        filter_panel = app._ctx_entry.master
+        assert app._include_entry.master is filter_panel
+        assert app._exclude_entry.master is filter_panel
+        iinfo = app._include_entry.grid_info()
+        assert str(iinfo["row"]) == "0"
+        assert str(iinfo["column"]) == "5"
+        einfo = app._exclude_entry.grid_info()
+        assert str(einfo["row"]) == "0"
+        assert str(einfo["column"]) == "7"
+        panel = app._advanced_panel
         assert app._analyze_menu.master is panel
+        assert app._rule_menu.master is panel
         info = app._analyze_menu.grid_info()
         assert str(info["row"]) == "0"
-        assert str(info["column"]) == "7"
-        einfo = app._ctx_entry.grid_info()
-        assert str(einfo["row"]) == "0"
-        assert str(einfo["column"]) == "3"
+        assert str(info["column"]) == "9"
+        rinfo = app._rule_menu.grid_info()
+        assert str(rinfo["row"]) == "0"
+        assert str(rinfo["column"]) == "12"
 
     def test_menu_width_fixed_across_modes(self, app):
         """修复缺陷R82：三模式切换下拉框定宽不变、最长文本不裁切。
@@ -4648,11 +4666,11 @@ class TestSimilaritySelector:
         assert app._current_config_dict()["similarity"] == "strict"
 
     def test_settings_button_in_filter_row_right_end(self, app):
-        """「其他选项 ⚙」在高级选项行（优化缺陷R92 瘦身后列 9）。"""
+        """「其他选项 ⚙」在高级选项行行尾（R93 换位后列 15）。"""
         assert app._settings_btn.master is app._advanced_panel
         info = app._settings_btn.grid_info()
         assert str(info["row"]) == "0"
-        assert str(info["column"]) == "9"
+        assert str(info["column"]) == "15"
         assert app._similarity_menu.winfo_toplevel() is app._settings_popup
 
     def test_settings_popup_toggle_and_close(self, app):
@@ -4695,16 +4713,20 @@ class TestAdvancedPanel:
         panel = app._advanced_panel
         assert app._time_start_entry.master is panel
         assert app._time_end_entry.master is panel
-        # 优化缺陷R92：关键词两框已撤入 ⚙ 设置弹层（行瘦身防超宽）
-        assert app._include_entry.winfo_toplevel() is app._settings_popup
-        assert app._exclude_entry.winfo_toplevel() is app._settings_popup
+        # 优化缺陷R93：关键词两框迁回过滤行（上下文行数右侧）；
+        # 智能分析/解析规则对调迁入本行
+        filter_panel = app._ctx_entry.master
+        assert app._include_entry.master is filter_panel
+        assert app._exclude_entry.master is filter_panel
+        assert app._analyze_menu.master is panel
+        assert app._rule_menu.master is panel
         assert app._maxlines_menu.get() == "全部（推荐）"
         values = list(app._maxlines_menu.cget("values"))
         assert "全部（推荐）" not in values
         assert values == ["前 10 万行", "前 50 万行", "前 100 万行"]
-        # 「其他选项 ⚙」在本行（优化缺陷R92 瘦身后列 9）
+        # 「其他选项 ⚙」在本行行尾（R93 换位后列 15）
         assert app._settings_btn.master is panel
-        assert str(app._settings_btn.grid_info()["column"]) == "9"
+        assert str(app._settings_btn.grid_info()["column"]) == "15"
 
     def test_maxlines_switch_hides_selected(self, app):
         """切「前 10 万行」：键更新 + 该项从列表消失 + 参数映射数值。"""
@@ -4783,9 +4805,11 @@ class TestAdvancedPanel:
 # ---------------------------------------------------------------------------
 class TestSettingsPopupExtras:
     def test_popup_widgets_present(self, app):
-        """弹层入住：关键词两框 + 正则/脱敏复选 + 编码选择器（默认值）。"""
-        assert app._include_entry.winfo_toplevel() is app._settings_popup
-        assert app._exclude_entry.winfo_toplevel() is app._settings_popup
+        """弹层入住：正则/脱敏复选 + 编码选择器（默认值）；关键词
+        两框已于 R93 迁回过滤行（不再占用弹层）。"""
+        filter_panel = app._ctx_entry.master
+        assert app._include_entry.master is filter_panel
+        assert app._exclude_entry.master is filter_panel
         assert app._use_regex_var.get() is False, "正则默认关（字面子串）"
         assert app._redact_var.get() is True, "脱敏默认开（出站安全）"
         assert app._encoding_menu.get() == "自动探测（推荐）"
