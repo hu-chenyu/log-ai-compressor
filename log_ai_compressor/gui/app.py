@@ -1730,6 +1730,10 @@ class LogCompressorApp(_make_app_base()):
         self._tail_lines: list = []
         self._tail_new_lines = 0
         self._tail_lock = threading.Lock()
+        # 优化缺陷R111：已知错误屏蔽（message_template 集合，持久化）
+        self._muted = set(self._config.get("muted") or [])
+        self._show_muted = False            # 会话态：列表是否显示已屏蔽
+        self._detail_cluster = None         # 详情面板当前簇（屏蔽按钮用）
         # 修复缺陷R1：四态主题（兼容旧配置的 light/dark 值）
         raw_theme = str(self._config.get("appearance", "dark")).lower()
         self._theme = _THEME_ALIASES.get(raw_theme, "dark")
@@ -2549,10 +2553,22 @@ class LogCompressorApp(_make_app_base()):
             command=self._apply_font_size)
         self._font_menu.set(self._font_size)
         self._font_menu.grid(row=0, column=1, padx=(0, 6), sticky="e")
+        # 优化缺陷R111：已屏蔽计数指示器（>0 才显示；点击切换
+        # 显示/隐藏已屏蔽簇）
+        self._mute_ind_btn = ctk.CTkButton(
+            ctrl_box, text="🚫 0", width=64, height=26,
+            fg_color="#6b7280", hover_color="#4b5563",
+            command=self._toggle_show_muted)
+        self._mute_ind_tooltip = Tooltip(
+            self._mute_ind_btn, lambda: (
+                f"已屏蔽 {len(self._muted)} 类已知错误"
+                + ("（当前显示，点击隐藏）" if self._show_muted
+                   else "（当前隐藏，点击显示）")
+                + "\n在详情面板点「🚫 屏蔽」可屏蔽/恢复某一类"))
         self._list_fs_btn = ctk.CTkButton(ctrl_box, text="⛶ 全屏", width=84,
                                           height=26,
                                           command=self._open_list_fullscreen)
-        self._list_fs_btn.grid(row=0, column=2, padx=(0, 0), sticky="e")
+        self._list_fs_btn.grid(row=0, column=3, padx=(0, 0), sticky="e")
         self._accent_buttons.append((self._list_fs_btn, "accent"))
 
         # 修复缺陷#6：「典型样例」术语加悬停说明（ⓘ 图标触发）
@@ -2575,8 +2591,18 @@ class LogCompressorApp(_make_app_base()):
         self._detail_fs_btn = ctk.CTkButton(detail_head, text="⛶ 全屏", width=84,
                                             height=26,
                                             command=self._open_detail_fullscreen)
-        self._detail_fs_btn.grid(row=0, column=2, padx=(6, 0), sticky="e")
+        self._detail_fs_btn.grid(row=0, column=3, padx=(6, 0), sticky="e")
         self._accent_buttons.append((self._detail_fs_btn, "accent"))
+        # 优化缺陷R111：屏蔽当前簇按钮（状态随详情簇刷新）
+        self._mute_btn = ctk.CTkButton(
+            detail_head, text="🚫 屏蔽", width=84, height=26,
+            command=self._toggle_mute_current)
+        self._mute_btn.grid(row=0, column=2, padx=(6, 0), sticky="e")
+        self._mute_btn_tooltip = Tooltip(
+            self._mute_btn, lambda: (
+                "屏蔽后该类错误默认从列表隐藏（配置持久化，重启仍生效），"
+                "列表上方 🚫 计数按钮可临时显示/恢复"))
+        self._mute_btn.configure(state="disabled")   # 未选簇时置灰
 
         # 修复缺陷R9：列表宿主容器（经典滚动 / 虚拟滚动两模式切换）
         self._list_host = ctk.CTkFrame(self._list_col, fg_color="transparent")
@@ -3677,6 +3703,8 @@ class LogCompressorApp(_make_app_base()):
             # 优化缺陷R103：自定义脱敏规则持久化
             "redact_custom": self._redact_custom_box.get(
                 "1.0", "end").strip(),
+            # 优化缺陷R111：已屏蔽错误模板持久化
+            "muted": sorted(self._muted),
             # 修复缺陷R1：保存四态主题名（light/dark/blue/green）
             "appearance": self._theme,
             # 修复缺陷R10：字体大小档位持久化（下次启动自动恢复）
@@ -4785,6 +4813,10 @@ class LogCompressorApp(_make_app_base()):
                  f"{s.analysis_cost * 1000:.0f}ms{tag_text}")
         self._render_cluster_list()
         self._save_config()
+        # 优化缺陷R111：新结果刷新屏蔽按钮态与 🚫 计数指示器
+        self._detail_cluster = None
+        self._update_mute_btn()
+        self._update_mute_indicator()
         # 优化缺陷R100：分析完成自动入历史（回放自身/监控刷新不重复入库）
         if not self._from_history and not self._tailing:
             self._history.add(result)
@@ -4793,8 +4825,11 @@ class LogCompressorApp(_make_app_base()):
         if self._displayed:
             # 优化缺陷R45：搜索框有残留关键字时选中首个【可见】簇
             # （原固定选 0，簇 0 被过滤时会选中不可见行）
+            # 优化缺陷R111：可见 = 关键字命中且未被屏蔽（屏蔽显示态除外）
             first = next((i for i, c in enumerate(self._displayed)
-                          if self._cluster_matches(c)), None)
+                          if self._cluster_matches(c)
+                          and (self._show_muted or not self._is_muted(c))),
+                         None)
             if first is not None:
                 self._select_cluster(first)
 
@@ -4996,6 +5031,83 @@ class LogCompressorApp(_make_app_base()):
         """搜索关键字匹配（主窗口关键字；空关键字全部命中）。"""
         return self._cluster_matches_kw(cluster, self._search_kw)
 
+    # ------------------------------------------------------------------
+    # 优化缺陷R111：已知错误屏蔽（message_template 持久化，默认隐藏）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _mute_key(cluster: ErrorCluster) -> str:
+        """屏蔽指纹：消息模板（掩码后跨运行稳定）；无模板退化为摘要。"""
+        return cluster.message_template or cluster.summary
+
+    def _is_muted(self, cluster: ErrorCluster) -> bool:
+        return self._mute_key(cluster) in self._muted
+
+    def _toggle_mute_current(self) -> None:
+        """详情面板「🚫 屏蔽/↩ 恢复」：切换当前簇屏蔽态并持久化。"""
+        cluster = self._detail_cluster
+        if cluster is None:
+            return
+        key = self._mute_key(cluster)
+        if key in self._muted:
+            self._muted.discard(key)
+            self._status_label.configure(
+                text=f"已恢复显示：{cluster.summary[:40]}")
+        else:
+            self._muted.add(key)
+            self._status_label.configure(
+                text=f"已屏蔽：{cluster.summary[:40]}"
+                     f"（列表上方 🚫 计数按钮可临时显示）")
+        self._save_config()
+        self._update_mute_btn()
+        self._update_mute_indicator()
+        # 列表按新屏蔽态重建（保留展开/选中；被屏蔽的选中簇由
+        # _apply_search_filter 的兜底逻辑改选首个可见簇）
+        if self._result is not None:
+            self._render_cluster_list(preserve_state=True)
+
+    def _update_mute_btn(self) -> None:
+        """屏蔽按钮文案/配色随详情簇刷新。"""
+        btn = getattr(self, "_mute_btn", None)
+        if btn is None:
+            return
+        cluster = self._detail_cluster
+        if cluster is not None and self._is_muted(cluster):
+            btn.configure(text="↩ 取消屏蔽", state="normal",
+                          fg_color="#6b7280", hover_color="#4b5563")
+        else:
+            p = self._palette()
+            btn.configure(text="🚫 屏蔽", fg_color=p["accent"],
+                          hover_color=p["accent_hover"],
+                          state="normal" if cluster is not None
+                          else "disabled")
+
+    def _update_mute_indicator(self) -> None:
+        """列表头 🚫 计数指示器：当前结果中被屏蔽簇数 >0 才显示。"""
+        btn = getattr(self, "_mute_ind_btn", None)
+        if btn is None:
+            return
+        n = 0
+        if self._result is not None:
+            n = sum(1 for c in self._result.clusters if self._is_muted(c))
+        if n <= 0:
+            btn.grid_remove()
+            return
+        btn.configure(text=f"🚫 {n}")
+        p = self._palette()
+        if self._show_muted:
+            btn.configure(fg_color=p["accent"],
+                          hover_color=p["accent_hover"])
+        else:
+            btn.configure(fg_color="#6b7280", hover_color="#4b5563")
+        btn.grid(row=0, column=2, padx=(0, 6), sticky="e")
+
+    def _toggle_show_muted(self) -> None:
+        """🚫 指示器点击：切换显示/隐藏已屏蔽簇（会话态）。"""
+        self._show_muted = not self._show_muted
+        self._update_mute_indicator()
+        if self._result is not None:
+            self._render_cluster_list(preserve_state=True)
+
     def _search_targets(self, kw: str) -> list:
         """优化缺陷R56：扁平实例导航序列 [(簇idx, 实例idx)…]。
 
@@ -5068,8 +5180,10 @@ class LogCompressorApp(_make_app_base()):
         self._update_search_count()
         # 优化缺陷R46：当前选中簇被过滤掉（或无选中）时自动选中
         # 首个匹配簇 —— 否则详情面板停留陈旧内容、无关键字高亮
+        # 优化缺陷R111：匹配口径同视图行（被屏蔽簇不算可见匹配）
         matches = [i for i, c in enumerate(self._displayed)
-                   if self._cluster_matches(c)]
+                   if self._cluster_matches(c)
+                   and (self._show_muted or not self._is_muted(c))]
         if matches and self._selected_row not in matches:
             self._select_cluster(matches[0])
 
@@ -5516,10 +5630,13 @@ class LogCompressorApp(_make_app_base()):
 
     def _fs_view_rows(self) -> list:
         """优化缺陷R42：全屏列表视图行（搜索过滤后的簇行 +
-        展开簇实例行；与主列表 _build_view_rows 同构 + 关键字过滤）。"""
+        展开簇实例行；与主列表 _build_view_rows 同构 + 关键字过滤）。
+        优化缺陷R111：已屏蔽簇隐藏口径与主列表一致。"""
         rows = []
         for idx, cluster in enumerate(self._displayed):
             if not self._fs_cluster_matches(cluster):
+                continue
+            if self._is_muted(cluster) and not self._show_muted:
                 continue
             rows.append(("c", idx))
             if idx in self._expanded_clusters:
@@ -5543,10 +5660,13 @@ class LogCompressorApp(_make_app_base()):
         以此为数据（池化渲染两种行）。
         优化缺陷R45：搜索关键字过滤（与全屏 _fs_view_rows 同口径，
         行索引保持 _displayed 语义，展开/选中状态不受影响）。
+        优化缺陷R111：已屏蔽簇默认隐藏（🚫 指示器切换显示）。
         """
         rows = []
         for idx, cluster in enumerate(self._displayed):
             if not self._cluster_matches(cluster):
+                continue
+            if self._is_muted(cluster) and not self._show_muted:
                 continue
             rows.append(("c", idx))
             if idx in self._expanded_clusters:
@@ -5591,6 +5711,8 @@ class LogCompressorApp(_make_app_base()):
             return
         self._selected_inst = (cidx, iidx)
         self._mark_selected_row(cidx)
+        self._detail_cluster = cluster      # 优化缺陷R111：屏蔽按钮目标
+        self._update_mute_btn()
         self._fill_instance_detail(self._detail_box, cluster,
                                    cluster.instances[iidx])
         self._sync_fs_detail()          # 优化缺陷R42：全屏联动
@@ -5598,7 +5720,9 @@ class LogCompressorApp(_make_app_base()):
         self._sync_search_nav(cidx, iidx)
 
     def _show_cluster_detail(self, cluster: ErrorCluster) -> None:
-        """主界面详情面板渲染（转发到通用填充函数）。"""
+        """显示错误簇的详情（典型样例+上下文+堆栈）。"""
+        self._detail_cluster = cluster      # 优化缺陷R111：屏蔽按钮目标
+        self._update_mute_btn()
         self._fill_cluster_detail(self._detail_box, cluster)
 
     @staticmethod

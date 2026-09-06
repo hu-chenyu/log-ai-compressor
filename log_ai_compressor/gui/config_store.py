@@ -37,6 +37,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "similarity": "standard",
     # 优化缺陷R103：自定义脱敏正则（⚙ 弹层多行文本，每行一条）
     "redact_custom": "",
+    # 优化缺陷R111：已屏蔽错误模板（message_template 列表，已知
+    # 噪音错误右键屏蔽后默认从列表隐藏）
+    "muted": [],
     "appearance": "dark",
     "window": {"width": 1280, "height": 840},
     "last_files": [],
