@@ -4892,6 +4892,65 @@ class TestMuteClusters:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R113：搜索框布尔组合（and/or/not）
+# ---------------------------------------------------------------------------
+class TestBooleanSearch:
+    def test_plain_substring_unchanged(self):
+        from log_ai_compressor.gui.app import _kw_match
+        assert _kw_match("connection refused to db", "refused")
+        assert not _kw_match("connection refused", "timeout")
+        assert _kw_match("anything", "")
+
+    def test_and_requires_all_terms(self):
+        from log_ai_compressor.gui.app import _kw_match
+        hay = "connection refused db-primary error"
+        assert _kw_match(hay, "connection and error")
+        assert not _kw_match(hay, "connection and timeout")
+
+    def test_or_matches_any_clause(self):
+        from log_ai_compressor.gui.app import _kw_match
+        hay = "disk almost full"
+        assert _kw_match(hay, "timeout or disk")
+        assert not _kw_match(hay, "timeout or refused")
+
+    def test_not_negates_term(self):
+        from log_ai_compressor.gui.app import _kw_match
+        hay = "warn disk almost full"
+        assert _kw_match(hay, "not timeout")
+        assert not _kw_match(hay, "not disk")
+        assert _kw_match(hay, "disk and not timeout")
+
+    def test_word_boundary_no_false_split(self):
+        """词边界：error/android 内含 or/and 不得被当作操作符。"""
+        from log_ai_compressor.gui.app import _kw_match
+        assert _kw_match("error: android crash", "error")
+        assert _kw_match("error: android crash", "android")
+        # 内含操作词的整词也按普通子串（无词边界操作符）
+        assert _kw_match("android crash", "android crash")
+
+    def test_mixed_expression(self):
+        from log_ai_compressor.gui.app import _kw_match
+        hay = "error [db] connection refused"
+        assert _kw_match(hay, "error and db or timeout")
+        assert not _kw_match(hay, "error and timeout or fatal")
+
+    def test_cluster_filter_boolean(self, app):
+        """GUI 集成：布尔关键字过滤列表显示。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        app._search_var.set("connection and refused")
+        app._apply_search_filter()
+        app.update()
+        visible = {r[1] for r in app._build_view_rows() if r[0] == "c"}
+        assert visible, "布尔表达式应至少命中一个簇"
+        for idx in visible:
+            c = app._displayed[idx]
+            hay = (f"{c.summary} {c.module} {c.level} "
+                   f"{c.priority_label}").lower()
+            assert "connection" in hay and "refused" in hay
+
+
+# ---------------------------------------------------------------------------
 # 优化缺陷R105：实时 Tail 监控
 # ---------------------------------------------------------------------------
 class TestTailMonitor:
