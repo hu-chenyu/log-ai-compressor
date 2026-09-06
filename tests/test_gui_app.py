@@ -4831,6 +4831,31 @@ class TestSettingsPopupExtras:
     def test_redact_off_keeps_original(self, app, tmp_path):
         """脱敏关：导出文本保持原样（用户显式关闭时尊重选择）。"""
         app._redact_var.set(False)
+
+    def test_custom_redact_box_present(self, app):
+        """⚙ 弹层含自定义脱敏输入框。"""
+        assert hasattr(app, "_redact_custom_box")
+        assert app._redact_custom_box.winfo_exists()
+
+    def test_custom_redact_rules_parsed(self, app):
+        """自定义规则读取：有效提取，非法行计数。"""
+        app._redact_custom_box.delete("1.0", "end")
+        app._redact_custom_box.insert("1.0", "PMS-\\d{6}\n[bad\n")
+        valid, invalid = app._custom_redact_rules()
+        assert valid == [r"PMS-\d{6}"]
+        assert invalid == 1
+
+    def test_custom_redact_applied_to_export_content(self, app):
+        """自定义规则在导出/复制时生效。"""
+        app._redact_custom_box.delete("1.0", "end")
+        app._redact_custom_box.insert("1.0", r"PMS-\d{6}")
+        app._redact_var.set(True)
+        out = app._redact_out("工单 PMS-123456 失败")
+        assert out == "工单 [自定义] 失败"
+
+    def test_redact_off_keeps_original(self, app, tmp_path):
+        """脱敏关：导出文本保持原样（用户显式关闭时尊重选择）。"""
+        app._redact_var.set(False)
         _run_paste_analysis(
             app, "2024-01-01 09:00:00 ERROR [db] login password=hunterX boom")
         app.update()
