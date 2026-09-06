@@ -2141,14 +2141,16 @@ class LogCompressorApp(_make_app_base()):
             rule_help,
             lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
 
-        # 优化缺陷R84：⚙ 设置弹层按钮 —— 行尾（列 12）。相似度等低频
+        # 优化缺陷R84：⚙ 设置弹层 —— 行尾（列 12~13）。相似度等低频
         # 分析前置设置收纳进弹层（过滤行 5 组超宽出屏的根治：省下
         # 拉整组 ~250px，以后新增设置项一律进弹层不再挤本行）；
-        # 修复缺陷R81：组首左 padx 24（静态等距见上）；右 12 行尾
+        # 修复缺陷R81：组首左 padx 24（静态等距见上）；⚙ 右 12 行尾
+        ctk.CTkLabel(panel, text="其他选项").grid(
+            row=0, column=12, padx=(24, 2), sticky="w")
         self._settings_btn = ctk.CTkButton(
             panel, text="⚙", width=36,
             command=self._toggle_settings_popup)
-        self._settings_btn.grid(row=0, column=12, padx=(24, 12), sticky="w")
+        self._settings_btn.grid(row=0, column=13, padx=(2, 12), sticky="w")
         self._build_settings_popup()
 
     # ------------------------------------------------------------------
@@ -3576,10 +3578,12 @@ class LogCompressorApp(_make_app_base()):
             return
         win.update_idletasks()
         w, h = win.winfo_reqwidth(), win.winfo_reqheight()
-        # 物理像素定位（wm_geometry 不经 CTk 二次缩放；本机 winfo
-        # 坐标即物理系），钳制在屏幕内（防出右/下屏缘）
-        x = max(8, min(x, self.winfo_screenwidth() - w - 8))
-        y = max(8, min(y, self.winfo_screenheight() - h - 8))
+        # 物理像素定位（wm_geometry / rootx 均为物理系）；屏宽钳制
+        # 必须用物理边界 —— winfo_screenwidth 高 DPI 下是逻辑值，
+        # 混用会把弹层钳到屏幕左半（修复：复用 Tooltip._screen_bounds）
+        vx, vy, sw, sh = Tooltip._screen_bounds(win)
+        x = max(vx + 8, min(x, vx + sw - w - 8))
+        y = max(vy + 8, min(y, vy + sh - h - 8))
         win.wm_geometry(f"{w}x{h}+{x}+{y}")
         self._settings_popup_opened_at = time.perf_counter()
         win.deiconify()

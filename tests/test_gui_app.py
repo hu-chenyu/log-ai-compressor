@@ -3246,12 +3246,16 @@ class TestMainWindowSearch:
                     (int(round(24 * scale)), s2)]
         assert pads == expected, \
             f"组首左 padx 应为补偿值 (19,24,24)×scale（实测 {pads}）"
-        # ⚙ 设置按钮行尾 padx (24,12)
+        # 「其他选项」标签列 12 padx (24,2)；⚙ 按钮列 13 padx (2,12)
+        lbl_pad = tuple(int(v) for v in
+                        panel.grid_slaves(row=0, column=12)[0]
+                        .grid_info()["padx"])
+        assert lbl_pad == (int(round(24 * scale)), s2), \
+            f"其他选项标签 padx 应为 (24,2)×scale（实测 {lbl_pad}）"
         btn_pad = tuple(int(v) for v in
                         app._settings_btn.grid_info()["padx"])
-        assert btn_pad == (int(round(24 * scale)),
-                           int(round(12 * scale))), \
-            f"⚙ 按钮 padx 应为 (24,12)×scale（实测 {btn_pad}）"
+        assert btn_pad == (s2, int(round(12 * scale))), \
+            f"⚙ 按钮 padx 应为 (2,12)×scale（实测 {btn_pad}）"
         entry_pad = tuple(int(v) for v in
                           app._ctx_entry.grid_info()["padx"])
         assert entry_pad[1] == 0, "输入框右 padx 应为 0（区间由组首承担）"
@@ -4626,26 +4630,27 @@ class TestSimilaritySelector:
         assert app._current_config_dict()["similarity"] == "strict"
 
     def test_settings_button_in_filter_row_right_end(self, app):
-        """⚙ 设置按钮在过滤行行尾（列 12）；相似度下拉收纳于弹层。"""
+        """「其他选项 ⚙」在过滤行行尾（列 13）；相似度下拉收纳于弹层。"""
         panel = app._ctx_entry.master
         assert app._settings_btn.master is panel
         info = app._settings_btn.grid_info()
         assert str(info["row"]) == "0"
-        assert str(info["column"]) == "12"
+        assert str(info["column"]) == "13"
         assert app._similarity_menu.winfo_toplevel() is app._settings_popup
 
     def test_settings_popup_toggle_and_close(self, app):
-        """⚙ 点击开合弹层；弹层含相似度下拉与说明 ⓘ。"""
+        """⚙ 点击开合弹层；贴按钮右对齐、物理屏边界内（高 DPI 修正）。"""
+        from log_ai_compressor.gui.app import Tooltip
         app.update()
         assert app._settings_popup.state() == "withdrawn"
         app._toggle_settings_popup()
         app.update()
         assert app._settings_popup.state() == "normal"
-        # 弹层右对齐钳制在屏幕内（防出右屏）
-        assert app._settings_popup.winfo_rootx() >= 0
+        # 物理屏边界钳制（winfo_screenwidth 高 DPI 为逻辑值，勿直接用）
+        vx, vy, sw, sh = Tooltip._screen_bounds(app._settings_popup)
+        assert app._settings_popup.winfo_rootx() >= vx
         assert (app._settings_popup.winfo_rootx()
-                + app._settings_popup.winfo_width()
-                <= app.winfo_screenwidth())
+                + app._settings_popup.winfo_width() <= vx + sw)
         app._toggle_settings_popup()
         app.update()
         assert app._settings_popup.state() == "withdrawn"
