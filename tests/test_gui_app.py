@@ -1557,11 +1557,22 @@ class TestContextLines:
         assert DEFAULT_CONTEXT_LINES == 50
 
     def test_filter_inputs_removed(self, app):
-        """优化缺陷R43：包含/排除关键字与 Top N 输入区整体删除。"""
-        assert not hasattr(app, "_include_entry"), "包含关键字输入框应已删除"
-        assert not hasattr(app, "_exclude_entry"), "排除关键字输入框应已删除"
+        """优化缺陷R43：过滤输入区自级别过滤行删除（R85 黑白名单经
+        用户决策在高级选项行回归 —— 过滤行本体仍无这些输入框）。
+        """
+        filter_panel = app._ctx_entry.master
+        slaves_texts = []
+        for w in filter_panel.winfo_children():
+            try:
+                slaves_texts.append(str(w.cget("text")))
+            except (tk.TclError, ValueError, AttributeError):
+                continue
+        assert not any("包含" in t or "排除" in t for t in slaves_texts), \
+            "级别过滤行不得再有包含/排除输入区"
         assert not hasattr(app, "_topn_entry"), "Top N 输入框应已删除"
-        # 分析参数固定为管线默认（不再采集过滤输入）
+        # 分析参数默认不含关键词（高级选项行留空 = 不限）
+        assert app._include_entry.get() == ""
+        assert app._exclude_entry.get() == ""
         common_levels = [lv for lv, var in app._level_vars.items()
                          if var.get()]
         assert set(common_levels) == {"ERROR", "FAIL"}, \
@@ -3067,10 +3078,13 @@ class TestMainWindowSearch:
         assert "过滤列表" in app._search_entry.cget("placeholder_text")
         panel = app._search_entry.master
         info = panel.grid_info()
-        assert str(info["row"]) == "3", \
-            "实时筛选行应在过滤行(row=2)与按钮行(row=4)之间"
+        assert str(info["row"]) == "4", \
+            "实时筛选行应在过滤行(row=2)/高级选项行(row=3)之后、" \
+            "按钮行(row=5)之前"
         assert panel is not app._ctx_entry.master, \
             "搜索组不得留在级别过滤行"
+        assert panel is not app._advanced_panel, \
+            "搜索组不得混入高级选项行"
         # 修复缺陷R72：独立行空间充裕，输入框加宽 90→200（上下文行数框仍 60）
         assert app._search_entry.cget("width") == 200
         assert app._ctx_entry.cget("width") == 60
@@ -3087,10 +3101,12 @@ class TestMainWindowSearch:
         assert str(app._search_count_box.grid_info()["column"]) == "4"
         assert app._search_count_box.grid_propagate() != 0, \
             "计数框应内容自适应变宽（数字变长不顶出边框）"
-        # 行号顺移：按钮行 4、结果区 5、状态栏 6
-        assert str(app._start_btn.master.grid_info()["row"]) == "4"
-        assert str(app._result_panel.grid_info()["row"]) == "5"
-        assert str(app._status_label.master.grid_info()["row"]) == "6"
+        # 行号顺移（优化缺陷R85 高级选项行 row=3）：按钮行 5、结果区 6、
+        # 状态栏 7
+        assert str(app._advanced_panel.grid_info()["row"]) == "3"
+        assert str(app._start_btn.master.grid_info()["row"]) == "5"
+        assert str(app._result_panel.grid_info()["row"]) == "6"
+        assert str(app._status_label.master.grid_info()["row"]) == "7"
 
     def test_search_nav_buttons(self, app):
         """修复缺陷R72：▲/▼ 按钮与 Enter / Shift+Enter 同语义。"""
@@ -3246,9 +3262,10 @@ class TestMainWindowSearch:
                     (int(round(24 * scale)), s2)]
         assert pads == expected, \
             f"组首左 padx 应为补偿值 (19,24,24)×scale（实测 {pads}）"
-        # 「其他选项」标签列 12 padx (24,2)；⚙ 按钮列 13 padx (2,12)
+        # 「其他选项」标签与 ⚙ 按钮已迁至高级选项行（优化缺陷R85）
+        ap = app._advanced_panel
         lbl_pad = tuple(int(v) for v in
-                        panel.grid_slaves(row=0, column=12)[0]
+                        ap.grid_slaves(row=0, column=12)[0]
                         .grid_info()["padx"])
         assert lbl_pad == (int(round(24 * scale)), s2), \
             f"其他选项标签 padx 应为 (24,2)×scale（实测 {lbl_pad}）"
@@ -4630,9 +4647,8 @@ class TestSimilaritySelector:
         assert app._current_config_dict()["similarity"] == "strict"
 
     def test_settings_button_in_filter_row_right_end(self, app):
-        """「其他选项 ⚙」在过滤行行尾（列 13）；相似度下拉收纳于弹层。"""
-        panel = app._ctx_entry.master
-        assert app._settings_btn.master is panel
+        """「其他选项 ⚙」在高级选项行行尾（列 13）；相似度在弹层。"""
+        assert app._settings_btn.master is app._advanced_panel
         info = app._settings_btn.grid_info()
         assert str(info["row"]) == "0"
         assert str(info["column"]) == "13"
@@ -4668,6 +4684,95 @@ class TestSimilaritySelector:
         assert app._result is not None
         assert len(app._result.clusters) == 2, \
             "严格(0.95)应拆分 0.884 相似对（标准并 1 簇）"
+
+
+class TestAdvancedPanel:
+    """优化缺陷R85：高级选项行（时间范围/行数上限/关键词黑白名单）。"""
+
+    def test_row_widgets_and_maxlines_default(self, app):
+        """行内控件齐备；行数上限默认「全部（推荐)」且不在列表中。"""
+        panel = app._advanced_panel
+        assert app._time_start_entry.master is panel
+        assert app._time_end_entry.master is panel
+        assert app._include_entry.master is panel
+        assert app._exclude_entry.master is panel
+        assert app._maxlines_menu.get() == "全部（推荐）"
+        values = list(app._maxlines_menu.cget("values"))
+        assert "全部（推荐）" not in values
+        assert values == ["前 10 万行", "前 50 万行", "前 100 万行"]
+        # 「其他选项 ⚙」迁入本行行尾（列 13）
+        assert app._settings_btn.master is panel
+        assert str(app._settings_btn.grid_info()["column"]) == "13"
+
+    def test_maxlines_switch_hides_selected(self, app):
+        """切「前 10 万行」：键更新 + 该项从列表消失 + 参数映射数值。"""
+        app._on_maxlines_changed("前 10 万行")
+        assert app._maxlines_key == "100k"
+        values = list(app._maxlines_menu.cget("values"))
+        assert "前 10 万行" not in values
+        assert "全部（推荐）" in values
+        assert app._advanced_params()["max_lines"] == 100000
+
+    def test_invalid_time_input_blocks_start(self, app):
+        """非法时间输入：状态栏提示格式要求，不启动分析（边界校验）。"""
+        app._time_start_entry.insert(0, "25:99:99")
+        app._on_start()
+        app.update()
+        assert "时间范围输入有误" in str(app._status_label.cget("text"))
+        assert app._result is None, "非法时间不得启动分析"
+
+    def test_tod_range_filters_analysis(self, app):
+        """每日时段 12:00~18:00：仅正午错误入窗 + 状态栏「时间窗」标签。"""
+        app._time_start_entry.insert(0, "12:00:00")
+        app._time_end_entry.insert(0, "18:00:00")
+        _run_paste_analysis(app, "\n".join([
+            "2024-01-01 08:00:00 ERROR [db] early morning error",
+            "2024-01-01 14:00:00 ERROR [db] midday error",
+            "2024-01-01 20:00:00 ERROR [db] evening error",
+        ]))
+        app.update()
+        assert len(app._result.clusters) == 1
+        assert "midday" in app._result.clusters[0].summary
+        assert "时间窗" in str(app._status_label.cget("text"))
+
+    def test_keyword_include_filters_analysis(self, app):
+        """包含关键词 database：仅命中错误保留 + 状态栏「包含[]」标签。"""
+        app._include_entry.insert(0, "database")
+        _run_paste_analysis(app, "\n".join([
+            "2024-01-01 09:00:00 ERROR [db] database connection lost",
+            "2024-01-01 09:00:01 ERROR [net] network unreachable",
+        ]))
+        app.update()
+        assert len(app._result.clusters) == 1
+        assert "database" in app._result.clusters[0].summary
+        assert "包含[database]" in str(app._status_label.cget("text"))
+
+    def test_keyword_exclude_filters_analysis(self, app):
+        """排除关键词 heartbeat：命中错误剔除 + 状态栏「排除[]」标签。"""
+        app._exclude_entry.insert(0, "heartbeat")
+        _run_paste_analysis(app, "\n".join([
+            "2024-01-01 09:00:00 ERROR [mon] heartbeat lost twice",
+            "2024-01-01 09:00:01 ERROR [db] database connection lost",
+        ]))
+        app.update()
+        assert len(app._result.clusters) == 1
+        assert "database" in app._result.clusters[0].summary
+        assert "排除[heartbeat]" in str(app._status_label.cget("text"))
+
+    def test_max_lines_limit_hit_marks_progress(self, app):
+        """limit_hit 结果：进度标签显示「已达行数上限」而非「已取消」。"""
+        from log_ai_compressor.core.models import (
+            AnalysisResult, RunStats, TimeHistogram)
+        stats = RunStats(source="<测试>", total_lines=10, error_lines=1,
+                         error_entries=1, limit_hit=True, truncated=False)
+        result = AnalysisResult(stats=stats, clusters=[],
+                                global_hist=TimeHistogram())
+        app._last_common = {"max_lines": 100000}
+        app._on_result(result)
+        app.update()
+        text = str(app._progress_label.cget("text"))
+        assert "已达行数上限" in text
+        assert "已取消" not in text, "上限收束不得显示「已取消」"
 
 
 # ---------------------------------------------------------------------------

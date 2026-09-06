@@ -259,6 +259,9 @@ class RunStats:
     time_start: Optional[float] = None   # 日志时间范围
     time_end: Optional[float] = None
     truncated: bool = False              # 是否因取消中断
+    # 优化缺陷R85：行数上限采样命中标记（与取消区分：非中断而是
+    # 达上限收束 —— 状态栏显示「已达行数上限」而非「已取消」）
+    limit_hit: bool = False
     analysis_cost: float = 0.0           # 智能分析耗时（秒，用于开销核算）
 
     def as_dict(self) -> dict:

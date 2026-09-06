@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 import dataclasses
@@ -133,6 +134,25 @@ SIMILARITY_DESCRIPTIONS = {
               "成一簇时用它（簇变多、更准）",
     "lenient": "宽松：≥0.70 即并簇 —— 相似就合并；同一错误被拆成多簇"
                "时用它（簇变少、压缩更狠）",
+}
+# 优化缺陷R85：行数上限采样四档（全部默认 + 中文显示名映射，
+# 与相似度/智能分析同款交互：选中项从下拉消失 + ⓘ 悬停说明）
+MAXLINES_KEYS = ("all", "100k", "500k", "1m")
+MAXLINES_DISPLAY = {
+    "all": "全部（推荐）",
+    "100k": "前 10 万行",
+    "500k": "前 50 万行",
+    "1m": "前 100 万行",
+}
+_MAXLINES_BY_DISPLAY = {v: k for k, v in MAXLINES_DISPLAY.items()}
+MAXLINES_VALUES = {"all": None, "100k": 100000, "500k": 500000,
+                   "1m": 1000000}
+MAXLINES_DESCRIPTIONS = {
+    "all": "全部（推荐）：分析整个文件，结果最完整",
+    "100k": "前 10 万行：超大文件快速体检，只看开头错误分布；"
+            "达上限时状态栏标记「已达行数上限」",
+    "500k": "前 50 万行：大文件折中 —— 覆盖更全但仍可能漏掉尾部错误",
+    "1m": "前 100 万行：近全量快速预览",
 }
 ANOMALY_DESCRIPTIONS = {
     "burst": "集中爆发：错误峰值超过全局 3σ 或簇自身基线（中位数+3×MAD）",
@@ -1879,11 +1899,13 @@ class LogCompressorApp(_make_app_base()):
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
         # 修复缺陷R72：新增实时筛选行（row=3），结果区 weight 行 4→5
-        self.grid_rowconfigure(5, weight=1)
+        # 优化缺陷R85：新增高级选项行（row=3），各行顺移，结果区 5→6
+        self.grid_rowconfigure(6, weight=1)
 
         self._build_header()
         self._build_tabs()
         self._build_config_panel()
+        self._build_advanced_panel()
         self._build_search_panel()
         self._build_action_panel()
         self._build_result_panel()
@@ -2133,18 +2155,85 @@ class LogCompressorApp(_make_app_base()):
         self._rule_menu.set(RULE_DISPLAY["auto"])
         self._rule_menu.grid(row=0, column=10, padx=(2, 0), sticky="w")
         # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
+        # 优化缺陷R85：ⓘ 右 12 恢复行尾余量（其他选项组迁至高级选项行）
         rule_help = ctk.CTkLabel(
             panel, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        rule_help.grid(row=0, column=11, padx=(4, 0), sticky="w")
+        rule_help.grid(row=0, column=11, padx=(4, 12), sticky="w")
         self._rule_help_tooltip = Tooltip(
             rule_help,
             lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
 
-        # 优化缺陷R84：⚙ 设置弹层 —— 行尾（列 12~13）。相似度等低频
-        # 分析前置设置收纳进弹层（过滤行 5 组超宽出屏的根治：省下
-        # 拉整组 ~250px，以后新增设置项一律进弹层不再挤本行）；
-        # 修复缺陷R81：组首左 padx 24（静态等距见上）；⚙ 右 12 行尾
+    # ------------------------------------------------------------------
+    # 优化缺陷R85：高级选项行（时间范围 / 行数上限 / 关键词黑白名单 /
+    # 其他选项⚙）—— 全部「开始分析」时生效的前置设置
+    # ------------------------------------------------------------------
+    def _build_advanced_panel(self) -> None:
+        """高级选项行：低频前置过滤（主流日志工具的第一前置项组）。
+
+        优化缺陷R85：时间范围过滤（①）+ 行数上限采样（④）+ 关键词
+        黑白名单（⑤，R43 删除后按用户决策回归于此行）；「其他选项
+        ⚙」从过滤行行尾迁入本行行尾（用户审美），弹层机制不变。
+        本行三项均不持久化（数据类过滤器：残留旧值会静默隐藏未来
+        分析的错误，重启清零；生效时状态栏常驻标签兜底提示）。
+        """
+        panel = ctk.CTkFrame(self)
+        panel.grid(row=3, column=0, sticky="ew", padx=10, pady=3)
+        self._bg_widgets.append((panel, "card"))
+        self._advanced_panel = panel
+
+        ctk.CTkLabel(panel, text="时间范围").grid(
+            row=0, column=0, padx=(12, 4), sticky="w")
+        self._time_start_entry = ctk.CTkEntry(
+            panel, width=110, placeholder_text="开始 如 14:00:00")
+        self._time_start_entry.grid(row=0, column=1, padx=(2, 0),
+                                    sticky="w")
+        ctk.CTkLabel(panel, text="~").grid(row=0, column=2, padx=2)
+        self._time_end_entry = ctk.CTkEntry(
+            panel, width=110, placeholder_text="结束 如 14:05:30")
+        self._time_end_entry.grid(row=0, column=3, padx=(2, 0), sticky="w")
+        time_help = ctk.CTkLabel(
+            panel, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        time_help.grid(row=0, column=4, padx=(4, 0), sticky="w")
+        Tooltip(time_help, lambda: (
+            "只分析时间窗内的日志行（任一端可留空 = 不限）。\n"
+            "格式一：HH:MM:SS（按每日时段过滤，单日日志最常用）\n"
+            "格式二：YYYY-MM-DD HH:MM:SS（精确区间，跨天日志用）\n"
+            "无时间戳的行始终保留（无法定位，宁留勿丢）"))
+
+        # 行数上限采样（①④⑤之④）
+        ctk.CTkLabel(panel, text="行数上限").grid(
+            row=0, column=5, padx=(24, 2), sticky="w")
+        self._maxlines_key = "all"
+        self._maxlines_menu = ctk.CTkOptionMenu(
+            panel, width=130, dynamic_resizing=False,
+            values=[MAXLINES_DISPLAY[k] for k in MAXLINES_KEYS
+                    if k != "all"],
+            command=self._on_maxlines_changed)
+        self._maxlines_menu.set(MAXLINES_DISPLAY["all"])
+        self._maxlines_menu.grid(row=0, column=6, padx=(2, 0), sticky="w")
+        maxlines_help = ctk.CTkLabel(
+            panel, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        maxlines_help.grid(row=0, column=7, padx=(4, 0), sticky="w")
+        Tooltip(maxlines_help, lambda:
+                MAXLINES_DESCRIPTIONS.get(self._maxlines_key, ""))
+
+        # 关键词黑白名单（①④⑤之⑤：包含=白名单任一命中，排除=黑
+        # 名单任一命中即剔除；匹配范围 模块+消息+堆栈，小写子串）
+        ctk.CTkLabel(panel, text="包含关键词").grid(
+            row=0, column=8, padx=(24, 2), sticky="w")
+        self._include_entry = ctk.CTkEntry(
+            panel, width=140, placeholder_text="逗号/空格分隔，留空不限")
+        self._include_entry.grid(row=0, column=9, padx=(2, 0), sticky="w")
+        ctk.CTkLabel(panel, text="排除关键词").grid(
+            row=0, column=10, padx=(24, 2), sticky="w")
+        self._exclude_entry = ctk.CTkEntry(
+            panel, width=140, placeholder_text="逗号/空格分隔，留空不限")
+        self._exclude_entry.grid(row=0, column=11, padx=(2, 0), sticky="w")
+
+        # 「其他选项 ⚙」自过滤行行尾迁入（优化缺陷R84 弹层机制不变）
         ctk.CTkLabel(panel, text="其他选项").grid(
             row=0, column=12, padx=(24, 2), sticky="w")
         self._settings_btn = ctk.CTkButton(
@@ -2152,6 +2241,25 @@ class LogCompressorApp(_make_app_base()):
             command=self._toggle_settings_popup)
         self._settings_btn.grid(row=0, column=13, padx=(2, 12), sticky="w")
         self._build_settings_popup()
+
+    def _on_maxlines_changed(self, choice: str) -> None:
+        """行数上限档位切换（优化缺陷R85）：全部/10万/50万/100万。
+
+        与相似度选择器同款交互：选中项从下拉列表移除；状态栏即时
+        展示该档说明。上限在下一次「开始分析」生效。
+        """
+        key = _MAXLINES_BY_DISPLAY.get(choice)
+        if key is None:
+            return
+        self._maxlines_key = key
+        self._maxlines_menu.set(MAXLINES_DISPLAY[key])
+        self._maxlines_menu.configure(
+            values=[MAXLINES_DISPLAY[k] for k in MAXLINES_KEYS
+                    if k != key])
+        desc = MAXLINES_DESCRIPTIONS.get(key)
+        if desc:
+            self._status_label.configure(
+                text=f"行数上限 {MAXLINES_DISPLAY[key]}：{desc}")
 
     # ------------------------------------------------------------------
     # 修复缺陷R72：实时筛选行（搜索组从级别过滤行迁出）
@@ -2168,7 +2276,8 @@ class LogCompressorApp(_make_app_base()):
         完全不变。
         """
         panel = ctk.CTkFrame(self)
-        panel.grid(row=3, column=0, sticky="ew", padx=10, pady=3)
+        # 优化缺陷R85：高级选项行插入后行号 3→4
+        panel.grid(row=4, column=0, sticky="ew", padx=10, pady=3)
         self._bg_widgets.append((panel, "card"))
 
         ctk.CTkLabel(panel, text="搜索").grid(row=0, column=0,
@@ -2218,7 +2327,8 @@ class LogCompressorApp(_make_app_base()):
         panel = ctk.CTkFrame(self)
         # 修复缺陷R9：顶部区域压缩（pady 4→3，按钮高度 34→30）
         # 修复缺陷R72：实时筛选行插入后行号 3→4
-        panel.grid(row=4, column=0, sticky="ew", padx=10, pady=3)
+        # 优化缺陷R85：高级选项行插入后行号 4→5
+        panel.grid(row=5, column=0, sticky="ew", padx=10, pady=3)
         self._bg_widgets.append((panel, "card"))
         for col in range(7):
             panel.grid_columnconfigure(col, weight=1)
@@ -2264,7 +2374,8 @@ class LogCompressorApp(_make_app_base()):
         panel = ctk.CTkFrame(self)
         # 修复缺陷R9：结果区上下留白压缩（列表/详情获得更大高度）
         # 修复缺陷R72：实时筛选行插入后行号 4→5
-        panel.grid(row=5, column=0, sticky="nsew", padx=10, pady=(2, 2))
+        # 优化缺陷R85：高级选项行插入后行号 5→6
+        panel.grid(row=6, column=0, sticky="nsew", padx=10, pady=(2, 2))
         self._bg_widgets.append((panel, "card"))
         # 修复缺陷R12：左右分栏改为 place 比例布局 —— panel 内三个并列
         # 子部件（列表列 / 分隔条 / 详情列），宽度由 _splitter_ratio
@@ -3369,7 +3480,8 @@ class LogCompressorApp(_make_app_base()):
     def _build_status_bar(self) -> None:
         bar = ctk.CTkFrame(self, corner_radius=0)
         # 修复缺陷R72：实时筛选行插入后行号 5→6
-        bar.grid(row=6, column=0, sticky="ew")
+        # 优化缺陷R85：高级选项行插入后行号 6→7
+        bar.grid(row=7, column=0, sticky="ew")
         self._bg_widgets.append((bar, "header"))
         bar.grid_columnconfigure(0, weight=1)
         self._status_label = ctk.CTkLabel(bar, text="就绪 · 支持文件导入 / 文本粘贴 / 多文件对比",
@@ -3451,6 +3563,62 @@ class LogCompressorApp(_make_app_base()):
         except ValueError:
             return DEFAULT_CONTEXT_LINES
         return max(0, value)
+
+    # ------------------------------------------------------------------
+    # 优化缺陷R85：高级选项参数解析（时间范围 / 关键词 / 行数上限）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_time_input(text: str):
+        """时间输入归一化：空 → (None, None)；HH:MM[:SS] → ("tod", 当日
+        秒数)；YYYY-MM-DD[ T]HH:MM[:SS] → ("epoch", 时间戳)；非法 →
+        抛 ValueError（调用方拦截并提示，不启动分析）。"""
+        import time as _time
+        text = (text or "").strip()
+        if not text:
+            return None, None
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                t = _time.strptime(text, fmt)
+                return "tod", t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec
+            except ValueError:
+                pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+                    "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M",
+                    "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"):
+            try:
+                return "epoch", _time.mktime(_time.strptime(text, fmt))
+            except ValueError:
+                pass
+        raise ValueError(f"无法识别的时间格式：{text}")
+
+    def _advanced_params(self) -> dict:
+        """采集高级选项行参数（开始分析时下发管线）。
+
+        优化缺陷R85：时间范围（epoch/tod 双模式，任端可空）+ 行数
+        上限（档位键映射数值）+ 包含/排除关键词（逗号/空格/中文逗号
+        分隔，小写子串语义见 EntryFilter）。时间输入非法时抛
+        ValueError —— _on_start 拦截提示并放弃启动（边界校验）。
+        """
+        params: dict = {
+            "time_start": None, "time_end": None,
+            "tod_start": None, "tod_end": None,
+            "max_lines": MAXLINES_VALUES.get(self._maxlines_key),
+        }
+        for entry, prefix in ((self._time_start_entry, "start"),
+                              (self._time_end_entry, "end")):
+            mode, value = self._parse_time_input(entry.get())
+            if mode == "epoch":
+                params[f"time_{prefix}"] = value
+            elif mode == "tod":
+                params[f"tod_{prefix}"] = value
+        for entry, key in ((self._include_entry, "include"),
+                           (self._exclude_entry, "exclude")):
+            raw = (entry.get() or "").replace("，", ",").replace("、", ",")
+            keywords = [k.strip() for k in re.split(r"[,\s]+", raw)
+                        if k.strip()]
+            if keywords:
+                params[key] = keywords
+        return params
 
     def _on_rule_changed(self, choice: str) -> None:
         """解析规则切换：状态栏即时展示该规则的适用场景说明。
@@ -4034,6 +4202,14 @@ class LogCompressorApp(_make_app_base()):
 
         payload: dict = {"mode": mode}
         # 全部 UI 状态必须在主线程采集（Tk 控件禁止跨线程访问）
+        # 优化缺陷R85：时间输入边界校验 —— 非法格式提示并放弃启动
+        try:
+            advanced = self._advanced_params()
+        except ValueError as exc:
+            self._status_label.configure(
+                text=f"时间范围输入有误：{exc}（支持 HH:MM:SS 或 "
+                     f"YYYY-MM-DD HH:MM:SS，留空不限）")
+            return
         payload["common"] = dict(
             levels=[lv for lv, var in self._level_vars.items() if var.get()],
             context_lines=self._current_context_lines(),
@@ -4042,7 +4218,11 @@ class LogCompressorApp(_make_app_base()):
             analysis_mode=self._analyze_key,
             # 优化缺陷R84：相似度阈值档位随分析任务下发（strict/standard/lenient）
             similarity=self._similarity_key,
+            # 优化缺陷R85：时间范围/行数上限/关键词黑白名单随任务下发
+            **advanced,
         )
+        # 优化缺陷R85：留存本次生效参数（结果状态栏常驻过滤标签用）
+        self._last_common = dict(payload["common"])
         if mode == "文件导入":
             path = self._file_entry.get().strip()
             if not path:
@@ -4097,9 +4277,14 @@ class LogCompressorApp(_make_app_base()):
             if payload["mode"] == "多文件对比":
                 # 修复缺陷R80：对比模式内置 analyze=False（diff 不需要
                 # 智能标记），不下发 analysis_mode（compare_files 不收）；
-                # 优化缺陷R84：similarity 同样不下发（compare_files 不收）
+                # 优化缺陷R84：similarity 同样不下发（compare_files 不收）；
+                # 优化缺陷R85：时间范围/行数上限不下发（compare_files
+                # 不收）；include/exclude 为其原生参数，照常透传
                 cmp_common = {k: v for k, v in payload["common"].items()
-                              if k not in ("analysis_mode", "similarity")}
+                              if k not in ("analysis_mode", "similarity",
+                                           "time_start", "time_end",
+                                           "tod_start", "tod_end",
+                                           "max_lines")}
                 results = compare_files(payload["files"], **cmp_common)
                 self._queue.put(("compare_done", results))
             elif payload["mode"] == "文件导入":
@@ -4178,16 +4363,34 @@ class LogCompressorApp(_make_app_base()):
         self._progress_bar.stop()
         self._progress_bar.set(1.0)
         s = result.stats
-        suffix = "（已取消，增量结果）" if s.truncated else ""
+        # 优化缺陷R85：上限采样命中与取消中断分文案显示
+        if s.limit_hit:
+            suffix = "（已达行数上限）"
+        else:
+            suffix = "（已取消，增量结果）" if s.truncated else ""
         self._progress_label.configure(
             text=f"完成：{s.total_lines:,} 行 | 错误 {s.error_lines:,} 行 | "
                  f"{len(result.clusters)} 种 | {_rate_text(s.lines_per_second)}"
                  f"{suffix}")
+        # 优化缺陷R85：生效中的前置过滤器常驻状态栏标签（防静默隐藏
+        # 错误 —— 三项均不持久化，重启清零，本标签为可见性兜底）
+        tags = []
+        common = getattr(self, "_last_common", {}) or {}
+        if (common.get("time_start") or common.get("time_end")
+                or common.get("tod_start") or common.get("tod_end")):
+            tags.append("时间窗")
+        if common.get("max_lines"):
+            tags.append(f"上限{MAXLINES_DISPLAY.get(self._maxlines_key, '')}")
+        if common.get("include"):
+            tags.append(f"包含[{','.join(common['include'])}]")
+        if common.get("exclude"):
+            tags.append(f"排除[{','.join(common['exclude'])}]")
+        tag_text = (" | 生效过滤: " + " ".join(tags)) if tags else ""
         self._status_label.configure(
             text=f"{s.source} | 编码 {s.encoding} | 规则 {s.rule_name} | "
                  f"时间范围 {format_timestamp(s.time_start)} ~ "
                  f"{format_timestamp(s.time_end)} | 智能分析耗时 "
-                 f"{s.analysis_cost * 1000:.0f}ms")
+                 f"{s.analysis_cost * 1000:.0f}ms{tag_text}")
         self._render_cluster_list()
         self._save_config()
         # 优化缺陷R71：规则体检（疑似不匹配时覆盖状态栏为可点击提示）
