@@ -121,7 +121,8 @@ def compare_results(base: AnalysisResult, other: AnalysisResult) -> CompareResul
 
 
 def compare_files(paths, *, levels=None, include=None, exclude=None,
-                  top_n=None, context_lines=None, rule=None
+                  top_n=None, context_lines=None, rule=None,
+                  use_regex: bool = False, encoding=None
                   ) -> List[CompareResult]:
     """多文件对比便捷入口：第一个文件为基准，与其余文件两两对比。"""
     paths = [Path(p) for p in paths]
@@ -130,7 +131,7 @@ def compare_files(paths, *, levels=None, include=None, exclude=None,
     results = [
         analyze_file(p, levels=levels, include=include, exclude=exclude,
                      top_n=top_n, context_lines=context_lines, rule=rule,
-                     analyze=False)
+                     analyze=False, use_regex=use_regex, encoding=encoding)
         for p in paths
     ]
     base = results[0]

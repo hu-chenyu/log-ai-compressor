@@ -5,6 +5,7 @@ from __future__ import annotations
 from log_ai_compressor.core.encoding import (
     detect_encoding,
     detect_encoding_from_bytes,
+    is_compressed,
     open_text_stream,
 )
 
@@ -67,3 +68,50 @@ class TestFileDetection:
             content = fh.read()
         # 容错解码：坏字节替换但流不中断
         assert "ERROR line" in content and "INFO ok" in content
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R87：.gz/.zip 压缩包透明解压直读（魔数判定，扩展名不可靠）
+# ---------------------------------------------------------------------------
+class TestCompressedLogs:
+    def test_is_compressed_by_magic(self, tmp_path):
+        import gzip as _gzip
+        g = tmp_path / "rotated.log.1"          # 无 .gz 扩展名也认魔数
+        with _gzip.open(g, "wb") as fh:
+            fh.write(b"ERROR gz line\n")
+        plain = tmp_path / "plain.log"
+        plain.write_bytes(b"ERROR plain\n")
+        assert is_compressed(g) is True
+        assert is_compressed(plain) is False
+
+    def test_gzip_stream_and_detect(self, tmp_path):
+        import gzip as _gzip
+        g = tmp_path / "app.log.gz"
+        text = "2024-01-01 ERROR 压缩包内中文错误\n"
+        with _gzip.open(g, "wb") as fh:
+            fh.write(text.encode("utf-8") * 50)
+        assert detect_encoding(g) == "utf-8"    # 解压头部后再探测
+        with open_text_stream(g, "utf-8") as fh:
+            content = fh.read()
+        assert "压缩包内中文错误" in content
+
+    def test_zip_stream_reads_largest_member(self, tmp_path):
+        import zipfile as _zipfile
+        z = tmp_path / "logs.zip"
+        with _zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("small.txt", "INFO tiny\n")
+            zf.writestr("app.log", "ERROR zip 主日志\n" * 30)
+        assert is_compressed(z) is True
+        with open_text_stream(z, "utf-8") as fh:
+            content = fh.read()
+        assert "zip 主日志" in content
+        assert "tiny" not in content             # 取最大条目
+
+    def test_zip_without_log_member_raises(self, tmp_path):
+        import zipfile as _zipfile
+        import pytest as _pytest
+        z = tmp_path / "onlydir.zip"
+        with _zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("subdir/", "")          # 仅目录条目，无日志文件
+        with _pytest.raises(ValueError, match="没有可分析的日志文件"):
+            open_text_stream(z, "utf-8")

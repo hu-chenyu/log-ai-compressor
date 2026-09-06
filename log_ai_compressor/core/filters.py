@@ -29,6 +29,9 @@ class FilterConfig:
     exclude: List[str] = field(default_factory=list)   # 排除关键字（任一命中即剔除）
     top_n: int = DEFAULT_TOP_N
     context_lines: int = DEFAULT_CONTEXT_LINES
+    # 优化缺陷R91：关键词按正则解释（默认 False=小写子串；True 时
+    # include/exclude 各项编译为正则，re.search 命中即算）
+    use_regex: bool = False
 
     @classmethod
     def defaults(cls) -> "FilterConfig":
@@ -76,6 +79,25 @@ class EntryFilter:
         self._levels = set(config.levels or DEFAULT_SELECTED_LEVELS)
         self._include = config.normalized_include()
         self._exclude = config.normalized_exclude()
+        # 优化缺陷R91：正则模式（预编译；非法正则在 GUI 边界已拦截，
+        # 此处兜底再校验一次、非法项降级丢弃不崩溃）
+        self._include_re = self._compile(config.include, config.use_regex)
+        self._exclude_re = self._compile(config.exclude, config.use_regex)
+
+    @staticmethod
+    def _compile(keywords, use_regex: bool):
+        if not use_regex:
+            return None
+        import re
+        out = []
+        for kw in keywords or []:
+            if not kw or not kw.strip():
+                continue
+            try:
+                out.append(re.compile(kw.strip(), re.IGNORECASE))
+            except re.error:
+                continue        # 非法正则降级丢弃（GUI 边界已提示）
+        return out
 
     # ------------------------------------------------------------------
     def match(self, entry: LogEntry) -> bool:
@@ -87,6 +109,13 @@ class EntryFilter:
         if entry.level not in self._levels:
             return False
         text = self._search_text(entry)
+        if self._exclude_re is not None:
+            if any(p.search(text) for p in self._exclude_re):
+                return False
+            if self._include_re and not any(
+                    p.search(text) for p in self._include_re):
+                return False
+            return True
         if self._exclude and any(k in text for k in self._exclude):
             return False
         if self._include and not any(k in text for k in self._include):

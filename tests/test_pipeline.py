@@ -10,6 +10,7 @@ from log_ai_compressor.core.pipeline import (
     LogPipeline,
     PipelineConfig,
     analyze_file,
+    analyze_files,
     analyze_text,
 )
 from log_ai_compressor.core.filters import FilterConfig
@@ -576,3 +577,159 @@ class TestSmallLogPerformance:
         elapsed = _time.perf_counter() - t0
         assert r.stats.total_lines == 20000
         assert elapsed < 10.0, f"2 万行分析耗时 {elapsed:.2f}s 超过 10s"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R89：轮转文件合并分析（多文件按序串流，跨轮转因果链不断）
+# ---------------------------------------------------------------------------
+class TestRotationMerge:
+    def test_two_rotated_files_merged(self, tmp_path):
+        """两个轮转文件按序合并：行数/错误数累加，簇跨文件归并。"""
+        older = tmp_path / "app.log.1"
+        older.write_text("\n".join([
+            "2024-01-01 09:00:00 ERROR [db] connection refused to db-primary:5432",
+            "2024-01-01 09:00:01 INFO [db] retrying",
+        ]) + "\n", encoding="utf-8")
+        newer = tmp_path / "app.log"
+        newer.write_text("\n".join([
+            "2024-01-01 09:01:00 ERROR [db] connection refused to db-primary:5432",
+            "2024-01-01 09:01:01 ERROR [api] request 1 failed",
+        ]) + "\n", encoding="utf-8")
+        r = analyze_files([older, newer])   # 调用方保证最旧在前
+        assert r.stats.total_lines == 4
+        assert r.stats.error_entries == 3
+        # 跨文件同指纹归一簇（count=2 来自两个文件）
+        refused = next(c for c in r.clusters if "refused" in c.summary)
+        assert refused.count == 2
+        # source 标注多文件合并
+        assert "app.log.1" in r.stats.source and "app.log" in r.stats.source
+
+    def test_global_timeline_across_files(self, tmp_path):
+        """全局时间范围覆盖两个文件的最早~最晚（因果链跨轮转不断）。"""
+        f1 = tmp_path / "r1.log"
+        f1.write_text(
+            "2024-01-01 08:59:59 ERROR [db] tail of old rotation\n",
+            encoding="utf-8")
+        f2 = tmp_path / "r2.log"
+        f2.write_text(
+            "2024-01-01 09:00:01 ERROR [db] head of new rotation\n",
+            encoding="utf-8")
+        r = analyze_files([f1, f2])
+        from log_ai_compressor.core.models import format_timestamp
+        assert format_timestamp(r.stats.time_start) == "2024-01-01 08:59:59"
+        assert format_timestamp(r.stats.time_end) == "2024-01-01 09:00:01"
+
+    def test_single_file_equivalent_to_analyze_file(self, tmp_path):
+        """单文件列表等效 analyze_file（边界退化路径）。"""
+        p = tmp_path / "a.log"
+        p.write_text(SAMPLE_LOG, encoding="utf-8")
+        r = analyze_files([p])
+        assert r.stats.total_lines == 15
+        assert r.stats.error_entries == 7
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            analyze_files([tmp_path / "nope.log"])
+
+    def test_gzip_rotation_member_merged(self, tmp_path):
+        """优化缺陷R87+R89：.gz 旧轮转与现役日志混合串流。"""
+        import gzip as _gzip
+        old_gz = tmp_path / "app.log.1.gz"
+        with _gzip.open(old_gz, "wt", encoding="utf-8") as fh:
+            fh.write("2024-01-01 08:00:00 ERROR [db] gz era error\n")
+        cur = tmp_path / "app.log"
+        cur.write_text("2024-01-01 09:00:00 ERROR [db] current era error\n",
+                       encoding="utf-8")
+        r = analyze_files([old_gz, cur])
+        assert r.stats.total_lines == 2
+        assert r.stats.error_entries == 2
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R90：ANSI 转义码清理（Jenkins AnsiColor 导出乱码根治）
+# ---------------------------------------------------------------------------
+class TestAnsiStrip:
+    def test_ansi_codes_stripped_on_ingest(self):
+        """彩色控制符在摄入时剥除：摘要/计数均按净化后文本。"""
+        log = "\n".join([
+            "\x1b[31m2024-01-01 09:00:00 ERROR [db] red alert failed\x1b[0m",
+            "\x1b[1;32m2024-01-01 09:00:01 INFO [db] green ok\x1b[0m",
+        ])
+        r = analyze_text(log)
+        assert r.stats.total_lines == 2
+        assert r.stats.error_entries == 1
+        assert "\x1b" not in r.clusters[0].summary
+        assert "red alert failed" in r.clusters[0].summary
+
+    def test_plain_lines_untouched(self):
+        """无 ESC 的行走快速路径（逐行无正则开销），内容不变。"""
+        r = analyze_text("2024-01-01 09:00:00 ERROR [db] plain boom")
+        assert r.clusters[0].summary == "plain boom"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R88：编码指定（覆盖自动探测，老系统乱码场景）
+# ---------------------------------------------------------------------------
+class TestEncodingOverride:
+    def test_specified_encoding_wins(self, tmp_path):
+        """显式指定编码：stats.encoding 即指定值，不再探测。"""
+        p = tmp_path / "gbk.log"
+        p.write_bytes("2024-01-01 09:00:00 ERROR [db] 中文错误\n".encode("gbk"))
+        r = analyze_file(p, encoding="gb18030")
+        assert r.stats.encoding == "gb18030"
+        assert "中文错误" in r.clusters[0].summary
+
+    def test_wrong_override_still_no_crash(self, tmp_path):
+        """指定错误编码：容错替换不崩溃（errors=replace 兜底）。"""
+        p = tmp_path / "utf8.log"
+        p.write_bytes("2024-01-01 09:00:00 ERROR [db] 中文错误\n".encode("utf-8"))
+        r = analyze_file(p, encoding="gb18030")
+        assert r.stats.encoding == "gb18030"
+        assert r.stats.error_entries == 1
+
+    def test_auto_detect_when_not_specified(self, tmp_path):
+        """不指定（None）：维持自动探测行为（回归保护）。"""
+        p = tmp_path / "a.log"
+        p.write_text(SAMPLE_LOG, encoding="utf-8")
+        r = analyze_file(p)
+        assert r.stats.encoding == "utf-8"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R91：关键词按正则匹配（use_regex=True 时 include/exclude 编译）
+# ---------------------------------------------------------------------------
+class TestRegexKeywords:
+    _LOG = "\n".join([
+        "2024-01-01 09:00:00 ERROR [db] ERR-1001 connection lost",
+        "2024-01-01 09:00:01 ERROR [net] network unreachable",
+        "2024-01-01 09:00:02 ERROR [db] heartbeat missed twice",
+    ])
+
+    def test_include_regex_pattern(self):
+        """正则包含：ERR-\\d{4} 命中错误码行，其余剔除。"""
+        r = analyze_text(self._LOG, include=[r"ERR-\d{4}"], use_regex=True)
+        assert r.stats.error_entries == 1
+        assert "ERR-1001" in r.clusters[0].summary
+
+    def test_include_alternation(self):
+        """正则或：timeout|unreachable 命中两者之一。"""
+        r = analyze_text(self._LOG,
+                         include=["lost|unreachable"], use_regex=True)
+        assert r.stats.error_entries == 2
+
+    def test_exclude_regex_pattern(self):
+        """正则排除：heartbeat.* 剔除心跳错误。"""
+        r = analyze_text(self._LOG, exclude=[r"heartbeat.*"], use_regex=True)
+        assert r.stats.error_entries == 2
+        assert not any("heartbeat" in c.summary for c in r.clusters)
+
+    def test_invalid_regex_degrades_not_crashes(self):
+        """非法正则降级丢弃不崩溃（GUI 边界之外的兜底校验）。"""
+        r = analyze_text(self._LOG, include=["[unclosed"], use_regex=True)
+        # 非法项被丢弃 → include 列表等效为空 → 全部准入
+        assert r.stats.error_entries == 3
+
+    def test_regex_off_keeps_substring_semantics(self):
+        """默认（False）：\\d 按字面子串处理（回归保护）。"""
+        r = analyze_text(self._LOG, include=[r"ERR-\d{4}"])
+        assert r.stats.error_entries == 0, "字面 \\d 不应命中任何行"

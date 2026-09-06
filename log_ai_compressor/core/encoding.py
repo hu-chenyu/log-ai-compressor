@@ -10,7 +10,14 @@
 """
 from __future__ import annotations
 
+import gzip
+import io
+import zipfile
 from typing import TextIO
+
+# 优化缺陷R87：压缩包魔数（gzip 1f 8b / zip PK\x03\x04）
+_GZIP_MAGIC = b"\x1f\x8b"
+_ZIP_MAGIC = b"PK\x03\x04"
 
 # BOM 特征表（优先级从高到低）
 _BOM_TABLE = (
@@ -27,14 +34,51 @@ _CANDIDATE_ENCODINGS = ("utf-8", "gb18030")
 _SAMPLE_SIZE = 262144       # 采样 256KB，兼顾准确性与读取开销
 
 
+def _is_gzip(path) -> bool:
+    """魔数判定 gzip（扩展名不可靠，轮转日志常改名）。"""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == _GZIP_MAGIC
+    except OSError:
+        return False
+
+
+def _is_zip(path) -> bool:
+    """魔数判定 zip（jar/zip 同构，取首个日志条目即可）。"""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == _ZIP_MAGIC
+    except OSError:
+        return False
+
+
+def _zip_log_member(zf: zipfile.ZipFile) -> str:
+    """选 zip 内最大非目录条目（日志包通常单文件；多文件取最大者）。"""
+    infos = [i for i in zf.infolist() if not i.is_dir()]
+    if not infos:
+        raise ValueError("zip 压缩包内没有可分析的日志文件")
+    return max(infos, key=lambda i: i.file_size).filename
+
+
+def _read_sample_bytes(path, sample_size: int) -> bytes:
+    """读取编码探测采样（优化缺陷R87：压缩包先解压头部再采样）。"""
+    if _is_gzip(path):
+        with gzip.open(path, "rb") as fh:
+            return fh.read(sample_size)
+    if _is_zip(path):
+        with zipfile.ZipFile(path) as zf:
+            with zf.open(_zip_log_member(zf)) as fh:
+                return fh.read(sample_size)
+    with open(path, "rb") as fh:
+        return fh.read(sample_size)
+
+
 def detect_encoding(path, sample_size: int = _SAMPLE_SIZE) -> str:
-    """探测日志文件编码。
+    """探测日志文件编码（优化缺陷R87：.gz/.zip 透明解压后探测）。
 
     返回值可直接用于 io.open(encoding=...)。
     """
-    with open(path, "rb") as fh:
-        head = fh.read(sample_size)
-    return detect_encoding_from_bytes(head)
+    return detect_encoding_from_bytes(_read_sample_bytes(path, sample_size))
 
 
 def _decodes_cleanly(data: bytes, enc: str) -> bool:
@@ -79,8 +123,37 @@ def detect_encoding_from_bytes(head: bytes) -> str:
     return "utf-8"
 
 
+def is_compressed(path) -> bool:
+    """是否受支持的压缩日志（优化缺陷R87：gzip/zip 魔数判定）。"""
+    return _is_gzip(path) or _is_zip(path)
+
+
+class _ZipTextStream(io.TextIOWrapper):
+    """zip 条目文本流：关闭时连带释放 ZipFile 句柄。"""
+
+    def __init__(self, zf: zipfile.ZipFile, member: str, encoding: str):
+        super().__init__(zf.open(member), encoding=encoding,
+                         errors="replace", newline="")
+        self._zf = zf
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._zf.close()
+
+
 def open_text_stream(path, encoding: str) -> TextIO:
-    """以指定编码打开文本流（未知字符以替换符容错，保证流不中断）。"""
+    """以指定编码打开文本流（未知字符以替换符容错，保证流不中断）。
+
+    优化缺陷R87：.gz/.zip 压缩包透明解压读取（轮转日志免手动解压）。
+    """
+    if _is_gzip(path):
+        return gzip.open(path, "rt", encoding=encoding, errors="replace",
+                         newline="")
+    if _is_zip(path):
+        zf = zipfile.ZipFile(path)
+        return _ZipTextStream(zf, _zip_log_member(zf), encoding)
     return open(path, "r", encoding=encoding, errors="replace",
                 buffering=1 << 20, newline="")
 

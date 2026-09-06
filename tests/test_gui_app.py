@@ -3262,10 +3262,11 @@ class TestMainWindowSearch:
                     (int(round(24 * scale)), s2)]
         assert pads == expected, \
             f"组首左 padx 应为补偿值 (19,24,24)×scale（实测 {pads}）"
-        # 「其他选项」标签与 ⚙ 按钮已迁至高级选项行（优化缺陷R85）
+        # 「其他选项」标签与 ⚙ 按钮已迁至高级选项行（优化缺陷R85；
+        # R92 关键词两框撤入弹层后列号 12/13 → 8/9）
         ap = app._advanced_panel
         lbl_pad = tuple(int(v) for v in
-                        ap.grid_slaves(row=0, column=12)[0]
+                        ap.grid_slaves(row=0, column=8)[0]
                         .grid_info()["padx"])
         assert lbl_pad == (int(round(24 * scale)), s2), \
             f"其他选项标签 padx 应为 (24,2)×scale（实测 {lbl_pad}）"
@@ -4647,11 +4648,11 @@ class TestSimilaritySelector:
         assert app._current_config_dict()["similarity"] == "strict"
 
     def test_settings_button_in_filter_row_right_end(self, app):
-        """「其他选项 ⚙」在高级选项行行尾（列 13）；相似度在弹层。"""
+        """「其他选项 ⚙」在高级选项行（优化缺陷R92 瘦身后列 9）。"""
         assert app._settings_btn.master is app._advanced_panel
         info = app._settings_btn.grid_info()
         assert str(info["row"]) == "0"
-        assert str(info["column"]) == "13"
+        assert str(info["column"]) == "9"
         assert app._similarity_menu.winfo_toplevel() is app._settings_popup
 
     def test_settings_popup_toggle_and_close(self, app):
@@ -4694,15 +4695,16 @@ class TestAdvancedPanel:
         panel = app._advanced_panel
         assert app._time_start_entry.master is panel
         assert app._time_end_entry.master is panel
-        assert app._include_entry.master is panel
-        assert app._exclude_entry.master is panel
+        # 优化缺陷R92：关键词两框已撤入 ⚙ 设置弹层（行瘦身防超宽）
+        assert app._include_entry.winfo_toplevel() is app._settings_popup
+        assert app._exclude_entry.winfo_toplevel() is app._settings_popup
         assert app._maxlines_menu.get() == "全部（推荐）"
         values = list(app._maxlines_menu.cget("values"))
         assert "全部（推荐）" not in values
         assert values == ["前 10 万行", "前 50 万行", "前 100 万行"]
-        # 「其他选项 ⚙」迁入本行行尾（列 13）
+        # 「其他选项 ⚙」在本行（优化缺陷R92 瘦身后列 9）
         assert app._settings_btn.master is panel
-        assert str(app._settings_btn.grid_info()["column"]) == "13"
+        assert str(app._settings_btn.grid_info()["column"]) == "9"
 
     def test_maxlines_switch_hides_selected(self, app):
         """切「前 10 万行」：键更新 + 该项从列表消失 + 参数映射数值。"""
@@ -4718,7 +4720,8 @@ class TestAdvancedPanel:
         app._time_start_entry.insert(0, "25:99:99")
         app._on_start()
         app.update()
-        assert "时间范围输入有误" in str(app._status_label.cget("text"))
+        assert "前置设置有误" in str(app._status_label.cget("text"))
+        assert "时间格式" in str(app._status_label.cget("text"))
         assert app._result is None, "非法时间不得启动分析"
 
     def test_tod_range_filters_analysis(self, app):
@@ -4773,6 +4776,113 @@ class TestAdvancedPanel:
         text = str(app._progress_label.cget("text"))
         assert "已达行数上限" in text
         assert "已取消" not in text, "上限收束不得显示「已取消」"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R86~R92：⚙ 弹层扩面板（关键词迁入 / 正则开关 / 编码指定 / 脱敏）
+# ---------------------------------------------------------------------------
+class TestSettingsPopupExtras:
+    def test_popup_widgets_present(self, app):
+        """弹层入住：关键词两框 + 正则/脱敏复选 + 编码选择器（默认值）。"""
+        assert app._include_entry.winfo_toplevel() is app._settings_popup
+        assert app._exclude_entry.winfo_toplevel() is app._settings_popup
+        assert app._use_regex_var.get() is False, "正则默认关（字面子串）"
+        assert app._redact_var.get() is True, "脱敏默认开（出站安全）"
+        assert app._encoding_menu.get() == "自动探测（推荐）"
+
+    def test_encoding_switch_hides_selected(self, app):
+        """编码指定：选中项从列表消失 + 参数映射为具体编码。"""
+        app._on_encoding_changed("GBK / GB18030")
+        assert app._encoding_display == "GBK / GB18030"
+        values = list(app._encoding_menu.cget("values"))
+        assert "GBK / GB18030" not in values
+        assert "自动探测（推荐）" in values
+        assert app._advanced_params()["encoding"] == "gb18030"
+
+    def test_invalid_regex_blocks_start(self, app):
+        """非法正则：状态栏提示且不启动分析（与时间输入同路边界校验）。"""
+        app._use_regex_var.set(True)
+        app._include_entry.insert(0, "[unclosed")
+        app._on_start()
+        app.update()
+        text = str(app._status_label.cget("text"))
+        assert "前置设置有误" in text and "正则" in text
+        assert app._result is None, "非法正则不得启动分析"
+
+    def test_regex_analysis_and_status_tag(self, app):
+        """正则包含 ERR-\\d{4}：仅错误码行入窗 + 状态栏「正则」标签。"""
+        app._use_regex_var.set(True)
+        app._include_entry.insert(0, r"ERR-\d{4}")
+        _run_paste_analysis(app, "\n".join([
+            "2024-01-01 09:00:00 ERROR [db] ERR-1001 connection lost",
+            "2024-01-01 09:00:01 ERROR [net] network unreachable",
+        ]))
+        app.update()
+        assert app._result.stats.error_entries == 1
+        text = str(app._status_label.cget("text"))
+        assert "正则" in text
+
+    def test_redact_applied_on_export(self, app, tmp_path):
+        """脱敏开（默认）：导出文本中密钥/邮箱已打码。"""
+        _run_paste_analysis(
+            app, "2024-01-01 09:00:00 ERROR [db] login password=hunterX "
+                 "by admin@corp.com")
+        app.update()
+        app._export_with_options(
+            str(tmp_path / "r"), {"txt"},
+            {"overview", "list", "detail", "instances"})
+        content = (tmp_path / "r.txt").read_text(encoding="utf-8")
+        assert "hunterX" not in content
+        assert "admin@corp.com" not in content
+        assert "[密钥]" in content and "[邮箱]" in content
+
+    def test_redact_off_keeps_original(self, app, tmp_path):
+        """脱敏关：导出文本保持原样（用户显式关闭时尊重选择）。"""
+        app._redact_var.set(False)
+        _run_paste_analysis(
+            app, "2024-01-01 09:00:00 ERROR [db] login password=hunterX boom")
+        app.update()
+        app._export_with_options(
+            str(tmp_path / "r"), {"txt"},
+            {"overview", "list", "detail", "instances"})
+        content = (tmp_path / "r.txt").read_text(encoding="utf-8")
+        assert "hunterX" in content
+
+    def test_copy_summary_redacted(self, app):
+        """复制摘要：脱敏开时剪贴板内容已打码（投喂 AI 主路径）。"""
+        _run_paste_analysis(
+            app, "2024-01-01 09:00:00 ERROR [db] call admin@corp.com boom")
+        app.update()
+        app._on_copy_summary()
+        clip = app.clipboard_get()
+        assert "admin@corp.com" not in clip
+        assert "[邮箱]" in clip
+
+    def test_rotation_multiselect_payload(self, app, tmp_path):
+        """优化缺陷R89：导入框 "; " 分隔多文件 → 轮转合并分析。"""
+        f1 = tmp_path / "app.log.1"
+        f1.write_text(
+            "2024-01-01 08:00:00 ERROR [db] old rotation error\n",
+            encoding="utf-8")
+        f2 = tmp_path / "app.log"
+        f2.write_text(
+            "2024-01-01 09:00:00 ERROR [db] new rotation error\n",
+            encoding="utf-8")
+        app._tabview.set("文件导入")
+        app._file_entry.delete(0, "end")
+        app._file_entry.insert(0, f"{f1}; {f2}")
+        app._on_start()
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            app.update()
+            if app._result is not None:
+                break
+            time.sleep(0.05)
+        assert app._result is not None
+        assert app._result.stats.total_lines == 2
+        assert app._result.stats.error_entries == 2
+        # source 标注多文件合并
+        assert "app.log.1" in app._result.stats.source
 
 
 # ---------------------------------------------------------------------------
