@@ -285,6 +285,8 @@ class LogPipeline:
         try:
             for raw_line in lines:
                 line_no += 1
+                # 优化缺陷R99：原始字符数逐行累计（Token 压缩率原始侧）
+                stats.raw_chars += len(raw_line)
                 line = _strip_ansi(raw_line.rstrip("\r\n"))
 
                 # 1) 新条目开始 -> 处理上一个完整条目

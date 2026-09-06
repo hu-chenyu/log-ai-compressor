@@ -248,6 +248,9 @@ class RunStats:
     encoding: str = "utf-8"
     rule_name: str = "generic"
     total_lines: int = 0                 # 总行数
+    # 优化缺陷R99：原始摄入字符数（Token 估算 + 压缩率展示的原始侧
+    # 分母；流式逐行累计，不额外占内存）
+    raw_chars: int = 0
     entry_lines: int = 0                 # 结构化条目数
     error_lines: int = 0                 # 错误级行数（FATAL/ERROR/FAIL）
     error_entries: int = 0               # 通过过滤并参与聚类的错误条目数
@@ -269,6 +272,7 @@ class RunStats:
         return {
             "source": self.source, "encoding": self.encoding,
             "rule": self.rule_name, "total_lines": self.total_lines,
+            "raw_chars": self.raw_chars,
             "entry_lines": self.entry_lines, "error_lines": self.error_lines,
             "error_entries": self.error_entries,
             "level_counts": dict(self.level_counts),
