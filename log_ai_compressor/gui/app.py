@@ -2085,20 +2085,22 @@ class LogCompressorApp(_make_app_base()):
             self._level_tooltips[level] = Tooltip(
                 info, lambda lv=level: _LEVEL_HELP[lv])
 
-        # 优化缺陷R79：智能分析模式选择器 —— 紧随级别组（R74 对齐
-        # 机制不变：DEBUG 的 G 右缘仍贴全屏按钮线，本组落在原空位），
-        # 与解析规则同款交互（选中项从下拉消失 + ⓘ 悬停说明）
-        # 修复缺陷R81：三个组间可视区间静态等距 —— 组首左 padx 按
-        # 前组尾距差补偿（复选框紧凑宽有效尾距 ≈5 逻辑 px：R74 构造
-        # 尾部 4 + 文本取整残差 + 内部 tk 标签边距，实测 2x 下 11
-        # 物理 px；CTk6 标签/ⓘ 文本贴控件边、输入框边缘即视觉边
-        # 缘，三者内边距同构互抵），19+5 = 24 = 24 = 24 逻辑 px
-        # 恒等（残差 ≤1 物理 px），不随窗口/DPI 漂移
-        ctk.CTkLabel(panel, text="智能分析").grid(
+        # 修复缺陷R44：上下文行数输入框 —— 紧随级别组（用户审美换位：
+        # 原智能分析组 ⇄ 本组）；修复缺陷R81：组首左 padx 19 静态等距
+        # （复选框紧凑宽有效尾距 ≈5 逻辑 px 补偿，19+5=24 与其余组首同）
+        ctk.CTkLabel(panel, text="上下文行数").grid(
             row=0, column=2, padx=(19, 2), sticky="w")
+        self._ctx_entry = ctk.CTkEntry(panel, width=60)
+        self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
+        self._ctx_entry.grid(row=0, column=3, padx=(2, 0), sticky="w")
+
+        # 优化缺陷R79：智能分析模式选择器 —— 上下文行数组之后（换位后），
+        # 与解析规则同款交互（选中项从下拉消失 + ⓘ 悬停说明）
+        # 修复缺陷R81：组首左 padx 24（静态等距见上）
+        ctk.CTkLabel(panel, text="智能分析").grid(
+            row=0, column=6, padx=(24, 2), sticky="w")
         self._analyze_key = "full"
-        # 修复缺陷R82：dynamic_resizing=False + 定宽 150 —— 默认动态
-        # 定宽随当前选项文本伸缩（切「深度扫描」后框明显变窄）；
+        # 修复缺陷R82：dynamic_resizing=False + 定宽 150（切档不伸缩）；
         # 150 按最长选项「完整分析（推荐）」（8 全角字符+箭头）定
         self._analyze_menu = ctk.CTkOptionMenu(
             panel, width=150, dynamic_resizing=False,
@@ -2106,73 +2108,48 @@ class LogCompressorApp(_make_app_base()):
                     if k != "full"],
             command=self._on_analyze_changed)
         self._analyze_menu.set(ANALYZE_DISPLAY["full"])
-        self._analyze_menu.grid(row=0, column=3, padx=(2, 0), sticky="w")
+        self._analyze_menu.grid(row=0, column=7, padx=(2, 0), sticky="w")
         analyze_help = ctk.CTkLabel(
             panel, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        analyze_help.grid(row=0, column=4, padx=(4, 0), sticky="w")
+        analyze_help.grid(row=0, column=8, padx=(4, 0), sticky="w")
         self._analyze_help_tooltip = Tooltip(
             analyze_help,
             lambda: (ANALYZE_DESCRIPTIONS.get(self._analyze_key, "")
                      + "\n" + _ANOMALY_LEGEND))
 
-        # 修复缺陷R72：搜索组（搜索标签/输入框/计数影子框/导航按钮）
-        # 迁至 _build_search_panel 的独立实时筛选行
-        # 优化缺陷R43：包含/排除关键字、Top N 输入区删除（用户决策）
-        # 优化缺陷R44：上下文行数输入框回归 —— 置于级别过滤与解析
-        # 规则之间的空白区（≥0 有效，负数按 0 行处理）
-        # 修复缺陷R81：组首左 padx 24（静态等距见上）；
-        # 输入框右 padx 12→0 —— 区间统一由组首标签左 padx 承担
-        ctk.CTkLabel(panel, text="上下文行数").grid(
-            row=0, column=6, padx=(24, 2), sticky="e")
-        self._ctx_entry = ctk.CTkEntry(panel, width=60)
-        self._ctx_entry.insert(0, str(DEFAULT_CONTEXT_LINES))
-        self._ctx_entry.grid(row=0, column=7, padx=(2, 0), sticky="w")
-
-        # 修复缺陷R81：组首左 padx 6→24（静态等距见上）
-        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=8, padx=(24, 2),
-                                                  sticky="e")
+        # 修复缺陷R44：上下文行数输入框已前移至列 3（换位，见上）
+        # 修复缺陷R81：组首左 padx 24（静态等距见上）
+        ctk.CTkLabel(panel, text="解析规则").grid(row=0, column=9, padx=(24, 2),
+                                                  sticky="w")
         # 优化缺陷R71：下拉显示中文名，默认「自动识别（推荐）」；
         # 当前选中项不出现在下拉列表（与主题选择器同款交互）
-        # 修复缺陷R82：dynamic_resizing=False —— 与智能分析下拉同
-        # 缺陷（切「通用 generic」后框变窄），定宽 150 不变
+        # 修复缺陷R82：dynamic_resizing=False —— 定宽 150 不随选项伸缩
         self._rule_key = "auto"
         self._rule_menu = ctk.CTkOptionMenu(
             panel, width=150, dynamic_resizing=False,
             values=[RULE_DISPLAY[k] for k in RULE_KEYS if k != "auto"],
             command=self._on_rule_changed)
         self._rule_menu.set(RULE_DISPLAY["auto"])
-        self._rule_menu.grid(row=0, column=9, padx=(2, 0), sticky="w")
+        self._rule_menu.grid(row=0, column=10, padx=(2, 0), sticky="w")
         # 修复缺陷#8：解析规则悬停说明（跟随当前选中规则动态变化）
-        # 修复缺陷R81：ⓘ 右 padx 12→0（让位相似度组，行尾余量移交）
         rule_help = ctk.CTkLabel(
             panel, text="ⓘ", text_color="#4dd0e1",
             font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        rule_help.grid(row=0, column=10, padx=(4, 0), sticky="w")
+        rule_help.grid(row=0, column=11, padx=(4, 0), sticky="w")
         self._rule_help_tooltip = Tooltip(
             rule_help,
             lambda: RULE_DESCRIPTIONS.get(self._rule_key, ""))
 
-        # 优化缺陷R84：相似度阈值选择器 —— 过滤行右侧空位（列 11~13），
-        # 与解析规则/智能分析同款交互（选中项从下拉消失 + ⓘ 悬停说明）；
-        # 修复缺陷R81：组首左 padx 24（静态等距同款）；ⓘ 右 12 为行尾
-        ctk.CTkLabel(panel, text="相似度").grid(
-            row=0, column=11, padx=(24, 2), sticky="w")
-        self._similarity_key = "standard"
-        self._similarity_menu = ctk.CTkOptionMenu(
-            panel, width=150, dynamic_resizing=False,
-            values=[SIMILARITY_DISPLAY[k] for k in SIMILARITY_KEYS
-                    if k != "standard"],
-            command=self._on_similarity_changed)
-        self._similarity_menu.set(SIMILARITY_DISPLAY["standard"])
-        self._similarity_menu.grid(row=0, column=12, padx=(2, 0), sticky="w")
-        sim_help = ctk.CTkLabel(
-            panel, text="ⓘ", text_color="#4dd0e1",
-            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
-        sim_help.grid(row=0, column=13, padx=(4, 12), sticky="w")
-        self._similarity_help_tooltip = Tooltip(
-            sim_help,
-            lambda: SIMILARITY_DESCRIPTIONS.get(self._similarity_key, ""))
+        # 优化缺陷R84：⚙ 设置弹层按钮 —— 行尾（列 12）。相似度等低频
+        # 分析前置设置收纳进弹层（过滤行 5 组超宽出屏的根治：省下
+        # 拉整组 ~250px，以后新增设置项一律进弹层不再挤本行）；
+        # 修复缺陷R81：组首左 padx 24（静态等距见上）；右 12 行尾
+        self._settings_btn = ctk.CTkButton(
+            panel, text="⚙", width=36,
+            command=self._toggle_settings_popup)
+        self._settings_btn.grid(row=0, column=12, padx=(24, 12), sticky="w")
+        self._build_settings_popup()
 
     # ------------------------------------------------------------------
     # 修复缺陷R72：实时筛选行（搜索组从级别过滤行迁出）
@@ -3537,6 +3514,95 @@ class LogCompressorApp(_make_app_base()):
             self._status_label.configure(
                 text=f"相似度 {SIMILARITY_DISPLAY[key]}：{desc}")
         # 注：不在此 _save_config（同 R80 窗口尺寸覆盖教训）
+
+    def _build_settings_popup(self) -> None:
+        """构建 ⚙ 设置弹层（优化缺陷R84）：低频分析前置设置收纳处。
+
+        首个入住项：相似度阈值选择器（原过滤行整组撤入，根治整行
+        超宽出屏）。弹层机制与主题下拉同款（修复缺陷R15 验证过）：
+        无边框 CTkToplevel + 全局点击收起（150ms 打开豁免 + 落点
+        在弹层内豁免），与焦点完全解耦；主窗最小化（<Unmap>）时
+        同步收起（topmost 不随主窗隐藏）。
+        """
+        win = ctk.CTkToplevel(self)
+        win.overrideredirect(True)
+        win.withdraw()
+        win.attributes("-topmost", True)
+        self._settings_popup = win
+        self._settings_popup_opened_at = 0.0
+        frame = ctk.CTkFrame(win, corner_radius=10)
+        frame.pack(fill="both", expand=True)
+        ctk.CTkLabel(frame, text="分析设置",
+                     font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, columnspan=3, padx=12, pady=(10, 2),
+            sticky="w")
+        ctk.CTkLabel(frame, text="相似度").grid(
+            row=1, column=0, padx=(12, 4), pady=(2, 12), sticky="w")
+        self._similarity_key = "standard"
+        self._similarity_menu = ctk.CTkOptionMenu(
+            frame, width=150, dynamic_resizing=False,
+            values=[SIMILARITY_DISPLAY[k] for k in SIMILARITY_KEYS
+                    if k != "standard"],
+            command=self._on_similarity_changed)
+        self._similarity_menu.set(SIMILARITY_DISPLAY["standard"])
+        self._similarity_menu.grid(row=1, column=1, padx=(4, 0),
+                                   pady=(2, 12), sticky="w")
+        sim_help = ctk.CTkLabel(
+            frame, text="ⓘ", text_color="#4dd0e1",
+            font=ctk.CTkFont(size=13, weight="bold"), cursor="question_arrow")
+        sim_help.grid(row=1, column=2, padx=(6, 12), pady=(2, 12),
+                      sticky="w")
+        self._similarity_help_tooltip = Tooltip(
+            sim_help,
+            lambda: SIMILARITY_DESCRIPTIONS.get(self._similarity_key, ""))
+        # 全局点击收起（同主题弹窗 R15 机制，与焦点解耦）
+        self.bind_all("<Button-1>", self._on_settings_global_click,
+                      add=True)
+        self.bind("<Unmap>", lambda e: self._close_settings_popup())
+
+    def _toggle_settings_popup(self) -> None:
+        """⚙ 按钮：切换设置弹层开合（贴按钮正下方、右对齐防出右屏）。"""
+        win = self._settings_popup
+        if win.state() == "normal":
+            self._close_settings_popup()
+            return
+        try:
+            x = (self._settings_btn.winfo_rootx()
+                 + self._settings_btn.winfo_width()
+                 - win.winfo_reqwidth())
+            y = (self._settings_btn.winfo_rooty()
+                 + self._settings_btn.winfo_height() + 4)
+        except tk.TclError:
+            return
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        # 物理像素定位（wm_geometry 不经 CTk 二次缩放；本机 winfo
+        # 坐标即物理系），钳制在屏幕内（防出右/下屏缘）
+        x = max(8, min(x, self.winfo_screenwidth() - w - 8))
+        y = max(8, min(y, self.winfo_screenheight() - h - 8))
+        win.wm_geometry(f"{w}x{h}+{x}+{y}")
+        self._settings_popup_opened_at = time.perf_counter()
+        win.deiconify()
+
+    def _on_settings_global_click(self, event) -> None:
+        """全局点击收起设置弹层（同主题弹窗：150ms 与弹层内两豁免）。"""
+        try:
+            if self._settings_popup.state() != "normal":
+                return
+            if time.perf_counter() - self._settings_popup_opened_at < 0.15:
+                return
+            hit = self.winfo_containing(event.x_root, event.y_root)
+            if hit is not None and \
+                    hit.winfo_toplevel() is self._settings_popup:
+                return          # 点在弹层内（下拉/ⓘ/空白区）
+        except tk.TclError:
+            return
+        self._close_settings_popup()
+
+    def _close_settings_popup(self) -> None:
+        """收起设置弹层。"""
+        if self._settings_popup.state() != "withdrawn":
+            self._settings_popup.withdraw()
 
     # ==================================================================
     # 文件选择 / 拖拽

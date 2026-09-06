@@ -3222,8 +3222,9 @@ class TestMainWindowSearch:
         """修复缺陷R81：三个组间可视区间完全相等（静态 padx 补偿）。
 
         两层验证：
-        1) 真实行构造锚点 —— 组首左 padx 为 (19,24,24,24)、输入框右
-           padx 0、列 5 弹性权重已废（区间不再随窗口漂移）；
+        1) 真实行构造锚点 —— 组首左 padx 为 (19,24,24) + ⚙ 行尾
+           (24,12)、输入框右 padx 0、列 5 弹性权重已废（区间不再
+           随窗口漂移）；
         2) 复刻行实测 —— 同款 CTk 控件 + 相同 padx + R74 紧凑宽
            复选框（尾距恒 4 逻辑 px），在本机 DPI 下量三个内容级
            区间（前组内容右缘 → 组首标签文本左缘）应完全相等。
@@ -3235,16 +3236,22 @@ class TestMainWindowSearch:
         scale = max(1.0, getattr(app, "_font_scale", 1.0))
         # 1) 真实行构造锚点（grid_info 的 padx 为 Tk 物理 px ——
         # 创建时已经 CTk 按 DPI 缩放，须乘 scale 比对）
+        # 列 2 上下文行数 / 列 6 智能分析 / 列 9 解析规则（换位后）
         pads = [panel.grid_slaves(row=0, column=c)[0].grid_info()["padx"]
-                for c in (2, 6, 8, 11)]
+                for c in (2, 6, 9)]
         pads = [tuple(int(v) for v in p) for p in pads]
         s2 = int(round(2 * scale))
         expected = [(int(round(19 * scale)), s2),
                     (int(round(24 * scale)), s2),
-                    (int(round(24 * scale)), s2),
                     (int(round(24 * scale)), s2)]
         assert pads == expected, \
-            f"组首左 padx 应为补偿值 (19,24,24,24)×scale（实测 {pads}）"
+            f"组首左 padx 应为补偿值 (19,24,24)×scale（实测 {pads}）"
+        # ⚙ 设置按钮行尾 padx (24,12)
+        btn_pad = tuple(int(v) for v in
+                        app._settings_btn.grid_info()["padx"])
+        assert btn_pad == (int(round(24 * scale)),
+                           int(round(12 * scale))), \
+            f"⚙ 按钮 padx 应为 (24,12)×scale（实测 {btn_pad}）"
         entry_pad = tuple(int(v) for v in
                           app._ctx_entry.grid_info()["padx"])
         assert entry_pad[1] == 0, "输入框右 padx 应为 0（区间由组首承担）"
@@ -3618,11 +3625,11 @@ class TestMainWindowSearch:
         assert app._search_count.cget("text"), "计数标签应已出现"
         widgets = [panel.grid_slaves(row=0, column=0)[0],   # 级别过滤
                    panel.grid_slaves(row=0, column=1)[0],   # 复选框组
-                   panel.grid_slaves(row=0, column=2)[0],   # 智能分析
-                   app._analyze_menu,
-                   panel.grid_slaves(row=0, column=6)[0],   # 上下文行数
+                   panel.grid_slaves(row=0, column=2)[0],   # 上下文行数
                    app._ctx_entry,
-                   panel.grid_slaves(row=0, column=8)[0],   # 解析规则
+                   panel.grid_slaves(row=0, column=6)[0],   # 智能分析
+                   app._analyze_menu,
+                   panel.grid_slaves(row=0, column=9)[0],   # 解析规则
                    app._rule_menu]
         prev_right = None
         for w in widgets:
@@ -3633,7 +3640,7 @@ class TestMainWindowSearch:
         lbl = widgets[0]
         assert lbl.winfo_width() >= lbl.winfo_reqwidth() - 2, \
             "级别过滤标签不得被裁切"
-        ctx_lbl = widgets[4]
+        ctx_lbl = widgets[2]
         assert ctx_lbl.winfo_width() >= ctx_lbl.winfo_reqwidth() - 2, \
             "上下文行数标签不得被裁切"
         # 最长选项 embedded 时下拉不被裁切
@@ -4551,12 +4558,15 @@ class TestAnalyzeModeSelector:
         assert app._current_config_dict()["analyze_mode"] == "deep"
 
     def test_menu_in_filter_row_after_level_box(self, app):
-        """模式选择器紧随级别组（落在原空位，列 3）。"""
+        """换位后：上下文行数紧随级别组（列 3），模式选择器在列 7。"""
         panel = app._ctx_entry.master
         assert app._analyze_menu.master is panel
         info = app._analyze_menu.grid_info()
         assert str(info["row"]) == "0"
-        assert str(info["column"]) == "3"
+        assert str(info["column"]) == "7"
+        einfo = app._ctx_entry.grid_info()
+        assert str(einfo["row"]) == "0"
+        assert str(einfo["column"]) == "3"
 
     def test_menu_width_fixed_across_modes(self, app):
         """修复缺陷R82：三模式切换下拉框定宽不变、最长文本不裁切。
@@ -4615,13 +4625,30 @@ class TestSimilaritySelector:
         assert "标准（推荐）" in values
         assert app._current_config_dict()["similarity"] == "strict"
 
-    def test_menu_in_filter_row_right_end(self, app):
-        """相似度选择器落在过滤行右端空位（列 12，ⓘ 列 13）。"""
+    def test_settings_button_in_filter_row_right_end(self, app):
+        """⚙ 设置按钮在过滤行行尾（列 12）；相似度下拉收纳于弹层。"""
         panel = app._ctx_entry.master
-        assert app._similarity_menu.master is panel
-        info = app._similarity_menu.grid_info()
+        assert app._settings_btn.master is panel
+        info = app._settings_btn.grid_info()
         assert str(info["row"]) == "0"
         assert str(info["column"]) == "12"
+        assert app._similarity_menu.winfo_toplevel() is app._settings_popup
+
+    def test_settings_popup_toggle_and_close(self, app):
+        """⚙ 点击开合弹层；弹层含相似度下拉与说明 ⓘ。"""
+        app.update()
+        assert app._settings_popup.state() == "withdrawn"
+        app._toggle_settings_popup()
+        app.update()
+        assert app._settings_popup.state() == "normal"
+        # 弹层右对齐钳制在屏幕内（防出右屏）
+        assert app._settings_popup.winfo_rootx() >= 0
+        assert (app._settings_popup.winfo_rootx()
+                + app._settings_popup.winfo_width()
+                <= app.winfo_screenwidth())
+        app._toggle_settings_popup()
+        app.update()
+        assert app._settings_popup.state() == "withdrawn"
 
     def test_strict_mode_splits_clusters_in_analysis(self, app):
         """切「严格」后分析：0.884 相似对拆 2 簇（标准并为 1 簇）。"""
