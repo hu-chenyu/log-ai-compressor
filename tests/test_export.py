@@ -11,10 +11,12 @@ from log_ai_compressor.core.pipeline import analyze_text
 from log_ai_compressor.export.reporters import (
     brief_summary,
     compare_to_markdown,
+    estimate_tokens,
     to_html,
     to_json,
     to_markdown,
     to_text,
+    token_status_text,
 )
 
 from log_ai_compressor.core.comparator import compare_results
@@ -245,6 +247,65 @@ class TestTextAndBrief:
         brief = brief_summary(result, top_n=5)
         first = result.clusters[0]
         assert f"行 {first.first_line}~{first.last_line}" in brief
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R99：Token 估算 + 压缩率展示
+# ---------------------------------------------------------------------------
+class TestTokenEstimate:
+    def test_estimate_tokens_ascii(self):
+        """ASCII 文本 ≈4 字符/token。"""
+        assert estimate_tokens("a" * 400) == 100
+
+    def test_estimate_tokens_cjk(self):
+        """CJK 文本 ≈1.5 字符/token。"""
+        assert estimate_tokens("汉" * 150) == 100
+
+    def test_estimate_tokens_empty(self):
+        assert estimate_tokens("") == 0
+
+    def test_raw_chars_counted(self, result):
+        """pipeline 流式累计原始字符数（压缩率原始侧分母）。"""
+        assert result.stats.raw_chars == sum(
+            len(l) for l in SAMPLE.splitlines())
+
+    def test_brief_summary_token_line(self, result):
+        """摘要头部第二行为 token 估算（原始 → 压缩 + 压缩率）。"""
+        lines = brief_summary(result, top_n=5).splitlines()
+        assert "tokens" in lines[1]
+        assert "压缩" in lines[1]
+
+    def test_markdown_token_line_no_placeholder(self, result):
+        """MD 报告含 token 行且占位符已回填（含无簇早退分支）。"""
+        md = to_markdown(result)
+        assert "tokens" in md
+        assert "__TOKEN_LINE_R99__" not in md
+        empty = analyze_text("2024-01-01 09:00:00 INFO all good\n")
+        md2 = to_markdown(empty)
+        assert "__TOKEN_LINE_R99__" not in md2
+
+    def test_status_text_ratio(self, result):
+        """状态栏紧凑串：大样本下压缩率显著时应含 '≈' 与 '压缩 xx%'。"""
+        big = analyze_text(SAMPLE * 200)
+        text = token_status_text(big, brief_summary(big, top_n=5))
+        assert text.startswith("≈")
+        assert "tokens" in text
+        assert "压缩" in text
+
+    def test_status_text_tiny_no_ratio(self, result):
+        """极小样本（压缩侧 ≥ 原始侧）时不出压缩率，不误导。"""
+        text = token_status_text(result, brief_summary(result, top_n=5))
+        assert "压缩" not in text
+
+    def test_status_text_no_raw(self):
+        """原始字符数为 0（手工构造结果）时不出压缩率，不报错。"""
+        from log_ai_compressor.core.models import (
+            AnalysisResult, RunStats)
+        r = AnalysisResult(stats=RunStats(source="x"))
+        text = token_status_text(r, "abcd")
+        assert text == "≈1 tokens"
+        assert "压缩" not in text
+
 
 
 # ---------------------------------------------------------------------------

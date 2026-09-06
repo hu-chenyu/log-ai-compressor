@@ -57,6 +57,8 @@ from log_ai_compressor.export.reporters import (
     to_json,
     to_markdown,
     to_text,
+    token_report_line,
+    token_status_text,
 )
 from log_ai_compressor.gui.config_store import ConfigStore
 
@@ -4512,9 +4514,18 @@ class LogCompressorApp(_make_app_base()):
             suffix = "（已达行数上限）"
         else:
             suffix = "（已取消，增量结果）" if s.truncated else ""
+        # 优化缺陷R99：Token 估算 + 压缩率（贴合「压缩投喂大模型」
+        # 定位 —— 压缩侧取投喂用精简摘要的文本量）
+        token_text = token_status_text(
+            result, brief_summary(result, top_n=len(result.clusters)))
+        self._token_status = token_text     # 导出对话框预估行复用
+        # 优化缺陷R99：导出对话框预估行全文（原始 → 压缩 双向）
+        self._token_report = token_report_line(
+            result, brief_summary(result, top_n=len(result.clusters)))
         self._progress_label.configure(
             text=f"完成：{s.total_lines:,} 行 | 错误 {s.error_lines:,} 行 | "
-                 f"{len(result.clusters)} 种 | {_rate_text(s.lines_per_second)}"
+                 f"{len(result.clusters)} 种 | {token_text} | "
+                 f"{_rate_text(s.lines_per_second)}"
                  f"{suffix}")
         # 优化缺陷R85：生效中的前置过滤器常驻状态栏标签（防静默隐藏
         # 错误 —— 三项均不持久化，重启清零，本标签为可见性兜底）
@@ -5659,8 +5670,8 @@ class LogCompressorApp(_make_app_base()):
         # 居中于主窗口（物理像素坐标，winfo 已是 DPI 感知值）
         self.update_idletasks()
         cx = self.winfo_x() + max(0, (self.winfo_width() - 460) // 2)
-        cy = self.winfo_y() + max(0, (self.winfo_height() - 320) // 2)
-        dlg.geometry(f"460x320+{cx}+{cy}")
+        cy = self.winfo_y() + max(0, (self.winfo_height() - 348) // 2)
+        dlg.geometry(f"460x348+{cx}+{cy}")
 
         ctk.CTkLabel(dlg, text="导出格式（可多选，同名多份同出）",
                      font=ctk.CTkFont(weight="bold")).pack(
@@ -5682,6 +5693,10 @@ class LogCompressorApp(_make_app_base()):
         ctk.CTkLabel(dlg, text=f"范围：跟随当前级别过滤（{scope}）",
                      text_color="#8fa4b8").pack(anchor="w", padx=16,
                                                 pady=(8, 2))
+        # 优化缺陷R99：token 预估行（导出前即可见压缩收益）
+        ctk.CTkLabel(
+            dlg, text=f"预估：{getattr(self, '_token_report', '-')}",
+            text_color="#3B82F6").pack(anchor="w", padx=16, pady=(0, 2))
 
         ctk.CTkLabel(dlg, text="内容板块（作用于 HTML / Markdown / 纯文本）",
                      font=ctk.CTkFont(weight="bold")).pack(

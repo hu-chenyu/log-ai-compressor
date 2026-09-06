@@ -94,6 +94,63 @@ def _rate_text(lps: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R99：Token 估算 + 压缩率展示（贴合「压缩投喂大模型」定位）
+# ---------------------------------------------------------------------------
+def estimate_tokens(text: str) -> int:
+    """粗估文本 token 数：ASCII ≈4 字符/token，CJK ≈1.5 字符/token。
+
+    经验公式（GPT 系 tokenizer 均值），仅用于量级展示，非精确计费。
+    """
+    if not text:
+        return 0
+    ascii_n = 0
+    cjk_n = 0
+    for ch in text:
+        if ord(ch) >= 0x2E80:
+            cjk_n += 1
+        else:
+            ascii_n += 1
+    return max(1, round(ascii_n / 4 + cjk_n / 1.5))
+
+
+def estimate_raw_tokens(raw_chars: int) -> int:
+    """原始日志侧 token 粗估：逐行流式只留了字符数，日志绝大多数
+    为 ASCII，按 4 字符/token 折算。"""
+    return max(0, round(raw_chars / 4))
+
+
+def _fmt_tokens(n: int) -> str:
+    """token 数紧凑格式化：3200 → '3.2k'，1_200_000 → '1.2M'。"""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
+def token_status_text(result: AnalysisResult, compressed_text: str) -> str:
+    """状态栏紧凑串：'≈3.2k tokens · 压缩 96%'（原始字符数为 0 时
+    只显示压缩侧，不出压缩率）。"""
+    comp = estimate_tokens(compressed_text)
+    raw = estimate_raw_tokens(result.stats.raw_chars)
+    if raw <= 0 or comp >= raw:
+        return f"≈{_fmt_tokens(comp)} tokens"
+    ratio = round((1 - comp / raw) * 100)
+    return f"≈{_fmt_tokens(comp)} tokens · 压缩 {ratio}%"
+
+
+def token_report_line(result: AnalysisResult, compressed_text: str) -> str:
+    """报告/摘要头部行：原始 → 压缩 双向 token 与压缩率。"""
+    comp = estimate_tokens(compressed_text)
+    raw = estimate_raw_tokens(result.stats.raw_chars)
+    if raw <= 0 or comp >= raw:
+        return f"压缩后 ≈{_fmt_tokens(comp)} tokens（原始字符数未统计）"
+    ratio = round((1 - comp / raw) * 100)
+    return (f"原始日志 ≈{_fmt_tokens(raw)} tokens → 压缩后 "
+            f"≈{_fmt_tokens(comp)} tokens（压缩 {ratio}%）")
+
+
+# ---------------------------------------------------------------------------
 # Markdown 报告
 # ---------------------------------------------------------------------------
 def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
@@ -113,6 +170,9 @@ def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
                  f"{_rate_text(s.lines_per_second)} | 规则 {s.rule_name}")
     lines.append("")
     lines.append(f"**初步定位根因**：{_md_escape(_root_summary(result))}")
+    lines.append("")
+    # 优化缺陷R99：token 估算占位行（文末回填，避免自引用长度死循环）
+    lines.append("__TOKEN_LINE_R99__")
     lines.append("")
 
     # 一、概览统计
@@ -141,7 +201,10 @@ def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
         lines.append("")
         if not clusters:
             lines.append("未发现符合条件的错误。")
-            return "\n".join(lines) + "\n"
+            text = "\n".join(lines)
+            return text.replace(
+                "__TOKEN_LINE_R99__",
+                "> " + token_report_line(result, text)) + "\n"
         lines.append("| # | 优先级 | 级别 | 次数 | 模块 | 根因 | 异常 | 错误摘要 |")
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
         for i, c in enumerate(clusters, 1):
@@ -160,7 +223,11 @@ def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
         for i, c in enumerate(clusters, 1):
             lines.extend(_cluster_detail_md(
                 i, c, include_instances="instances" in secs))
-    return "\n".join(lines) + "\n"
+    # 优化缺陷R99：回填 token 估算行（按最终全文长度估算压缩侧）
+    text = "\n".join(lines)
+    text = text.replace("__TOKEN_LINE_R99__",
+                        "> " + token_report_line(result, text))
+    return text + "\n"
 
 
 def _cluster_detail_md(index: int, c: ErrorCluster,
@@ -258,6 +325,10 @@ def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
         out.append(f"{i}. [{' | '.join(tags)}] {c.summary}")
         if c.is_root_cause:
             out.append(f"   -> {c.root_cause_reason}")
+    # 优化缺陷R99：头部第二行插入 token 估算（粘贴投喂 AI 时自带
+    # 压缩率；按最终文本长度估算，忽略本行自身的自引用误差）
+    body = "\n".join(out)
+    out.insert(1, token_report_line(result, body))
     return "\n".join(out)
 
 
