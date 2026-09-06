@@ -2287,7 +2287,7 @@ class LogCompressorApp(_make_app_base()):
         # 设置并恢复选择器默认（时间范围/关键词残留会静默隐藏错误，
         # 状态栏标签虽兜底但不直观；留空不限回归一键可达）
         self._reset_btn = ctk.CTkButton(
-            panel, text="↺", width=36,
+            panel, text="↺ 重置", width=64,
             command=self._reset_advanced_options)
         self._reset_btn.grid(row=0, column=16, padx=(6, 12), sticky="w")
         Tooltip(self._reset_btn, lambda: (
