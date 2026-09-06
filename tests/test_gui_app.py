@@ -3329,6 +3329,32 @@ class TestMainWindowSearch:
         assert max(gaps) - min(gaps) <= tol, \
             f"复刻行三个组间区间应完全相等（实测 {gaps}，容差 {tol}）"
 
+    def test_keyword_entries_elastic_fill_row_tail(self, app):
+        """优化缺陷R94：关键词两框弹性拉伸填满行尾（占位文本不再
+        裁切、行尾无大片空白）；列权重均分、sticky ew。"""
+        app.geometry("2000x900")
+        app.update()
+        app.update_idletasks()
+        panel = app._ctx_entry.master
+        for col in (5, 7):
+            cfg = panel.grid_columnconfigure(col)
+            assert int(cfg["weight"]) == 1, f"列 {col} 应有弹性权重"
+        for entry in (app._include_entry, app._exclude_entry):
+            assert "e" in str(entry.grid_info()["sticky"]) and \
+                   "w" in str(entry.grid_info()["sticky"]), \
+                "关键词框应 sticky=ew 横向拉伸"
+        # 宽窗下两框实际宽应超过请求宽（吃掉行尾空白），且排除框
+        # 右缘贴近行尾（仅剩 12×scale 行尾余量 + 面板卡内边距）
+        req = app._include_entry.winfo_reqwidth()
+        assert app._include_entry.winfo_width() > req, \
+            "包含框应拉伸超过请求宽（填满空白）"
+        scale = max(1.0, getattr(app, "_font_scale", 1.0))
+        tail = (panel.winfo_width()
+                - (app._exclude_entry.winfo_x()
+                   + app._exclude_entry.winfo_width()))
+        assert tail <= int(round(12 * scale)) + 30, \
+            f"排除框右缘应贴近行尾（实测余量 {tail} 物理 px）"
+
     def test_search_filters_classic_list(self, app):
         """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
         _run_paste_analysis(app, self._two_cluster_log())

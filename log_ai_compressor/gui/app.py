@@ -2153,17 +2153,24 @@ class LogCompressorApp(_make_app_base()):
         # 组首左 padx 24 静态等距（同 R81 补偿体系）
         # 包含=白名单任一命中保留，排除=黑名单任一命中剔除；
         # 匹配范围 模块+消息+堆栈（默认小写子串，⚙ 弹层可切正则）
+        # 优化缺陷R94：两框弹性拉伸填满行尾剩余宽（uniform 均分）——
+        # 定宽 140 占位文本被裁切且行尾大片空白；弹性列在全部组首
+        # 之后，三个组间区间（R81）不受拉伸影响
         ctk.CTkLabel(panel, text="包含关键词").grid(
             row=0, column=4, padx=(24, 2), sticky="w")
         self._include_entry = ctk.CTkEntry(
             panel, width=140, placeholder_text="逗号/空格分隔，留空不限")
-        self._include_entry.grid(row=0, column=5, padx=(2, 0), sticky="w")
+        self._include_entry.grid(row=0, column=5, padx=(2, 0),
+                                 sticky="ew")
         ctk.CTkLabel(panel, text="排除关键词").grid(
             row=0, column=6, padx=(24, 2), sticky="w")
         self._exclude_entry = ctk.CTkEntry(
             panel, width=140, placeholder_text="逗号/空格分隔，留空不限")
         # 行尾余量：末列右 padx 12（与原规则 ⓘ 行尾余量同义）
-        self._exclude_entry.grid(row=0, column=7, padx=(2, 12), sticky="w")
+        self._exclude_entry.grid(row=0, column=7, padx=(2, 12),
+                                 sticky="ew")
+        panel.grid_columnconfigure(5, weight=1, uniform="kw")
+        panel.grid_columnconfigure(7, weight=1, uniform="kw")
 
         # 优化缺陷R93：智能分析/解析规则两选组已迁至高级选项行
         # （与关键词黑白名单换位，见 _build_advanced_panel）
