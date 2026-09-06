@@ -1755,7 +1755,14 @@ class LogCompressorApp(_make_app_base()):
             height = min(height, self.winfo_screenheight() - 90)
         except tk.TclError:
             pass
-        self.geometry(f"{width}x{height}")
+        # 修复缺陷R108：启动位置居中（OS 默认落点在窗口近屏高时会
+        # 把标题栏顶出屏幕上缘，用户无法拖动、底栏也被挤出屏幕）
+        try:
+            pos_x = max(0, (self.winfo_screenwidth() - width) // 2)
+            pos_y = max(0, (self.winfo_screenheight() - height) // 2)
+        except tk.TclError:
+            pos_x = pos_y = 0
+        self.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
         self.minsize(1000, 680)
         # 修复缺陷R9：DPI 缩放系数 —— CTkLabel 对 CTkFont 自动施加控件
         # 缩放，而行内摘要用原生 tk.Label（命名字体原样使用、不缩放），
