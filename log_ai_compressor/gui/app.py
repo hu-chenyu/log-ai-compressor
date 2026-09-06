@@ -311,9 +311,6 @@ _THEME_ALIASES = {"dark": "dark", "light": "light", "blue": "blue",
 _KW_DEFAULT = ("ERROR", "FAIL", "FATAL", "Caused by", "Exception",
                "Traceback")
 
-# 修复缺陷R6：主列表虚拟滚动阈值（超过则切换池化虚拟渲染）
-VIRTUAL_LIST_THRESHOLD = 40
-
 # 修复缺陷R36：簇行样式统一常量（经典列表 / 虚拟列表共用；
 # 优化缺陷R42 后全屏列表与主窗口同一 VirtualClusterList）——
 # 原硬编码在近十处（_make_cluster_row、_apply_row_bg、
@@ -1755,8 +1752,6 @@ class LogCompressorApp(_make_app_base()):
         # + 实例选中态（(簇索引, 实例索引)）
         self._expanded_clusters: Dict[int, bool] = {}
         self._selected_inst = None
-        self._classic_expanded: Dict[int, dict] = {}
-        self._classic_inst_sel = None
         self._queue: "queue.Queue" = queue.Queue()
         # 共享字体：行级字体必须复用（每行新建 CTkFont 会被 GC 在
         # 任意线程析构，tkinter.Font.__del__ 跨线程调用 Tk 造成死锁）
@@ -4301,70 +4296,19 @@ class LogCompressorApp(_make_app_base()):
                 vis += 1
 
     def _refresh_row_colors(self) -> None:
-        """主题切换后刷新列表行配色（原生 tk.Label 不随 CTk 主题）。"""
+        """主题切换后刷新列表行配色（原生 tk.Label 不随 CTk 主题）。
+
+        优化缺陷R97：主列表任意簇数一律 VirtualClusterList —— 经典
+        行刷新链（_apply_row_bg/展开实例区/实例选中容器）随经典
+        渲染链一并删除。
+        """
         # 优化缺陷R42：全屏虚拟列表同步刷新（与主列表同组件）
         fs_vl = getattr(self, "_fs_vl", None)
         if fs_vl is not None:
             fs_vl.apply_palette()
-        # 修复缺陷R6：虚拟模式由虚拟列表自刷（池行原生控件配色）
+        # 虚拟模式由虚拟列表自刷（池行原生控件配色）
         if self._virtual_list is not None:
             self._virtual_list.apply_palette()
-            return
-        rows = getattr(self, "_cluster_rows", ())
-        if not rows:
-            return
-        p = self._palette()
-        selected = getattr(self, "_selected_row", -1)
-        for i, row in enumerate(rows):
-            # 选中行保持选中色（主列表模式）
-            # 修复缺陷R26：统一走 _apply_row_bg（选中 3D 能带 /
-            # 非选中平面恢复，含摘要文字色刷新）
-            if "idx" not in row:
-                continue
-            self._apply_row_bg(
-                row["idx"],
-                p["row_selected"] if i == selected else p["row_bg"])
-        # 修复缺陷R16：经典模式刷新「▶ ×N」按钮与展开实例区配色
-        link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
-        for row in rows:
-            # 修复缺陷R34：展开按钮拆为图标（toggle_icon）+ 次数
-            # （toggle）两个标签，链接色同步刷新
-            for _tkey in ("toggle", "toggle_icon"):
-                toggle = row.get(_tkey)
-                if toggle is not None:
-                    try:
-                        toggle.configure(text_color=link)
-                    except (tk.TclError, ValueError):
-                        continue
-        for st in getattr(self, "_classic_expanded", {}).values():
-            try:
-                st["area"].configure(bg=p["window"])
-                for lbl in st["labels"]:
-                    # 修复缺陷R28：R27 后实例行为 {label, wrap} 字典
-                    # （原按裸 tk.Label 刷 bg 会 AttributeError）；
-                    # 截断提示仍是裸 tk.Label，混型分别处理
-                    if isinstance(lbl, dict):
-                        if lbl["wrap"].winfo_exists():
-                            lbl["wrap"].configure(fg_color=p["window"])
-                            lbl["label"].configure(
-                                text_color=p["row_text"])
-                    elif lbl.winfo_exists():
-                        lbl.configure(bg=p["window"], fg=p["row_text"])
-            except (tk.TclError, ValueError, KeyError):
-                continue
-        sel = self._classic_inst_sel
-        if sel is not None:
-            try:
-                if sel.winfo_exists():
-                    # 修复缺陷R28：sel 为 CTkLabel（configure(bg=) 抛
-                    # ValueError 非 TclError）—— 选中态经圆角容器
-                    # wrap 刷新（与 _classic_inst_click 选中样式一致）
-                    sel.master.configure(
-                        fg_color=p["sel_bot"], corner_radius=10,
-                        border_width=2, border_color=p["sel_hi"])
-                    sel.configure(text_color=p["sel_text"])
-            except (tk.TclError, ValueError):
-                pass
 
     # ==================================================================
     # 任务调度（后台线程 + 队列轮询）
@@ -4764,10 +4708,16 @@ class LogCompressorApp(_make_app_base()):
             self._update_search_count()
             return
         if self._virtual_list is not None:
-            self._virtual_list.set_data(self._build_view_rows())
-            # 优化缺陷R46：关键字变化即时刷新详情面板高亮（虚拟
-            # 模式 set_data 不重填详情，选中态保持不变）
-            self._refresh_current_detail()
+            rows = self._build_view_rows()
+            if rows:
+                self._virtual_list.set_data(rows)
+                # 优化缺陷R46：关键字变化即时刷新详情面板高亮（虚拟
+                # 模式 set_data 不重填详情，选中态保持不变）
+                self._refresh_current_detail()
+            else:
+                # 优化缺陷R45/R97：无匹配时整列表重建走空态提示
+                # （set_data([]) 只会留空白画布，用户读不出原因）
+                self._render_cluster_list(preserve_state=True)
         elif self._displayed:
             self._render_cluster_list(preserve_state=True)
         self._update_search_count()
@@ -4817,65 +4767,14 @@ class LogCompressorApp(_make_app_base()):
         self._see_instance_row(ci, ii)
 
     def _see_instance_row(self, ci: int, ii: int) -> None:
-        """滚动左侧列表使实例行可见（虚拟/经典两路，优化缺陷R56）。"""
+        """滚动左侧列表使实例行可见（优化缺陷R56；R97 统一虚拟渲染）。"""
         if self._virtual_list is not None:
             self._virtual_list.see_instance(ci, ii)
-            return
-        # 经典模式：实例行在展开区 labels 中（批量渐进创建，未创建
-        # 到时回退滚动至簇行；选中态行创建时自动着选中色）
-        state = self._classic_expanded.get(ci)
-        if state is not None and ii < len(state.get("labels", [])):
-            wrap = state["labels"][ii].get("wrap")
-            if wrap is not None:
-                self._scroll_list_to(wrap)
-                return
-        self._see_cluster_row(ci)
-
-    def _scroll_list_to(self, widget) -> None:
-        """滚动经典列表使指定控件可见（y 沿父链换算到滚动容器）。"""
-        try:
-            canvas = self._cluster_list._parent_canvas
-            self.update_idletasks()
-            region = canvas.cget("scrollregion")
-            total = float(str(region).split()[3]) if region else 0.0
-            if total <= 0:
-                return
-            y = float(widget.winfo_y())
-            parent = widget.master
-            while parent is not None and parent is not self._cluster_list:
-                y += float(parent.winfo_y())
-                parent = parent.master
-            vh = float(canvas.winfo_height())
-            top = canvas.canvasy(0)
-            if y < top or y + widget.winfo_height() > top + vh:
-                canvas.yview_moveto(max(0.0, min(1.0, y / total)))
-        except (tk.TclError, ValueError, IndexError, AttributeError):
-            pass
 
     def _see_cluster_row(self, idx: int) -> None:
-        """滚动左侧列表使簇行可见（Enter 跳转定位；虚拟/经典两路）。"""
+        """滚动左侧列表使簇行可见（Enter 跳转定位；R97 统一虚拟渲染）。"""
         if self._virtual_list is not None:
             self._virtual_list.see_cluster(idx)
-            return
-        row = next((r for r in self._cluster_rows if r.get("idx") == idx),
-                   None)
-        if row is None:
-            return
-        try:
-            frame = row["frame"]
-            canvas = self._cluster_list._parent_canvas
-            self.update_idletasks()
-            region = canvas.cget("scrollregion")
-            total = float(str(region).split()[3]) if region else 0.0
-            if total <= 0:
-                return
-            y = float(frame.winfo_y())
-            vh = float(canvas.winfo_height())
-            top = canvas.canvasy(0)
-            if y < top or y + frame.winfo_height() > top + vh:
-                canvas.yview_moveto(max(0.0, min(1.0, y / total)))
-        except (tk.TclError, ValueError, IndexError, AttributeError):
-            pass
 
     def _refresh_current_detail(self) -> None:
         """按当前选中态重填详情面板（优化缺陷R46：搜索关键字变化
@@ -5059,12 +4958,15 @@ class LogCompressorApp(_make_app_base()):
 
         修复缺陷：原单行 CTkButton 长文本溢出右侧且无横向滚动能力，
         R9 起摘要单行不换行 + 底部水平滚动条左右滑动查看完整内容。
-        修复缺陷R6：行数超过 VIRTUAL_LIST_THRESHOLD 切换虚拟滚动
-        （池化复用可见区行控件，列表长度不再影响渲染耗时）。
         优化缺陷R43：Top N 截断删除（全量簇显示，不再「其余 N 种」提示）。
         优化缺陷R45：preserve_state=True（搜索过滤重建）时保留簇
-        展开与行选中状态；搜索关键字在经典/虚拟两路同口径过滤
-        （仅作用于显示，_displayed 索引语义不变）。
+        展开与行选中状态；搜索关键字过滤仅作用于显示，_displayed
+        索引语义不变。
+        优化缺陷R97：渲染路径统一 —— 任意簇数一律 VirtualClusterList
+        （与全屏列表同一组件）。此前小簇数走经典 CTkFrame 行、大簇数
+        走虚拟行，两条渲染链的选中描边/3D 按压/圆角实现各自为政，
+        勾不勾 INFO（簇数增减跨阈值）手感与观感明显分裂（用户两次
+        截图举证）；经典行渲染链（_make_cluster_row 等）随之删除。
         """
         assert self._result is not None
         # 优化缺陷R45：同步搜索关键字（重新分析后框内文本仍然生效）
@@ -5080,56 +4982,35 @@ class LogCompressorApp(_make_app_base()):
             w for w in self._muted_labels
             if not hasattr(w, "winfo_exists") or _widget_alive(w)]
         self._selected_row = -1
-        # 修复缺陷R16：重新渲染清空簇展开与实例选中状态（经典模式
-        # 挂起的渐进批次一并取消，实例区随列表销毁）
+        # 修复缺陷R16：重新渲染清空簇展开与实例选中状态
         self._expanded_clusters.clear()
         self._selected_inst = None
-        self._classic_inst_sel = None
-        for st in self._classic_expanded.values():
-            st["cancelled"] = True
-            job = st.get("job")
-            if job is not None:
-                try:
-                    self.after_cancel(job)
-                except (tk.TclError, ValueError):
-                    pass
-        self._classic_expanded.clear()
         if not self._displayed:
             empty = ctk.CTkLabel(self._cluster_list, text="未发现符合条件的错误")
             empty.pack(pady=20)
             self._muted_labels.append(empty)
             return
-        # 修复缺陷R6：大列表走虚拟滚动（控件池只建可见区行数）
-        if len(self._displayed) > VIRTUAL_LIST_THRESHOLD:
-            self._cluster_list.grid_remove()
-            # 修复缺陷R9：虚拟模式隐藏经典 hbar（虚拟列表自带 hbar）
-            if _widget_alive(self._list_hbar):
-                self._list_hbar.grid_remove()
-            self._virtual_list = VirtualClusterList(self._list_host, self)
-            self._cluster_rows = self._virtual_list.slots
-            # 修复缺陷R16：虚拟列表数据为视图行（簇行+展开实例行）
-            self._virtual_list.set_data(self._build_view_rows())
-            return
-        visible = 0
-        for idx, cluster in enumerate(self._displayed):
-            # 优化缺陷R45：搜索过滤仅作用于显示（行 idx 仍为
-            # _displayed 索引，选中/展开状态语义不受影响）
-            if not self._cluster_matches(cluster):
-                continue
-            visible += 1
-            # 修复缺陷R16：经典行带「▶ ×N」就地展开按钮
-            self._make_cluster_row(self._cluster_list, idx, cluster,
-                                   on_toggle=lambda i=idx:
-                                   self._toggle_cluster_expand(i))
-        if visible == 0:
+        # 优化缺陷R97：统一虚拟渲染（小簇数同样走 VirtualClusterList）
+        view_rows = self._build_view_rows()
+        if not view_rows:
             # 优化缺陷R45：关键字过滤后无匹配簇的空态提示
             empty = ctk.CTkLabel(self._cluster_list,
                                  text="无匹配的错误簇（调整搜索关键字）")
             empty.pack(pady=20)
             self._muted_labels.append(empty)
+            return
+        self._cluster_list.grid_remove()
+        # 修复缺陷R9：虚拟模式隐藏经典 hbar（虚拟列表自带 hbar）
+        if _widget_alive(self._list_hbar):
+            self._list_hbar.grid_remove()
+        self._virtual_list = VirtualClusterList(self._list_host, self)
+        self._cluster_rows = self._virtual_list.slots
+        # 修复缺陷R16：虚拟列表数据为视图行（簇行+展开实例行）
+        self._virtual_list.set_data(view_rows)
         if not preserve_state:
             return
-        # 优化缺陷R45：恢复搜索前的展开/选中状态（仍可见的才恢复）
+        # 优化缺陷R45/R97：恢复搜索前的展开/选中状态（仍可见的才
+        # 恢复；展开经 toggle 走 update_rows，浏览位置不跳动）
         for idx in sorted(expanded):
             if (0 <= idx < len(self._displayed)
                     and self._cluster_matches(self._displayed[idx])):
@@ -5137,245 +5018,6 @@ class LogCompressorApp(_make_app_base()):
         if (0 <= selected < len(self._displayed)
                 and self._cluster_matches(self._displayed[selected])):
             self._select_cluster(selected)
-
-    def _make_cluster_row(self, parent, idx: int, cluster: ErrorCluster,
-                          register: bool = True,
-                          on_select=None, on_hover=None,
-                          font_head=None, font_summary=None,
-                          on_toggle=None) -> dict:
-        """构建单条错误行（主列表与全屏列表复用，修复缺陷#7）。
-
-        修复缺陷R2：字体放大、行距加大、选中态蓝色高亮（palette
-        row_selected）。修复缺陷R9：主列表头部 22 加粗 / 摘要 18、
-        摘要单行不换行（水平滚动查看完整内容）。
-        修复缺陷R4：font_head/font_summary 覆盖字体；
-        on_toggle 提供时行首渲染「▶ ×N」可点击展开按钮（次数从
-        行首元信息移入按钮）。
-        优化缺陷R42：native 分支随全屏列表改用 VirtualClusterList
-        删除（全屏与主窗口同一组件渲染，死代码清理）。
-
-        参数：
-            register: 登记进 self._cluster_rows（主列表选中态管理）
-            on_select / on_hover: 自定义回调（全屏窗口联动高亮用）
-        """
-        p = self._palette()
-        f_head = font_head or self._font_row_head
-        # 修复缺陷R9：摘要字体施加 DPI 缩放（与 CTkLabel 渲染一致）
-        f_sum = self._scaled_font(font_summary or self._font_row_summary)
-        # 修复缺陷R9：摘要取消自动换行（wraplength=0 单行完整显示），
-        # 长摘要靠列表底部水平滚动条左右滑动查看（大字体下换行会使
-        # 单条错误占多行、可视错误数骤减）。
-        toggle = None
-        toggle_icon = None
-        # 修复缺陷R2：行距/内边距加大（大字体下行高充足不拥挤）
-        # 修复缺陷R31：未选中行也要可见圆角 —— 创建即带 1px 细边框
-        # （原仅 _apply_row_bg 后才有，未选中行 border_width=0 且行
-        # 底色与列表底色对比极低，圆角存在但肉眼不可见）；圆角半径
-        # 9px（选中 18 药丸形 / 未选中 9 小圆角，2:1 风格统一有区分）
-        # 修复缺陷R33：随选中圆角 24→18 同步 12→9，保持 2:1 比例
-        frame = ctk.CTkFrame(parent, corner_radius=_ROW_R_FLAT,
-                             fg_color=p["row_bg"],
-                             border_width=1,
-                             border_color=p["row_border"])
-        # 修复缺陷R27：未选中 pady=4，选中态由 _apply_row_bg 收紧为
-        # pady=0 制造「浮起凸起」视觉差（选中行比未选中行稍大）。
-        frame.pack(fill="x", padx=5, pady=4)
-        # 3D 立体效果：顶部受光高光条 + 底部投影（选中态显示，未选中隐藏）
-        # 修复缺陷R41：CTkFrame 的 place() 禁止 width/height 参数（抛
-        # ValueError）—— _apply_row_bg 选中分支在 place 高光/阴影条时
-        # 异常中断（3D 条不显示 + 后续文字着色被跳过，底部视觉开口）；
-        # 改原生 tk.Frame（与全屏 native 行同款），高度按 DPI 缩放
-        _hi_bar = tk.Frame(frame, bg=p["sel_hi"], bd=0,
-                           highlightthickness=0, height=self._dpx(2))
-        _shadow_bar = tk.Frame(frame, bg=p["sel_shadow"], bd=0,
-                               highlightthickness=0, height=self._dpx(2))
-        if on_toggle is not None:
-            # 修复缺陷R4：「×N」展开按钮（▶ 收起 / ▼ 展开，可点击）
-            link = ("#60a5fa" if p["is_dark"] == "1" else "#2563EB")
-            line = ctk.CTkFrame(frame, fg_color="transparent")
-            # 修复缺陷R32：头部条左右 padx > 选中圆角半径 ——
-            # 内部控件完全收进圆角区域，左/右缘不与圆角描边重合
-            # 修复缺陷R33：圆角 24→18、padx 28→22（仍 22>18 不重合），
-            # 内容左移 6px 减少左侧空白，视觉紧凑
-            line.pack(fill="x", padx=(_ROW_PADX, _ROW_PADX), pady=(7, 2))
-            # 修复缺陷R29：头部控件一律透明 —— 背景只由外层圆角
-            # frame 统一提供（各自带色会拼出两个方角矩形压圆角）
-            # 修复缺陷R34：▶/▼ 拆进等宽盒（CTkLabel 固定宽 + 居中）——
-            # 两字形宽差 8~10px，合写单标签时展开/收起切换推动
-            # 后续头部文字左右位移；盒宽固定后切换只换盒内字形
-            toggle_icon = ctk.CTkLabel(
-                line, text="\u25b6",
-                width=self._toggle_icon_w(self._scaled_font(f_head),
-                                          for_ctk=True),
-                anchor="center",
-                font=f_head, text_color=link, cursor="hand2",
-                fg_color="transparent")
-            toggle_icon.pack(side="left")
-            toggle = ctk.CTkLabel(
-                line, text=f"\u00d7{cluster.count}",
-                font=f_head, text_color=link, cursor="hand2",
-                fg_color="transparent")
-            toggle.pack(side="left", padx=(0, 10))
-            head = ctk.CTkLabel(
-                line, text=self._row_text(cluster, with_count=False),
-                anchor="w",
-                text_color=self._row_color(cluster) or None,
-                font=f_head, fg_color="transparent")
-            head.pack(side="left", fill="x", expand=True)
-            # 展开按钮独立绑定（不触发行选中）
-            self._bind_row_events((toggle_icon, toggle), on_toggle,
-                                  lambda hovered: None)
-        else:
-            head = ctk.CTkLabel(
-                frame, text=self._row_text(cluster), anchor="w",
-                text_color=self._row_color(cluster) or None,
-                font=f_head, fg_color="transparent")
-            # 修复缺陷R32/R33：padx 22 > 圆角半径 18
-            head.pack(fill="x", padx=(_ROW_PADX, _ROW_PADX), pady=(7, 2))
-        # 修复缺陷R29：头部/摘要间 1px 细分界线（R33：两端内缩 22px
-        # > 圆角半径 18，不碰左右边框；颜色随选中态在 _apply_row_bg
-        # 切换）。CTkFrame 版 —— 原生 tk.Frame 的 pack padx 不随
-        # DPI 缩放（物理px 在 200% 下内缩减半不足）
-        divider = ctk.CTkFrame(frame, height=1, corner_radius=0,
-                               fg_color=p["row_border"])
-        divider.pack(fill="x", padx=(_ROW_PADX, _ROW_PADX))
-        # 修复缺陷R9：摘要单行不换行（wraplength=0）
-        # CTkLabel 传 CTkFont 对象（自动 DPI 缩放+档位跟随），
-        # 不能传 create_scaled_tuple 的 tuple（CTk 内部解析 'normal roman' 失败）
-        summary = ctk.CTkLabel(
-            frame, text=cluster.summary, anchor="w", justify="left",
-            wraplength=0,
-            font=self._font_row_summary,
-            fg_color="transparent",
-            text_color=p["row_text"])
-        # 修复缺陷R32/R33：摘要左右 padx 22 > 圆角半径 18（左下/右下角
-        # 区域不留控件，不与圆角描边重合）
-        summary.pack(fill="x", padx=(_ROW_PADX, _ROW_PADX), pady=(2, 6))
-        select_cb = on_select or (
-            lambda: self._select_cluster(idx, sync_nav=True))
-        hover_cb = on_hover or (lambda hovered: self._hover_row(idx, hovered))
-        # 修复缺陷R2：点击/悬停绑定到全部子控件（含 CTkLabel 内部）
-        self._bind_row_events((frame, head, summary), select_cb, hover_cb)
-        row = {"frame": frame, "head": head, "summary": summary,
-               "idx": idx,
-               # 修复缺陷R26：line 入字典 —— 选中态能带渐变需给
-               # 头部条单独着顶部亮色（无展开按钮时无 line 容器）
-               "line": line if on_toggle is not None else None,
-               # 修复缺陷R27：3D 立体高光/阴影条
-               "_hi_bar": _hi_bar, "_shadow_bar": _shadow_bar,
-               # 修复缺陷R29：头部/摘要细分界线（选中态换亮色）
-               "divider": divider}
-        if toggle is not None:
-            row["toggle"] = toggle
-            row["toggle_icon"] = toggle_icon
-        # 优化缺陷R96：经典行点击 3D 按压（此前仅虚拟行 R23 有，
-        # 经典行点击干瘪无弹性 —— 与虚拟同款手感：按下下沉+阴影
-        # 收缩，释放回弹→常态 ~140ms）
-        self._bind_row_press((frame, head, summary), row)
-        if register:
-            self._cluster_rows.append(row)
-        return row
-
-    # ------------------------------------------------------------------
-    # 优化缺陷R96：经典行点击 3D 按压动画（pack pady 位移，零控件重建）
-    # ------------------------------------------------------------------
-    def _bind_row_press(self, widgets, row: dict) -> None:
-        """经典行按压事件绑定（与 _bind_row_events 同覆盖策略）。
-
-        必须 add="+"：<ButtonPress-1> 与选择绑定的 <Button-1> 是
-        同一事件模式，不加 + 会覆盖选中逻辑；绑定顺序在选择之后，
-        按压读取的 pady 基准即为选中态更新后的新值。
-        """
-        targets: list = []
-        for widget in widgets:
-            targets.append(widget)
-            targets.extend(widget.winfo_children())
-        for t in targets:
-            tk.Misc.bind(t, "<ButtonPress-1>",
-                         lambda e: self._classic_press(row), add="+")
-            tk.Misc.bind(t, "<ButtonRelease-1>",
-                         lambda e: self._classic_release(row), add="+")
-
-    @staticmethod
-    def _pack_pady(frame) -> tuple:
-        """读取当前 pack pady（Tk 物理 px，兼容单值/双值形态）。"""
-        raw = frame.pack_info()["pady"]
-        if isinstance(raw, (tuple, list)):
-            return int(raw[0]), int(raw[1])
-        return int(raw), int(raw)
-
-    def _classic_press(self, row: dict) -> None:
-        """按下：行整体下沉 3px（上 pady 增/下 pady 减）+ 阴影收缩。"""
-        self._classic_press_cancel(row)
-        try:
-            top, bot = self._pack_pady(row["frame"])
-            d = self._dpx(3)
-            row["_press_base"] = (top, bot)
-            row["frame"].pack_configure(
-                pady=(top + d, max(0, bot - d)))
-            bar = row.get("_shadow_bar")
-            if bar is not None and bar.winfo_ismapped():
-                bar.place_configure(height=1)      # 按压阴影收缩
-        except tk.TclError:
-            pass
-
-    def _classic_release(self, row: dict) -> None:
-        """释放：上弹 2px → 回落常态（70ms+70ms 两段缓动 ≈140ms）。"""
-        if row.get("_press_base") is None:
-            return
-        import time as _time
-        row["_press_anim"] = _time.monotonic()
-        self._classic_press_step(row)
-
-    def _classic_press_step(self, row: dict) -> None:
-        """回弹步进：+3 下沉 → -2 上弹 → 0 常态；结束恢复阴影厚度。"""
-        import math
-        import time as _time
-        t0 = row.get("_press_anim")
-        base = row.get("_press_base")
-        if t0 is None or base is None:
-            return
-        top, bot = base
-        d, lift = self._dpx(3), self._dpx(2)
-        el = _time.monotonic() - t0
-        DUR = 0.07
-        if el < DUR:                            # ease-out：+d → -lift
-            x = el / DUR
-            e = 1.0 - (1.0 - x) ** 3
-            off = d + (-lift - d) * e
-        elif el < 2 * DUR:                      # ease-in-out：-lift → 0
-            x = (el - DUR) / DUR
-            e = 0.5 * (1.0 - math.cos(math.pi * x))
-            off = -lift * (1.0 - e)
-        else:                                   # 结束：复位 + 阴影恢复
-            off = 0
-            row["_press_anim"] = None
-            row["_press_base"] = None
-        try:
-            row["frame"].pack_configure(
-                pady=(max(0, int(round(top + off))),
-                      max(0, int(round(bot - off)))))
-            if off == 0:
-                bar = row.get("_shadow_bar")
-                if bar is not None and bar.winfo_ismapped():
-                    bar.place_configure(height=max(1, self._dpx(2)))
-        except tk.TclError:
-            row["_press_anim"] = None
-            return
-        if off != 0:
-            row["_press_job"] = self.after(
-                16, self._classic_press_step, row)
-
-    def _classic_press_cancel(self, row: dict) -> None:
-        """取消进行中的按压动画（重按/换选/重建前清理残留）。"""
-        job = row.pop("_press_job", None)
-        if job is not None:
-            try:
-                self.after_cancel(job)
-            except tk.TclError:
-                pass
-        row["_press_anim"] = None
-        row["_press_base"] = None
 
     @staticmethod
     def _is_dark_mode() -> bool:
@@ -5399,226 +5041,27 @@ class LogCompressorApp(_make_app_base()):
         return {"bg": p["row_bg"], "hover": p["row_hover"],
                 "selected": p["row_selected"]}
 
-    @staticmethod
-    def _bind_row_events(widgets, select_cb, hover_cb) -> None:
-        """行级点击 / 悬停事件绑定（修复缺陷R2）。
-
-        Tk 事件不冒泡：真实鼠标点击命中的是 CTk 复合控件内部的
-        子控件（CTkLabel 内部的 Canvas / tk.Label），仅绑定容器
-        会导致「点击头部行不生效、只能保持默认选中第一行」的缺陷。
-        此处把绑定同时挂到容器与其全部子控件上。
-
-        悬停态去重（state 字典）：指针在容器与子控件间移动会触发
-        成对的 Leave/Enter，直接透传会闪烁，先比对当前态再回调。
-        """
-        targets: list = []
-        for widget in widgets:
-            targets.append(widget)
-            targets.extend(widget.winfo_children())
-        state = {"hover": None}
-
-        def set_hover(hovered: bool) -> None:
-            if state["hover"] == hovered:
-                return
-            state["hover"] = hovered
-            hover_cb(hovered)
-
-        for target in targets:
-            # 修复缺陷R27：CTk 复合控件（CTkLabel/CTkFrame 等）重写了
-            # bind() 把事件转发到内部子控件，导致容器本身的绑定在
-            # event_generate 时不触发（真实鼠标点击命中内部控件仍有效）。
-            # 用原始 tk.Misc.bind 确保容器绑定也生效，测试与真实行为一致。
-            tk.Misc.bind(target, "<Button-1>", lambda e: select_cb())
-            tk.Misc.bind(target, "<Enter>", lambda e: set_hover(True))
-            tk.Misc.bind(target, "<Leave>", lambda e: set_hover(False))
-
-    def _apply_row_bg(self, idx: int, color) -> None:
-        """统一更新行背景（经典 CTk 行 / 虚拟池化行都支持）。
-
-        修复缺陷R6：虚拟模式下行池控件为原生 tk 控件（bg 而非
-        fg_color），且池位置与数据索引不再一一对应——按 idx 字段
-        查找目标行。
-        修复缺陷R26：经典行选中态 3D 风格 —— 能带渐变（头部条
-        sel_top / 主体 sel_bot）+ 圆角 14 + 2px 亮边框 + 白字；
-        非选中恢复平面（6px 圆角 + 1px row_border 细边框）。
-        """
-        resolved = self._resolve_row_color(color)
-        for row in self._cluster_rows:
-            if row.get("idx") != idx:
-                continue
-            try:
-                if row.get("virtual"):
-                    row["frame"].configure(bg=resolved)
-                    row["head"].configure(bg=resolved)
-                    row["summary"].configure(bg=resolved)
-                else:
-                    p = self._palette()
-                    sel_c = self._resolve_row_color(p["row_selected"])
-                    if resolved == sel_c:
-                        # 修复缺陷R27：3D 凸起增强 —— 3px 高光边框
-                        # （sel_hi 受光色）+ 选中行 pack 收紧 pady 制造
-                        # 「浮起」感；渐变背景（line sel_top / frame sel_bot）
-                        # 模拟光照，圆角 14 保持药丸形。
-                        # 修复缺陷R27：药丸形圆角+4px高光边框
-                        # + 顶部受光高光条 + 底部投影，制造明显3D凸起感
-                        # 修复缺陷R33：圆角 24→18（padx 同步 28→22，
-                        # 内容左移 6px 减少左侧空白，仍不压圆角描边）
-                        row["frame"].configure(
-                            fg_color=p["sel_bot"], corner_radius=_ROW_R_SEL,
-                            border_width=4,
-                            border_color=p["sel_hi"])
-                        # 选中行 pady 收紧 -> 比未选中行稍大，浮起感
-                        # 修复缺陷R96：换选前先取消残留按压动画（否则
-                        # 动画结束帧会把 pady 写回旧基准覆盖新态）
-                        self._classic_press_cancel(row)
-                        try:
-                            row["frame"].pack_configure(pady=0)
-                        except tk.TclError:
-                            pass
-                        # 修复缺陷R30：内部控件背景显式与外层同色
-                        # —— CTk 透明控件的内部画布底色是创建时静态
-                        # 探测值，不随 frame 变色更新（选中后 frame
-                        # 变蓝，▶/摘要标签画布仍停留深色 → 左上/左下
-                        # 方角块压圆角）；同色绘制才是真无缝
-                        if row.get("line") is not None:
-                            row["line"].configure(fg_color=p["sel_bot"])
-                        for key in ("head", "summary", "toggle", "toggle_icon"):
-                            if row.get(key) is not None:
-                                row[key].configure(fg_color=p["sel_bot"])
-                        if row.get("divider") is not None:
-                            row["divider"].configure(
-                                fg_color=p["sel_border"])
-                        # 3D 立体：顶部高光条 + 底部阴影条（place 定位不占布局空间）
-                        # 修复缺陷R29/R33：高光/阴影条两端内缩 24px
-                        # （圆角半径 18 + 6 余量），方角端头不压圆角
-                        # 切角区、不与圆角描边重合
-                        # 修复缺陷R41：条已改原生 tk.Frame（place 不再
-                        # 抛 ValueError 中断选中分支）；place 几何按
-                        # _dpx 缩放（tk place 为物理px，2 逻辑px 高在
-                        # 200% DPI 下只剩 1px 厚）；条色随主题刷新
-                        try:
-                            _in = self._dpx(_ROW_BAR_INSET)
-                            _bh = max(1, self._dpx(2))
-                            # 修复缺陷R96：高光/阴影条内缩一个边框宽
-                            # —— 原贴 frame 边缘放置，盖住 4px 亮边框
-                            # 的内半（底缘上蓝下黑、上粗下细的隐蔽
-                            # 缺陷）；条退进内容区后描边四边等宽
-                            _bw = self._dpx(4)
-                            row["_hi_bar"].configure(bg=p["sel_hi"])
-                            row["_hi_bar"].place(
-                                x=_in, y=_bw, relwidth=1,
-                                width=-2 * _in, height=_bh)
-                            row["_shadow_bar"].configure(bg=p["sel_shadow"])
-                            row["_shadow_bar"].place(
-                                x=_in, rely=1.0, y=-_bw, relwidth=1,
-                                width=-2 * _in, height=_bh, anchor="sw")
-                        except (tk.TclError, KeyError):
-                            pass
-                        row["summary"].configure(
-                            text_color=p["sel_text"])
-                        # 修复缺陷R40：选中行头部用调亮级别色（蓝底上
-                        # 仍能区分级别；无色级别回退白字）
-                        _c = (self._displayed[idx] if 0 <= idx
-                              < len(self._displayed) else None)
-                        row["head"].configure(
-                            text_color=(
-                                (self._row_color_sel(_c)
-                                 if _c is not None else None)
-                                or p["sel_text"]))
-                        if row.get("toggle") is not None:
-                            row["toggle"].configure(
-                                text_color=p["sel_text"])
-                        if row.get("toggle_icon") is not None:
-                            row["toggle_icon"].configure(
-                                text_color=p["sel_text"])
-                    else:
-                        # 修复缺陷R31/R33：未选中圆角半径 9（与选中
-                        # 18 保持 2:1 比例，视觉统一）
-                        row["frame"].configure(
-                            fg_color=color, corner_radius=_ROW_R_FLAT,
-                            border_width=1,
-                            border_color=p["row_border"])
-                        # 未选中恢复默认 pady
-                        # 修复缺陷R96：同选中分支，先取消残留按压动画
-                        self._classic_press_cancel(row)
-                        try:
-                            row["frame"].pack_configure(pady=4)
-                        except tk.TclError:
-                            pass
-                        if row.get("line") is not None:
-                            row["line"].configure(fg_color=color)
-                        # 修复缺陷R30：未选中内部控件背景同样与外层
-                        # 同色（悬停色变化时画布不同步问题一致）
-                        for key in ("head", "summary", "toggle", "toggle_icon"):
-                            if row.get(key) is not None:
-                                row[key].configure(fg_color=color)
-                        # 修复缺陷R29：未选中分界细线恢复低调色
-                        if row.get("divider") is not None:
-                            row["divider"].configure(
-                                fg_color=p["row_border"])
-                        # 未选中隐藏 3D 高光/阴影
-                        try:
-                            row["_hi_bar"].place_forget()
-                            row["_shadow_bar"].place_forget()
-                        except (tk.TclError, KeyError):
-                            pass
-                        row["summary"].configure(
-                            text_color=p["row_text"])
-                        # 头部/展开按钮恢复原色（级别色/链接色）
-                        c = (self._displayed[idx] if 0 <= idx
-                             < len(self._displayed) else None)
-                        if c is not None:
-                            row["head"].configure(
-                                text_color=(self._row_color(c)
-                                            or p["row_text"]))
-                        if row.get("toggle") is not None:
-                            link = ("#60a5fa" if p["is_dark"] == "1"
-                                    else "#2563EB")
-                            row["toggle"].configure(text_color=link)
-                        if row.get("toggle_icon") is not None:
-                            row["toggle_icon"].configure(
-                                text_color=link)
-            except (tk.TclError, ValueError):
-                continue
-            return
-
     def _hover_row(self, idx: int, hovered: bool) -> None:
         """行悬停高亮（选中行保持选中色）。
 
-        修复缺陷R16：虚拟模式池行悬停统一由 vl._hover + _fill_slot
-        着色（视图行模型下 displayed 索引与池行视图索引不再等价）。
+        修复缺陷R16：池行悬停统一由 vl._hover + _fill_slot 着色
+        （视图行模型下 displayed 索引与池行视图索引不再等价）。
+        优化缺陷R97：经典渲染链删除后本方法仅保留虚拟语义（悬停
+        事件由 VirtualClusterList 内部处理，此处为兼容旧调用的
+        空操作收口）。
         """
-        if self._virtual_list is not None:
-            return
-        if not (0 <= idx < len(self._cluster_rows)):
-            return
-        if idx == self._selected_row:
-            return
-        states = self._row_states()
-        self._apply_row_bg(
-            idx, states["hover"] if hovered else states["bg"])
 
     def _mark_selected_row(self, idx: int) -> None:
         """更新选中行高亮（清除旧选中，标记新选中；蓝色选中态）。
 
-        修复缺陷R16：虚拟模式池行着色统一走 _fill_slot（按
+        修复缺陷R16：池行着色统一走 _fill_slot（按
         _selected_row/_selected_inst/_hovered 计算），避免视图索引
         与簇索引不匹配导致的错位着色。
-        优化缺陷R45：经典模式守卫改为按 idx 字段判定（搜索过滤后
-        行数少于簇数，原位置索引 guard 会漏判导致选中不高亮）。
+        优化缺陷R97：经典渲染链删除后只剩虚拟路径。
         """
-        if self._virtual_list is not None:
-            self._selected_row = idx
-            self._virtual_list._sync()
-            return
-        previous = getattr(self, "_selected_row", -1)
-        states = self._row_states()
-        rows = self._cluster_rows
-        if any(r.get("idx") == previous for r in rows):
-            self._apply_row_bg(previous, states["bg"])
-        if any(r.get("idx") == idx for r in rows):
-            self._apply_row_bg(idx, states["selected"])
         self._selected_row = idx
+        if self._virtual_list is not None:
+            self._virtual_list._sync()
 
     @staticmethod
     def _row_text(cluster: ErrorCluster, with_count: bool = True) -> str:
@@ -5668,10 +5111,6 @@ class LogCompressorApp(_make_app_base()):
         if not (0 <= idx < len(self._displayed)):
             return
         self._selected_inst = None      # R16：切簇清除实例选中态
-        # 优化缺陷R57：经典模式同步清除实例行蓝色选中样式（此前
-        # 切簇后旧实例行残留蓝底）
-        if self._virtual_list is None:
-            self._classic_mark_inst_sel(-1, -1)
         self._mark_selected_row(idx)
         self._show_cluster_detail(self._displayed[idx])
         self._sync_fs_detail()          # 优化缺陷R42：全屏联动
@@ -5777,6 +5216,8 @@ class LogCompressorApp(_make_app_base()):
         点击实例行右侧详情显示【该实例自身】的上下文与堆栈
         （_fill_instance_detail）—— 不再局限于典型样例（第一次
         出现的错误位置）。
+        优化缺陷R97：经典渲染链删除后只剩虚拟路径（update_rows
+        保持滚动位置，浏览不跳动）。
         """
         if not (0 <= idx < len(self._displayed)):
             return
@@ -5787,8 +5228,6 @@ class LogCompressorApp(_make_app_base()):
                 self._expanded_clusters[idx] = True
             # 保持滚动位置更新（Tk canvas 保持内容偏移，浏览位置不动）
             self._virtual_list.update_rows(self._build_view_rows())
-        else:
-            self._toggle_expand_classic(idx)
         # 优化缺陷R42：全屏虚拟列表同步刷新（共享 _expanded_clusters）
         fs_vl = getattr(self, "_fs_vl", None)
         if fs_vl is not None:
@@ -5807,185 +5246,11 @@ class LogCompressorApp(_make_app_base()):
             return
         self._selected_inst = (cidx, iidx)
         self._mark_selected_row(cidx)
-        # 优化缺陷R57：经典模式实例行同步蓝色 3D 选中样式 —— 此前
-        # 仅点击路径（_classic_inst_click）着色，Enter 扁平实例导航
-        # 定位的实例行无蓝色高亮，用户无法辨认当前定位到哪条
-        if self._virtual_list is None:
-            self._classic_mark_inst_sel(cidx, iidx)
         self._fill_instance_detail(self._detail_box, cluster,
                                    cluster.instances[iidx])
         self._sync_fs_detail()          # 优化缺陷R42：全屏联动
         # 优化缺陷R56：点实例按实例自身同步导航序号（扁平实例导航）
         self._sync_search_nav(cidx, iidx)
-
-    def _toggle_expand_classic(self, idx: int) -> None:
-        """经典列表展开/收起簇实例（行内就地插入实例区）。
-
-        与全屏展开同一交互（▶/▼ + 25 条/帧渐进创建，大簇不卡 UI）；
-        实例区 pack 定位在本簇行之后、下一簇行之前。
-        """
-        cluster = self._displayed[idx]
-        row = next((r for r in self._cluster_rows
-                    if r.get("idx") == idx), None)
-        if row is None or "toggle" not in row:
-            return
-        state = self._classic_expanded.get(idx)
-        if state is not None:
-            # 收起：取消挂起批次并销毁实例区
-            state["cancelled"] = True
-            job = state.get("job")
-            if job is not None:
-                try:
-                    self.after_cancel(job)
-                except (tk.TclError, ValueError):
-                    pass
-            self._classic_expanded.pop(idx, None)
-            self._expanded_clusters.pop(idx, None)
-            row["toggle_icon"].configure(text="\u25b6")
-            try:
-                state["area"].destroy()
-            except tk.TclError:
-                pass
-            return
-        # 展开
-        p = self._palette()
-        inst_bg = p["window"]
-        area = tk.Frame(self._cluster_list, bg=inst_bg, bd=0,
-                        highlightthickness=0)
-        state = {"area": area, "labels": [], "cancelled": False,
-                 "pos": 0}
-        self._classic_expanded[idx] = state
-        self._expanded_clusters[idx] = True
-        row["toggle_icon"].configure(text="\u25bc")
-        pos = next(i for i, r in enumerate(self._cluster_rows)
-                   if r.get("idx") == idx)
-        if pos + 1 < len(self._cluster_rows):
-            # 修复缺陷R38：实例区缩进按 DPI 换算（tk padx 不随缩放）
-            area.pack(fill="x", padx=(self._dpx(12), self._dpx(2)),
-                      before=self._cluster_rows[pos + 1]["frame"])
-        else:
-            area.pack(fill="x", padx=(self._dpx(12), self._dpx(2)))
-        insts = cluster.instances
-
-        def add_batch() -> None:
-            if state["cancelled"] or idx not in self._classic_expanded:
-                return
-            batch = insts[state["pos"]:state["pos"] + 25]
-            for iidx, inst in enumerate(batch):
-                state["labels"].append(
-                    self._make_classic_inst_label(
-                        area, idx, state["pos"] + iidx, inst, inst_bg))
-            state["pos"] += len(batch)
-            if state["pos"] < len(insts):
-                state["job"] = self.after(12, add_batch)
-            elif len(insts) < cluster.count:
-                # 实例记录超出保留上限的截断提示
-                lbl = tk.Label(
-                    area,
-                    text=f"…… 共 {cluster.count} 次，"
-                         f"仅展示前 {len(insts)} 条实例",
-                    font=self._scaled_font(self._font_row_summary),
-                    bg=inst_bg, fg=p["muted"], anchor="w")
-                # 修复缺陷R33：截断提示随实例容器 22 同步 34→28
-                # 修复缺陷R38：缩进按 DPI 换算（tk padx 不随缩放）
-                lbl.pack(fill="x", padx=(self._dpx(28), self._dpx(8)),
-                         pady=(2, 4))
-                state["labels"].append(lbl)
-        add_batch()
-
-    def _make_classic_inst_label(self, parent, cidx, iidx, inst, bg):
-        """经典列表实例行（时间戳+行号+摘要；点击显示实例详情）。"""
-        p = self._palette()
-        text = (f"{format_timestamp(inst.timestamp)}  "
-                f"L{inst.line_no}  {inst.summary}")
-        # 修复缺陷R27：实例行改 CTkLabel 透明背景 + 圆角容器，
-        # 与簇行风格统一（选中态圆角+立体）
-        # 修复缺陷R27：实例行圆角容器 —— 未选中 8px 圆角+1px 细边，
-        # 选中态由 _classic_inst_click 升级为 10px 圆角+2px 高光边
-        # 修复缺陷R33：实例行容器左内缩 28→22（随簇行内容 padx
-        # 同步，保持实例区与摘要左缘相对缩进关系不变）
-        inst_wrap = ctk.CTkFrame(
-            parent, corner_radius=8,
-            fg_color=bg, border_width=1,
-            border_color=p["row_border"])
-        inst_wrap.pack(fill="x", padx=(22, 8), pady=1)
-        lbl = ctk.CTkLabel(
-            inst_wrap, text=text, anchor="w", justify="left",
-            wraplength=0,
-            font=self._font_row_summary,
-            fg_color="transparent",
-            text_color=p["row_text"], cursor="hand2")
-        lbl.pack(fill="x", padx=10, pady=4)
-        # 修复缺陷R28：点击绑定必须传字典（R27 误传 lbl 裸控件，
-        # _classic_inst_click 按字典取 label/wrap 时报
-        # TclError: unknown option "-label"，实例行点击无反应）
-        inst = {"label": lbl, "wrap": inst_wrap}
-        lbl.bind("<Button-1>",
-                 lambda e, d=inst: self._classic_inst_click(
-                     cidx, iidx, d))
-        lbl.bind("<Enter>", lambda e: inst_wrap.configure(
-            fg_color=p["row_selected"] if self._classic_inst_sel is lbl
-            else p["row_hover"]))
-        lbl.bind("<Leave>", lambda e: inst_wrap.configure(
-            fg_color=p["row_selected"] if self._classic_inst_sel is lbl
-            else bg))
-        # 优化缺陷R57：程序化选中（Enter 导航）的实例在批量渐进
-        # 创建到位时即补蓝色选中样式（大簇 >25 实例分批创建）
-        if (cidx, iidx) == getattr(self, "_selected_inst", None):
-            self._classic_inst_sel = lbl
-            inst_wrap.configure(
-                fg_color=p["sel_bot"], corner_radius=10,
-                border_width=2, border_color=p["sel_hi"])
-            lbl.configure(text_color=p["sel_text"])
-        return inst
-
-    def _classic_inst_click(self, cidx, iidx, inst_dict) -> None:
-        """经典实例行点击：单选高亮 + 实例详情。
-
-        优化缺陷R57：着色统一收口 _select_instance →
-        _classic_mark_inst_sel（点击与 Enter 导航同一样式）。
-        """
-        self._select_instance(cidx, iidx)
-
-    def _classic_mark_inst_sel(self, cidx, iidx) -> None:
-        """经典实例行蓝色 3D 选中着色（优化缺陷R57）。
-
-        点击/程序化选中共用：清除旧选中行样式（恢复 8px 圆角细
-        边），新选中行 10px 圆角 + 2px 高光边 + sel_bot 蓝底；目标
-        行标签尚未批量创建到位时仅更新选中记录（创建时按
-        _selected_inst 补着色，见 _make_classic_inst_label）。
-        """
-        p = self._palette()
-        state = getattr(self, "_classic_expanded", {}).get(cidx)
-        lbl = None
-        if state is not None and 0 <= iidx < len(state.get("labels", [])):
-            lbl = state["labels"][iidx].get("label")
-        prev = getattr(self, "_classic_inst_sel", None)
-        if prev is not None and prev is not lbl:
-            try:
-                if prev.winfo_exists():
-                    # 恢复未选中态：8px 圆角 + 1px 细边 + 默认文字色
-                    prev.master.configure(
-                        fg_color=p["window"],
-                        corner_radius=8,
-                        border_width=1,
-                        border_color=p["row_border"])
-                    prev.configure(text_color=p["row_text"])
-            except tk.TclError:
-                pass
-        self._classic_inst_sel = lbl
-        if lbl is None:
-            return
-        try:
-            # 选中态 3D：10px 圆角 + 2px 高光边框 + 稍亮背景
-            state["labels"][iidx]["wrap"].configure(
-                fg_color=p["sel_bot"],
-                corner_radius=10,
-                border_width=2,
-                border_color=p["sel_hi"])
-            lbl.configure(text_color=p["sel_text"])
-        except tk.TclError:
-            pass
 
     def _show_cluster_detail(self, cluster: ErrorCluster) -> None:
         """主界面详情面板渲染（转发到通用填充函数）。"""

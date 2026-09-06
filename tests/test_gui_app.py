@@ -232,10 +232,12 @@ class TestClusterListWrap:
         # 两行错误 -> 两行记录（修复缺陷R40：FATAL 归一 ERROR，
         # 同级等优先级按日志原序稳定排序，长摘要行在 row 0）
         assert len(app._cluster_rows) == 2
-        # 长摘要在行 0：完整未截断
+        # R97：虚拟池行摘要按 SUMMARY_CLIP 截断（单行不换行 + 省略号；
+        # 完整摘要进详情面板/水平滚动区域按截断宽测量）
         first_summary = str(app._cluster_rows[0]["summary"].cget("text"))
-        assert "TAIL" in first_summary
-        assert len(first_summary) > 100
+        assert len(first_summary) > 60
+        assert first_summary.endswith("…"), \
+            "虚拟模式长摘要应截断省略（完整内容见详情面板）"
         # 行首元信息不包含摘要（R16 起用行内 head 引用）
         head_text = str(app._cluster_rows[0]["head"].cget("text"))
         assert "TAIL" not in head_text
@@ -249,29 +251,33 @@ class TestClusterListWrap:
                 "摘要应取消自动换行（wraplength=0 单行显示）"
 
     def test_horizontal_scrollbar_covers_wide_content(self, app):
-        """修复R9：长摘要不换行后，水平滚动区域覆盖完整内容宽度。"""
+        """修复R9/R97：长摘要不换行后，虚拟列表水平滚动区域覆盖
+        完整内容宽度（统一虚拟渲染后内容宽由 vl._content_w 承担）。"""
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         app.update()
-        canvas = app._cluster_list._parent_canvas
-        region = str(canvas.cget("scrollregion")).split()
-        assert len(region) == 4, "scrollregion 应已设置"
-        region_w = int(region[2])
+        vl = app._virtual_list
+        assert vl is not None, "R97：任意簇数一律虚拟渲染"
         # 行 1 摘要极长（>100 字符），内容宽应超出视口（可水平滚动）
         widest = max(r["summary"].winfo_reqwidth()
                      for r in app._cluster_rows)
-        assert region_w >= widest, \
-            f"滚动区域宽 {region_w} 应 ≥ 摘要完整宽 {widest}"
+        assert vl._content_w >= widest - 2, \
+            f"内容宽 {vl._content_w} 应 ≥ 摘要完整宽 {widest}"
+        region = str(vl._canvas.cget("scrollregion")).split()
+        assert int(region[2]) >= max(vl._content_w,
+                                     vl._canvas.winfo_width()) - 2
 
-    def test_classic_hbar_wired_and_mapped(self, app):
-        """修复R9：经典列表底部水平滚动条存在且与画布双向联动。"""
+    def test_virtual_hbar_wired_and_mapped(self, app):
+        """修复R9/R97：虚拟列表底部水平滚动条存在且与画布联动（统一
+        虚拟渲染；经典 hbar 在虚拟模式下隐藏）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
-        hbar = app._list_hbar
-        assert hbar is not None and hbar.winfo_ismapped(), \
-            "列表底部应有水平滚动条"
-        canvas = app._cluster_list._parent_canvas
+        vl = app._virtual_list
+        assert vl is not None
+        assert vl._hbar.winfo_ismapped(), "虚拟列表底部应有水平滚动条"
+        assert not app._list_hbar.winfo_ismapped(), \
+            "虚拟模式下经典 hbar 应隐藏"
         # 画布 xscrollcommand 已接滚动条（set 回调非空）
-        assert str(canvas.cget("xscrollcommand")) != "", \
+        assert str(vl._canvas.cget("xscrollcommand")) != "", \
             "画布 xscrollcommand 应接入水平滚动条"
 
     def test_selection_highlight(self, app):
@@ -279,8 +285,9 @@ class TestClusterListWrap:
         app._select_cluster(1)
         assert app._selected_row == 1
         app.update()
-        selected_color = app._cluster_rows[1]["frame"].cget("fg_color")
-        default_color = app._cluster_rows[0]["frame"].cget("fg_color")
+        # R97：虚拟池行原生 tk 控件（bg 而非 fg_color）
+        selected_color = app._cluster_rows[1]["frame"].cget("bg")
+        default_color = app._cluster_rows[0]["frame"].cget("bg")
         assert selected_color != default_color
 
     def test_row_click_selects(self, app):
@@ -291,27 +298,19 @@ class TestClusterListWrap:
         assert app._selected_row == 1
 
     def test_row_head_internal_click_selects(self, app):
-        """修复R2：真实点击命中 CTkLabel 内部子控件也触发选中。
+        """修复R2/R97：点击行首标签（级别/次数行）也触发选中。
 
-        Tk 事件不冒泡：CTkLabel 是容器（内部 Canvas + tk.Label），
-        只绑容器时点击头部行（级别/次数行）不生效——此为
-        「点其他项不生效、只能默认选中第一行」的根因。
+        R97 统一虚拟渲染后行首为原生 tk.Label，点击绑定随
+        _fill_slot 挂到 frame/head/summary/divider 全控件。
         """
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         app._select_cluster(0)
         app.update()
-        head = app._cluster_rows[0]["head"]
-        assert isinstance(head, ctk.CTkLabel)
-        # 取 CTkLabel 内部的真实子控件（Canvas / tk.Label）
-        internals = head.winfo_children()
-        assert internals, "CTkLabel 应有内部子控件"
-        # 改点行 1 的头部内部子控件验证选中切换
         head1 = app._cluster_rows[1]["head"]
-        for child in head1.winfo_children():
-            child.event_generate("<Button-1>")
+        head1.event_generate("<Button-1>")
         app.update()
         assert app._selected_row == 1, \
-            "点击行 1 头部（CTkLabel 内部子控件）应选中行 1"
+            "点击行 1 头部应选中行 1"
         # 详情面板同步更新
         detail = app._detail_box.get("1.0", "end")
         assert "错误摘要" in detail
@@ -335,66 +334,25 @@ class TestClusterListWrap:
         app._select_cluster(1)
         app.update()
         states = app._row_states()
-        selected = app._cluster_rows[1]["frame"].cget("fg_color")
-        normal = app._cluster_rows[0]["frame"].cget("fg_color")
-        # CTk 颜色可能返回 hex 或元组字符串，统一转字符串比较
+        selected = app._cluster_rows[1]["frame"].cget("bg")
+        normal = app._cluster_rows[0]["frame"].cget("bg")
         assert str(selected) != str(normal), "选中/未选中应明显区分"
         assert str(states["selected"]) not in ("", "None")
 
-    def test_selected_classic_row_unified_rounded(self, app):
-        """修复缺陷R29/R30：经典选中行完整圆角矩形，内部无粘着矩形。
-
-        R30 根因：CTk 透明控件内部画布底色是创建时静态探测值，
-        不随外层 frame 变色更新 —— 选中后 frame 变蓝，▶/摘要标签
-        画布停留深色形成方角块压圆角。修复：内部控件（line/head/
-        toggle/summary）背景显式与外层同色（真无缝）；头部/摘要
-        间 1px 分界细线（选中态亮色、两端内缩不碰边框）。
-        """
-        _run_paste_analysis(app, LONG_SUMMARY_LOG)
-        app._select_cluster(1)
-        app.update()
-        p = app._palette()
-        sel, normal = app._cluster_rows[1], app._cluster_rows[0]
-        # 内部控件背景与外层圆角 frame 同色（画布底色同步，无深色角块）
-        if sel.get("line") is not None:
-            assert str(sel["line"].cget("fg_color")) == p["sel_bot"]
-        for key in ("head", "summary"):
-            assert str(sel[key].cget("fg_color")) == p["sel_bot"], \
-                f"选中行 {key} 应与外层同色（实际 {sel[key].cget('fg_color')}）"
-        if sel.get("toggle") is not None:
-            assert str(sel["toggle"].cget("fg_color")) == p["sel_bot"]
-        # 外层圆角矩形统一背景 + 分界细线亮色
-        assert str(sel["frame"].cget("fg_color")) == p["sel_bot"]
-        assert sel.get("divider") is not None, "选中行应有分界细线"
-        assert str(sel["divider"].cget("fg_color")) == p["sel_border"], \
-            "选中行分界线应为亮色"
-        # 未选中行：内部控件与行底色同色 + 分界线低调色
-        assert str(normal["frame"].cget("fg_color")) == p["row_bg"]
-        for key in ("head", "summary"):
-            assert str(normal[key].cget("fg_color")) == p["row_bg"]
-        assert str(normal["divider"].cget("fg_color")) == p["row_border"]
-        # 修复缺陷R31/R33：未选中行创建即带可见圆角 —— 圆角 9px +
-        # 1px 细边框（原创建时 border_width=0 且底色对比极低，
-        # 圆角存在但肉眼不可见；R33 随选中圆角 24→18 同步 12→9
-        # 保持 2:1 比例）
-        assert normal["frame"].cget("corner_radius") == 9, \
-            "未选中行应为 9px 圆角"
-        assert normal["frame"].cget("border_width") == 1, \
-            "未选中行创建即应有 1px 细边框"
-        assert str(normal["frame"].cget("border_color")) == \
-            p["row_border"]
-
     def test_hover_highlight(self, app):
+        """R97：虚拟池行悬停由 vl._hover + _fill_slot 着色。"""
         _run_paste_analysis(app, LONG_SUMMARY_LOG)
         # 行 0 在结果渲染后自动选中，悬停测试使用未选中的行 1
+        vl = app._virtual_list
+        assert vl is not None
         frame = app._cluster_rows[1]["frame"]
-        base = frame.cget("fg_color")
-        app._hover_row(1, True)
+        base = frame.cget("bg")
+        vl._hover(1, True)
         app.update()
-        hovered = frame.cget("fg_color")
-        app._hover_row(1, False)
+        hovered = frame.cget("bg")
+        vl._hover(1, False)
         app.update()
-        restored = frame.cget("fg_color")
+        restored = frame.cget("bg")
         assert hovered != base and restored == base
 
     def test_long_word_single_line_horizontal(self, app):
@@ -433,67 +391,33 @@ class TestClusterListFontAndWidth:
         assert int(app._font_fs_inst.cget("size")) == 20
 
     def test_summary_font_dpi_scaled(self, app):
-        """修复R9：摘要字体随 DPI 缩放（渲染比例与头部一致）。
+        """修复R9/R97：摘要字体随 DPI 缩放（渲染比例与头部一致）。
 
-        原生 tk.Label 直传 CTkFont 命名字体不参与缩放，高 DPI 屏上
-        渲染偏小（修复前摘要/头部渲染比例 ≈ 18/22/scale）。
+        R97 统一虚拟渲染后池行均为原生 tk.Label，直接取 cget("font")
+        的实际渲染字体（创建时已按 DPI 缩放，见 _make_slot）。
         """
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
         row = app._cluster_rows[0]
-        head = row["head"]          # R16 起行内存 head 引用（结构无关）
-        inner = [c for c in head.winfo_children()
-                 if c.winfo_class() == "Label"][0]
-        head_size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
-        # R27: summary 改 CTkLabel，从内部 tk.Label 取实际渲染字体
-        sum_inner = [c for c in row["summary"].winfo_children()
-                     if c.winfo_class() == "Label"][0]
-        sum_size = int(tkfont.Font(font=sum_inner.cget("font")).cget("size"))
+        head_size = int(tkfont.Font(
+            font=row["head"].cget("font")).cget("size"))
+        sum_size = int(tkfont.Font(
+            font=row["summary"].cget("font")).cget("size"))
         ratio = sum_size / max(1, head_size)
         assert abs(ratio - 18 / 22) < 0.06, \
             f"摘要/头部渲染比例 {ratio:.3f} 应 ≈ 18/22（均含 DPI 缩放）"
 
-    def test_classic_row_uses_enlarged_fonts(self, app):
-        """修复R9：经典模式头部使用共享字体对象，摘要渲染字号匹配。"""
+    def test_virtual_row_uses_enlarged_fonts(self, app):
+        """修复R9/R97：池行头部/摘要渲染字号匹配 22/18 档（统一虚拟
+        渲染后原「经典行共享字体」断言转化为池行实际字体比例）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
-        head = app._cluster_rows[0]["head"]
-        assert isinstance(head, ctk.CTkLabel)
-        assert head.cget("font") is app._font_row_head
-        inner = [c for c in head.winfo_children()
-                 if c.winfo_class() == "Label"][0]
-        head_size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
-        # R27: summary 改 CTkLabel，从内部 tk.Label 取实际渲染字体
-        sum_inner2 = [c for c in app._cluster_rows[0]["summary"].winfo_children()
-                      if c.winfo_class() == "Label"][0]
-        sum_size = int(tkfont.Font(font=sum_inner2.cget("font")).cget("size"))
+        app.update()
+        row = app._cluster_rows[0]
+        head_size = int(tkfont.Font(
+            font=row["head"].cget("font")).cget("size"))
+        sum_size = int(tkfont.Font(
+            font=row["summary"].cget("font")).cget("size"))
         assert abs(sum_size / max(1, head_size) - 18 / 22) < 0.06
-
-    def test_virtual_row_fonts_match_classic(self, app):
-        """修复R9：虚拟模式与经典模式渲染字号完全一致（含 DPI 缩放）。"""
-        # 经典模式先取样（R16 起行内存 head 引用，结构无关取样）
-        _run_paste_analysis(app, SAMPLE_PASTE)
-        app.update()
-        classic_head = app._cluster_rows[0]["head"]
-        inner = [c for c in classic_head.winfo_children()
-                 if c.winfo_class() == "Label"][0]
-        classic_head_size = tkfont.Font(
-            font=inner.cget("font")).cget("size")
-        # R27: summary 改 CTkLabel，从内部 tk.Label 取实际渲染字体
-        classic_sum_inner = [c for c in app._cluster_rows[0]["summary"].winfo_children()
-                             if c.winfo_class() == "Label"][0]
-        classic_sum_size = tkfont.Font(
-            font=classic_sum_inner.cget("font")).cget("size")
-        # 虚拟模式取样
-        _run_many_clusters(app)
-        app.update()
-        assert app._virtual_list is not None, "60 簇应启用虚拟列表"
-        slot = app._virtual_list.slots[0]
-        vh = tkfont.Font(font=slot["head"].cget("font"))
-        vs = tkfont.Font(font=slot["summary"].cget("font"))
-        assert abs(int(vh.cget("size")) - int(classic_head_size)) <= 1, \
-            "虚拟/经典头部渲染字号应一致"
-        assert abs(int(vs.cget("size")) - int(classic_sum_size)) <= 1, \
-            "虚拟/经典摘要渲染字号应一致"
 
     def test_virtual_row_height_fits_fonts(self, app):
         """修复R9：虚拟行高按实际字体度量计算（容纳头部+摘要单行）。"""
@@ -511,12 +435,10 @@ class TestClusterListFontAndWidth:
     def test_fullscreen_rows_use_fs_fonts(self, app):
         """修复R9：全屏列表行实际使用全屏字体（头部 24 / 摘要 20，含缩放）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
-        # 经典头部渲染字号取样（作为 22 号基准；R16 起用 head 引用）
+        # 主列表头部渲染字号取样（R97：池行原生 tk.Label 直取）
         classic_head = app._cluster_rows[0]["head"]
-        c_inner = [c for c in classic_head.winfo_children()
-                   if c.winfo_class() == "Label"][0]
         classic_size = int(
-            tkfont.Font(font=c_inner.cget("font")).cget("size"))
+            tkfont.Font(font=classic_head.cget("font")).cget("size"))
         app._open_list_fullscreen()
         for _ in range(20):
             app.update()
@@ -570,13 +492,11 @@ class TestClusterListFontAndWidth:
         assert int(lbl.cget("wraplength")) == 0, "实例行应单行不换行"
         assert "out of memory" in str(lbl.cget("text"))
         size = int(tkfont.Font(font=lbl.cget("font")).cget("size"))
-        # 实例行渲染字号 = 全屏摘要档（经典头部 22 号基准 × 24/22）
+        # 实例行渲染字号 = 全屏摘要档（主列表头部 22 号基准 × 24/22）
         classic = app._cluster_rows[0]["head"]
-        inner = [c for c in classic.winfo_children()
-                 if c.winfo_class() == "Label"][0]
-        base = int(tkfont.Font(font=inner.cget("font")).cget("size"))
+        base = int(tkfont.Font(font=classic.cget("font")).cget("size"))
         assert abs(size - base * 24 / 22) <= 2, \
-            f"实例行渲染 {size} 应 ≈ 经典 {base}×24/22（全屏摘要档）"
+            f"实例行渲染 {size} 应 ≈ 主列表 {base}×24/22（全屏摘要档）"
         win.event_generate("<Escape>")
         app.update()
 
@@ -599,25 +519,26 @@ class TestClusterListFontAndWidth:
         win.event_generate("<Escape>")
         app.update()
 
-    def test_virtual_hbar_and_mode_switch(self, app):
-        """修复R9：虚拟模式有独立水平滚动条，经典 hbar 隐藏，销毁后恢复。"""
+    def test_virtual_hbar_present_and_classic_hidden(self, app):
+        """修复R9/R97：虚拟列表有独立水平滚动条，经典 hbar 恒隐藏
+        （R97 统一虚拟渲染后不再存在经典/虚拟模式切换）。"""
         _run_many_clusters(app)
         app.update()
         vl = app._virtual_list
         assert vl is not None
-        assert vl._hbar.winfo_ismapped(), "虚拟模式应有水平滚动条"
+        assert vl._hbar.winfo_ismapped(), "虚拟列表应有水平滚动条"
         assert not app._list_hbar.winfo_ismapped(), \
-            "虚拟模式下经典 hbar 应隐藏"
+            "经典 hbar 应隐藏"
         # 长摘要数据：水平滚动区域应加宽（内容宽超视口）
         canvas = vl._canvas
         region = str(canvas.cget("scrollregion")).split()
         assert int(region[2]) >= max(vl._content_w, canvas.winfo_width()) - 2
-        # 切回经典（重新分析小数据）：经典 hbar 恢复显示
+        # R97：小簇数同样虚拟渲染（不再切回经典）
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
-        assert app._virtual_list is None
-        assert app._list_hbar.winfo_ismapped(), \
-            "切回经典模式后经典 hbar 应恢复"
+        assert app._virtual_list is not None, "R97：小簇数也走虚拟渲染"
+        assert not app._list_hbar.winfo_ismapped(), \
+            "经典 hbar 在小簇数下同样隐藏"
 
     def test_default_window_height_upgraded(self, app):
         """修复R9：默认窗口高度升级为 1000（容纳大字体与 6 行可视）。"""
@@ -636,7 +557,7 @@ class TestClusterListFontAndWidth:
             pytest.skip("行数不足")
         pitch = (rows[1]["frame"].winfo_rooty()
                  - rows[0]["frame"].winfo_rooty())
-        canvas = app._cluster_list._parent_canvas
+        canvas = app._virtual_list._canvas   # R97：虚拟画布
         if pitch < 10 or canvas.winfo_height() < 60:
             pytest.skip("窗口未完成布局")
         scale = max(1.0, app._font_scale)
@@ -660,12 +581,13 @@ class TestClusterListFontAndWidth:
             f"列表右缘与按钮右缘偏差 {list_right - btn_right}px（应 ≤2px）"
 
     def test_list_fills_host_width(self, app):
-        """修复R7：列表占满宿主宽度 ≥90%（去除固定 470px 留白）。"""
+        """修复R7/R97：列表（虚拟画布）占满宿主宽度 ≥90%。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
         if app._list_host.winfo_width() < 50:
             pytest.skip("窗口未完成布局")
         host_w = app._list_host.winfo_width()
-        list_w = app._cluster_list.winfo_width()
+        list_w = app._virtual_list._canvas.winfo_width()
         assert list_w >= 0.9 * host_w, \
             f"列表宽 {list_w}px 应占宿主宽 {host_w}px 的 90% 以上"
 
@@ -786,136 +708,6 @@ class TestFatalLevelFilter:
         assert app._level_vars["ERROR"].get() is True
 
 
-# ---------------------------------------------------------------------------
-# 修复缺陷R41：经典选中行闭合亮边框 + 3D 高光/阴影条完整显示
-# ---------------------------------------------------------------------------
-class TestClassicSelectedRow3D:
-    """R41 回归：CTkFrame 条 place 抛 ValueError 曾中断选中分支
-    （3D 条不显示 + 后续文字着色被跳过，底部视觉开口）。"""
-
-    def test_bars_native_tk_frame(self, app):
-        """高光/阴影条为原生 tk.Frame（非 CTkFrame，place 不抛异常）。"""
-        _run_paste_analysis(app, SAMPLE_PASTE)
-        app.update()
-        row = app._cluster_rows[0]
-        assert isinstance(row["_hi_bar"], tk.Frame)
-        assert not isinstance(row["_hi_bar"], ctk.CTkFrame), \
-            "高光条应为原生 tk.Frame（CTkFrame place 禁止宽高）"
-        assert isinstance(row["_shadow_bar"], tk.Frame)
-        assert not isinstance(row["_shadow_bar"], ctk.CTkFrame)
-
-    def test_selected_row_closed_border_and_3d_bars(self, app):
-        """选中行：4px 亮边框闭合 + 高光/阴影条显示 + 文字着色。"""
-        _run_paste_analysis(app, SAMPLE_PASTE)
-        app.update()
-        row = app._cluster_rows[0]
-        # 未选中行（分析后自动选中首行，row 1 为未选中）：条隐藏
-        other = app._cluster_rows[1]
-        assert not other["_hi_bar"].winfo_ismapped()
-        assert not other["_shadow_bar"].winfo_ismapped()
-        app._select_cluster(0)
-        app.update()
-        p = app._palette()
-        # 3D 条显示且颜色正确
-        assert row["_hi_bar"].winfo_ismapped(), "选中应显示顶部高光条"
-        assert row["_shadow_bar"].winfo_ismapped(), "选中应显示底部阴影条"
-        assert str(row["_hi_bar"].cget("bg")).lower() == \
-            p["sel_hi"].lower()
-        assert str(row["_shadow_bar"].cget("bg")).lower() == \
-            p["sel_shadow"].lower()
-        # 闭合亮边框（4px sel_hi）
-        assert int(row["frame"].cget("border_width")) == 4
-        assert str(row["frame"].cget("border_color")).lower() == \
-            p["sel_hi"].lower()
-        # place 中断曾跳过其后的文字着色 —— 回归断言
-        cluster = app._displayed[0]
-        expect_head = app._row_color_sel(cluster) or p["sel_text"]
-        assert str(row["head"].cget("text_color")).lower() == \
-            expect_head.lower(), "选中行头部应为调亮级别色"
-        assert str(row["summary"].cget("text_color")).lower() == \
-            p["sel_text"].lower(), "选中行摘要应为选中白"
-
-    def test_deselect_restores_flat_and_hides_bars(self, app):
-        """换选：原行恢复未选中平面（1px 细边框 + 条隐藏）。"""
-        _run_paste_analysis(app, SAMPLE_PASTE)
-        app.update()
-        row = app._cluster_rows[0]
-        app._select_cluster(0)
-        app.update()
-        assert row["_shadow_bar"].winfo_ismapped()
-        app._select_cluster(1)
-        app.update()
-        assert not row["_hi_bar"].winfo_ismapped(), "换选后原行高光条应隐藏"
-        assert not row["_shadow_bar"].winfo_ismapped(), \
-            "换选后原行阴影条应隐藏"
-        assert int(row["frame"].cget("border_width")) == 1, \
-            "换选后原行应恢复 1px 细边框"
-
-    def test_bars_inset_clear_of_border(self, app):
-        """优化缺陷R96：高光/阴影条内缩一个边框宽 —— 4px 亮描边
-        四边等宽完整可见（原贴边放置盖住边框内半，底缘上蓝下黑）。"""
-        _run_paste_analysis(app, SAMPLE_PASTE)
-        app.update()
-        row = app._cluster_rows[0]
-        app._select_cluster(0)
-        app.update()
-        bw = app._dpx(4)
-        hi_info = row["_hi_bar"].place_info()
-        assert int(hi_info["y"]) >= bw, \
-            f"高光条应退到边框内侧（y={hi_info['y']} < 边框宽 {bw}）"
-        sh_info = row["_shadow_bar"].place_info()
-        assert int(sh_info["y"]) <= -bw, \
-            f"阴影条应退到边框内侧（y={sh_info['y']} > -边框宽 {-bw}）"
-
-    def test_classic_row_press_release_3d(self, app):
-        """优化缺陷R96：经典行点击 3D 弹性 —— 按下下沉+阴影收缩，
-        释放回弹归位+阴影恢复（与虚拟行 R23 同款手感）。"""
-        import time as _time
-        _run_paste_analysis(app, SAMPLE_PASTE)
-        app.update()
-        row = app._cluster_rows[0]         # 分析后自动选中（阴影条可见）
-        app._select_cluster(0)
-        app.update()
-        frame = row["frame"]
-        base_top, base_bot = app._pack_pady(frame)
-        d = app._dpx(3)
-        # 按下：下沉（上 pady 增 d / 下 pady 减 d）+ 阴影收缩 1px
-        app._classic_press(row)
-        app.update()
-        top, bot = app._pack_pady(frame)
-        assert (top, bot) == (base_top + d, max(0, base_bot - d)), \
-            f"按下应下沉 {d}px（实测 pady {(top, bot)} vs 基准 {(base_top, base_bot)}）"
-        assert int(row["_shadow_bar"].place_info()["height"]) == 1, \
-            "按下阴影应收缩为 1px"
-        # 释放：回弹动画结束（~140ms）后归位 + 阴影恢复 2px
-        app._classic_release(row)
-        deadline = _time.time() + 2.0
-        while _time.time() < deadline and row.get("_press_anim") is not None:
-            app.update()
-            _time.sleep(0.02)
-        app.update()
-        top, bot = app._pack_pady(frame)
-        assert (top, bot) == (base_top, base_bot), \
-            "释放回弹结束应恢复基准 pady"
-        assert int(row["_shadow_bar"].place_info()["height"]) == \
-            max(1, app._dpx(2)), "释放结束阴影应恢复厚度"
-
-    def test_press_animation_cancelled_on_deselect(self, app):
-        """优化缺陷R96：动画进行中换选 → 旧行动画取消，pady 不被
-        动画结束帧写回旧基准（防覆盖未选中 pady=4）。"""
-        _run_paste_analysis(app, SAMPLE_PASTE)
-        app.update()
-        row = app._cluster_rows[0]
-        app._select_cluster(0)
-        app.update()
-        app._classic_press(row)            # 按下不放（动画未启动）
-        app.update()
-        app._select_cluster(1)             # 换选 → 应取消按压态
-        app.update()
-        assert row.get("_press_base") is None
-        assert row.get("_press_anim") is None
-
-
 class TestFontSizeSelector:
     def test_font_menu_exists_with_default(self, app):
         """修复R10：字体大小选择器存在且默认「中」。"""
@@ -950,15 +742,13 @@ class TestFontSizeSelector:
             "特大档全屏头部应 round(28×1.3)=36"
         assert app._font_size == "特大"
         assert app._config.get("font_size") == "特大", "档位应已持久化"
-        # 档位切换后行级原生标签重渲染（字号随档位；R16 起用 head 引用）
+        # 档位切换后行级原生标签重渲染（字号随档位；R97 池行 tk.Label 直取）
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
         head = app._cluster_rows[0]["head"]
-        inner = [c for c in head.winfo_children()
-                 if c.winfo_class() == "Label"][0]
-        size = int(tkfont.Font(font=inner.cget("font")).cget("size"))
+        size = int(tkfont.Font(font=head.cget("font")).cget("size"))
         # 特大档 29 号 vs 基准 22 号（同 DPI 系数下比例 ≈ 29/22）
-        assert size >= 26, f"特大档经典头部渲染 {size} 应 ≥26"
+        assert size >= 26, f"特大档头部渲染 {size} 应 ≥26"
         # 恢复默认档位（避免影响其他用例）
         app._apply_font_size("中")
         assert int(app._font_row_head.cget("size")) == 22
@@ -2576,10 +2366,10 @@ def _force_hscroll_range(app, extra=1200):
 
 class TestVirtualList:
     def test_virtual_list_activates_above_threshold(self, app):
-        """修复R6：列表超过阈值（40）切换虚拟滚动渲染。"""
-        from log_ai_compressor.gui.app import VIRTUAL_LIST_THRESHOLD
+        """修复R6/R97：大列表池化虚拟渲染（R97 后任意簇数一律虚拟，
+        经典滚动容器恒隐藏）。"""
         _run_many_clusters(app)
-        assert len(app._displayed) > VIRTUAL_LIST_THRESHOLD
+        assert len(app._displayed) > 40
         assert app._virtual_list is not None, "应启用虚拟列表"
         # 经典滚动容器隐藏
         assert not app._cluster_list.winfo_ismapped()
@@ -2619,12 +2409,14 @@ class TestVirtualList:
         assert max_idx >= len(app._displayed) - 5, \
             "滚动到底应显示尾部行"
 
-    def test_small_list_keeps_classic_mode(self, app):
-        """修复R6：小列表（<=阈值）保持经典 CTk 滚动列表。"""
+    def test_small_list_also_virtual(self, app):
+        """优化缺陷R97：小簇数同样虚拟渲染（渲染路径统一，不再有
+        经典/虚拟双轨；经典 hbar 恒隐藏）。"""
         _run_paste_analysis(app, SAMPLE_PASTE)
         app.update()
-        assert app._virtual_list is None
+        assert app._virtual_list is not None
         assert len(app._cluster_rows) == 2
+        assert not app._list_hbar.winfo_ismapped()
 
     def test_selected_highlight_on_virtual_row(self, app):
         """修复R6：虚拟行选中态蓝色高亮（与未选中区分）。"""
@@ -2994,54 +2786,47 @@ class TestClusterExpandMain:
         inst = app._displayed[row[1]].instances[row[2]]
         assert f"行 {inst.line_no}~" in detail
 
-    def test_expand_classic_shows_instances(self, app):
-        """经典模式：行内就地展开全部实例，点击看实例详情，收起销毁。
-
-        修复缺陷R28：R27 后实例行为 {label, wrap} 字典 —— 点击绑定
-        必须传字典（误传裸控件时 _classic_inst_click 取 inst_dict
-        ["label"] 报 TclError: unknown option "-label"，点击无反应）。
-        """
+    def test_expand_small_data_shows_instances(self, app):
+        """R97：小簇数同样虚拟渲染 —— 展开全部实例视图行，点击看
+        实例详情，收起移除视图行。"""
         _run_paste_analysis(app, self._repeat_log(8))
         app.update()
-        assert app._virtual_list is None, "小数据应走经典列表"
-        row = next(r for r in app._cluster_rows if r.get("idx") == 0)
-        assert "toggle" in row, "经典行应有「▶ ×N」展开按钮"
+        vl = app._virtual_list
+        assert vl is not None, "R97：小数据同样虚拟渲染"
+        slot0 = next(s for s in vl.slots
+                     if 0 <= s.get("idx", -1) < len(vl._data)
+                     and vl._data[s["idx"]] == ("c", 0))
+        assert str(slot0["toggle"].cget("text")).startswith("×"), \
+            "簇行应有「▶ ×N」展开按钮"
         insts = app._displayed[0].instances
         app._toggle_cluster_expand(0)
         app.update()
-        assert 0 in app._classic_expanded
-        state = app._classic_expanded[0]
-        assert len(state["labels"]) >= len(insts), "实例行应全量创建"
-        # 修复缺陷R34：▶/▼ 图标拆为独立 toggle_icon 等宽盒标签
-        assert row["toggle_icon"].cget("text") == "\u25bc", \
+        inst_rows = [r for r in vl._data if r[0] == "i" and r[1] == 0]
+        assert len(inst_rows) == len(insts), "实例应全量注入视图行"
+        assert str(slot0["toggle_icon"].cget("text")) == "\u25bc", \
             "展开后按钮应为 ▼"
-        # 修复缺陷R28：实例行为字典结构（label=CTkLabel, wrap=圆角容器）
-        first_d = state["labels"][0]
-        assert isinstance(first_d, dict) and "label" in first_d \
-            and "wrap" in first_d, "实例行应为 {label, wrap} 字典"
-        first = first_d["label"]
-        assert "L" in first.cget("text") and insts[0].summary[:8] \
-            in first.cget("text")
-        # 点击首个实例 → 右侧实例详情（R28 前：点击报错无反应）
-        # 注：CTkLabel.bind 绑定在内部 _label/_canvas 上，事件须发
-        # 到内部控件（真实鼠标点击命中的正是内部控件）
-        first._label.event_generate("<Button-1>", x=3, y=2)
+        # 点击首个实例行 → 右侧实例详情
+        islot = next(s for s in vl.slots
+                     if 0 <= s.get("idx", -1) < len(vl._data)
+                     and vl._data[s["idx"]] == ("i", 0, 0))
+        islot["summary"].event_generate("<Button-1>")
         app.update()
-        assert app._classic_inst_sel is first
+        assert app._selected_inst == (0, 0)
         detail = app._detail_box.get("1.0", "end")
         assert "【实例详情】" in detail
         assert f"行 {insts[0].line_no}~" in detail
-        # 选中态 3D 样式落在 wrap 上（R27：10px 圆角 + 2px 高光边）
-        assert first_d["wrap"].cget("border_width") == 2
+        # 选中态蓝底落在实例行 frame 上
+        assert str(islot["frame"].cget("bg")) == app._palette()["sel_bot"]
         # 收起
         app._toggle_cluster_expand(0)
         app.update()
-        assert 0 not in app._classic_expanded
-        assert not state["area"].winfo_exists(), "收起后实例区应销毁"
-        assert row["toggle_icon"].cget("text") == "\u25b6"
+        assert not [r for r in vl._data if r[0] == "i"], \
+            "收起后实例视图行应移除"
+        assert str(slot0["toggle_icon"].cget("text")) == "\u25b6"
 
-    def test_classic_instance_detail_shows_after_context(self, app):
-        """修复缺陷R44：点击实例 → 详情面板显示后上下文。
+    def test_virtual_instance_detail_shows_after_context(self, app):
+        """修复缺陷R44/R97：点击实例 → 详情面板显示后上下文（统一
+        虚拟渲染后实例为视图行）。
 
         后上下文待补队列此前仅对典型样例开启，实例 after 永远为空，
         展开簇点击实例时详情面板缺失「后上下文」区域（前上下文正常）。
@@ -3052,12 +2837,14 @@ class TestClusterExpandMain:
             for i in range(4))
         _run_paste_analysis(app, log)
         app.update()
-        assert app._virtual_list is None, "小数据应走经典列表"
+        vl = app._virtual_list
+        assert vl is not None, "R97：小数据同样虚拟渲染"
         app._toggle_cluster_expand(0)
         app.update()
-        state = app._classic_expanded[0]
-        first_d = state["labels"][0]
-        first_d["label"]._label.event_generate("<Button-1>", x=3, y=2)
+        islot = next(s for s in vl.slots
+                     if 0 <= s.get("idx", -1) < len(vl._data)
+                     and vl._data[s["idx"]] == ("i", 0, 0))
+        islot["summary"].event_generate("<Button-1>")
         app.update()
         detail = app._detail_box.get("1.0", "end")
         assert "【实例详情】" in detail
@@ -3080,36 +2867,42 @@ class TestClusterExpandMain:
         # 实例详情同口径
         app._toggle_cluster_expand(idx)
         app.update()
-        state = app._classic_expanded[idx]
-        state["labels"][0]["label"]._label.event_generate(
-            "<Button-1>", x=3, y=2)
+        vl = app._virtual_list
+        islot = next(s for s in vl.slots
+                     if 0 <= s.get("idx", -1) < len(vl._data)
+                     and vl._data[s["idx"]] == ("i", idx, 0))
+        islot["summary"].event_generate("<Button-1>")
         app.update()
         detail = app._detail_box.get("1.0", "end")
         assert "后上下文" in detail, "实例详情应固定显示后上下文区块"
         assert "已到文件末尾" in detail
 
-    def test_expand_classic_head_alignment_stable(self, app):
-        """修复缺陷R34：展开/收起 ▶/▼ 切换，头部内容起始 x 不变。
+    def test_expand_virtual_head_alignment_stable(self, app):
+        """修复缺陷R34/R97：展开/收起 ▶/▼ 切换，头部内容起始 x 不变
+        （统一虚拟渲染后图标等宽盒 icon_box 固定宽，place 居中换字形）。
 
         ▶ 比 ▼ 字形宽 8~10px，合写单标签时切换推动后续文字位移
         （展开行与未展开行头部不对齐）；图标等宽盒后位置不变。
         """
         _run_paste_analysis(app, self._repeat_log(8))
         app.update()
-        assert app._virtual_list is None, "小数据应走经典列表"
-        row = next(r for r in app._cluster_rows if r.get("idx") == 0)
+        vl = app._virtual_list
+        assert vl is not None, "R97：小数据同样虚拟渲染"
+        slot0 = next(s for s in vl.slots
+                     if 0 <= s.get("idx", -1) < len(vl._data)
+                     and vl._data[s["idx"]] == ("c", 0))
         app.update()
-        x_collapsed = row["head"].winfo_x()
-        icon_w0 = row["toggle_icon"].winfo_width()
+        x_collapsed = slot0["head"].winfo_x()
+        icon_w0 = slot0["icon_box"].winfo_width()
         app._toggle_cluster_expand(0)
         app.update()
-        assert row["head"].winfo_x() == x_collapsed, \
+        assert slot0["head"].winfo_x() == x_collapsed, \
             "展开后头部文字起始 x 不变"
-        assert row["toggle_icon"].winfo_width() == icon_w0, \
+        assert slot0["icon_box"].winfo_width() == icon_w0, \
             "图标盒宽不随 ▼ 切换变化"
         app._toggle_cluster_expand(0)
         app.update()
-        assert row["head"].winfo_x() == x_collapsed, \
+        assert slot0["head"].winfo_x() == x_collapsed, \
             "收起后头部文字起始 x 复原"
 
     def test_rerender_clears_expand_state(self, app):
@@ -3424,17 +3217,20 @@ class TestMainWindowSearch:
             f"排除框右缘应贴近行尾（实测余量 {tail} 物理 px）"
 
     def test_search_filters_classic_list(self, app):
-        """输入关键字 → 经典列表只显示匹配簇 + 计数标签。"""
+        """输入关键字 → 列表只显示匹配簇 + 计数标签（R97 统一虚拟渲染；
+        池槽数为容量口径，可见行数以视图行 _data 为准）。"""
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
-        assert app._virtual_list is None
-        assert len(app._cluster_rows) == 2
+        assert app._virtual_list is not None
+        assert len(app._virtual_list._data) == 2
         app._search_var.set("kernel")
         app._apply_search_filter()
         app.update()
-        assert len(app._cluster_rows) == 1
-        row = app._cluster_rows[0]
-        assert "kernel" in app._displayed[row["idx"]].summary
+        assert len(app._virtual_list._data) == 1, "过滤后视图行应只剩匹配簇"
+        # 池槽只增不减（隐藏槽残留旧 idx），可见性以视图行 _data 为准
+        vrow = app._virtual_list._data[0]
+        assert vrow[0] == "c"
+        assert "kernel" in app._displayed[vrow[1]].summary
         # 优化缺陷R56：计数 = 命中实例条数（kernel 簇 ×3 实例均含关键字）
         assert app._search_count.cget("text") == "0 / 3 条"
 
@@ -3445,11 +3241,11 @@ class TestMainWindowSearch:
         app._search_var.set("kernel")
         app._apply_search_filter()
         app.update()
-        assert len(app._cluster_rows) == 1
+        assert len(app._virtual_list._data) == 1
         app._search_var.set("")
         app._apply_search_filter()
         app.update()
-        assert len(app._cluster_rows) == 2
+        assert len(app._virtual_list._data) == 2
         assert app._search_count.cget("text") == ""
 
     def test_search_no_match_shows_hint(self, app):
@@ -3667,8 +3463,9 @@ class TestMainWindowSearch:
         assert app._search_count.cget("text") == "6 / 6 条", \
             "点选实例行应对齐该实例自身序号"
 
-    def test_enter_nav_instance_blue_classic(self, app):
-        """优化缺陷R57：经典模式 Enter 定位实例行着蓝色选中样式。"""
+    def test_enter_nav_instance_blue_virtual(self, app):
+        """优化缺陷R57/R97：Enter 定位实例行着蓝色选中样式（统一
+        虚拟渲染后实例为视图行，选中蓝底落在池行 frame）。"""
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
         app._search_var.set("error")
@@ -3679,11 +3476,15 @@ class TestMainWindowSearch:
             app.update()
             time.sleep(0.01)
         ci, ii = app._selected_inst
-        st = app._classic_expanded.get(ci)
-        assert st is not None and ii < len(st["labels"])
         sel = app._palette()["sel_bot"]
-        wrap = st["labels"][ii]["wrap"]
-        assert wrap.cget("fg_color") == sel, \
+        vl = app._virtual_list
+
+        def inst_slot(c, i):
+            return next(s for s in vl.slots
+                        if 0 <= s.get("idx", -1) < len(vl._data)
+                        and vl._data[s["idx"]] == ("i", c, i))
+        wrap = inst_slot(ci, ii)
+        assert str(wrap["frame"].cget("bg")) == sel, \
             "Enter 定位的实例行应着蓝色选中样式"
         # 再 Enter：新实例行着蓝、旧实例行恢复默认
         app._on_search_enter(True)
@@ -3692,26 +3493,25 @@ class TestMainWindowSearch:
             time.sleep(0.01)
         ci2, ii2 = app._selected_inst
         assert (ci2, ii2) != (ci, ii)
-        wrap2 = app._classic_expanded[ci2]["labels"][ii2]["wrap"]
-        assert wrap2.cget("fg_color") == sel
-        assert wrap.cget("fg_color") != sel, "旧实例行应恢复未选中样式"
+        wrap2 = inst_slot(ci2, ii2)
+        assert str(wrap2["frame"].cget("bg")) == sel
+        assert str(wrap["frame"].cget("bg")) != sel, \
+            "旧实例行应恢复未选中样式"
 
-    def test_instance_click_marks_blue_classic(self, app):
-        """优化缺陷R57：经典模式点击实例行同样着蓝色选中样式。"""
+    def test_instance_click_marks_blue_virtual(self, app):
+        """优化缺陷R57/R97：点击实例行同样着蓝色选中样式（虚拟视图行）。"""
         _run_paste_analysis(app, self._two_cluster_log())
         app.update()
         app._toggle_cluster_expand(0)
-        for _ in range(10):
-            app.update()
-            time.sleep(0.01)
-        st = app._classic_expanded[0]
-        # CTkLabel.bind 转发到内部 canvas（真实点击落点），事件须发到内层
-        st["labels"][1]["label"]._canvas.event_generate("<Button-1>",
-                                                        x=3, y=2)
+        app.update()
+        vl = app._virtual_list
+        slot = next(s for s in vl.slots
+                    if 0 <= s.get("idx", -1) < len(vl._data)
+                    and vl._data[s["idx"]] == ("i", 0, 1))
+        slot["summary"].event_generate("<Button-1>")
         app.update()
         assert app._selected_inst == (0, 1)
-        assert st["labels"][1]["wrap"].cget("fg_color") == \
-            app._palette()["sel_bot"]
+        assert str(slot["frame"].cget("bg")) == app._palette()["sel_bot"]
 
     def test_filtered_out_selection_auto_moves_to_first_match(self, app):
         """当前选中簇被过滤掉时自动选中首个匹配簇（详情不滞留陈旧内容）。"""
