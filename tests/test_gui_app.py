@@ -4813,6 +4813,85 @@ class TestAdvancedPanel:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R111：已知错误屏蔽
+# ---------------------------------------------------------------------------
+class TestMuteClusters:
+    def test_mute_button_initially_disabled(self, app):
+        """未选簇时屏蔽按钮置灰。"""
+        assert str(app._mute_btn.cget("state")) == "disabled"
+
+    def test_mute_hides_cluster_and_indicator(self, app):
+        """屏蔽当前簇：列表隐藏该簇 + 🚫 指示器出现且计数正确。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        total = len(app._result.clusters)
+        target = app._result.clusters[0]
+        app._show_cluster_detail(target)
+        app.update()
+        assert str(app._mute_btn.cget("state")) == "normal"
+        app._toggle_mute_current()
+        app.update()
+        key = app._mute_key(target)
+        assert key in app._muted
+        # 视图行不再含该簇（默认隐藏）
+        visible = {r[1] for r in app._build_view_rows() if r[0] == "c"}
+        idx = app._displayed.index(target)
+        assert idx not in visible
+        # 指示器显示且计数 1
+        assert app._mute_ind_btn.winfo_ismapped()
+        assert app._mute_ind_btn.cget("text") == "🚫 1"
+        # 屏蔽不删数据：_displayed 仍是全量
+        assert len(app._displayed) == total
+
+    def test_show_muted_toggle_reveals(self, app):
+        """🚫 指示器点击：显示已屏蔽簇，再点恢复隐藏。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        target = app._result.clusters[0]
+        app._show_cluster_detail(target)
+        app._toggle_mute_current()
+        app.update()
+        idx = app._displayed.index(target)
+        app._toggle_show_muted()     # 显示
+        app.update()
+        visible = {r[1] for r in app._build_view_rows() if r[0] == "c"}
+        assert idx in visible
+        assert app._show_muted is True
+        app._toggle_show_muted()     # 再隐藏
+        app.update()
+        visible = {r[1] for r in app._build_view_rows() if r[0] == "c"}
+        assert idx not in visible
+
+    def test_unmute_restores(self, app):
+        """取消屏蔽：簇重新可见，配置集合清空。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        target = app._result.clusters[0]
+        app._show_cluster_detail(target)
+        app._toggle_mute_current()
+        app.update()
+        # 显示已屏蔽后选中该簇再取消屏蔽
+        app._toggle_show_muted()
+        app.update()
+        app._show_cluster_detail(target)
+        app._toggle_mute_current()
+        app.update()
+        assert app._mute_key(target) not in app._muted
+        assert not app._mute_ind_btn.winfo_ismapped(), \
+            "无被屏蔽簇时指示器应隐藏"
+
+    def test_muted_persisted_to_config(self, app):
+        """屏蔽集合写入配置字典（重启可恢复）。"""
+        _run_paste_analysis(app, SAMPLE_PASTE)
+        app.update()
+        target = app._result.clusters[0]
+        app._show_cluster_detail(target)
+        app._toggle_mute_current()
+        cfg = app._current_config_dict()
+        assert app._mute_key(target) in cfg["muted"]
+
+
+# ---------------------------------------------------------------------------
 # 优化缺陷R105：实时 Tail 监控
 # ---------------------------------------------------------------------------
 class TestTailMonitor:
