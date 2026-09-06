@@ -116,7 +116,7 @@ def analyze_clusters(result: AnalysisResult) -> float:
     if clusters:
         _mark_anomalies(clusters, result.global_hist, result.stats)
         _mark_root_causes(clusters)
-        _compute_priorities(clusters)
+        _compute_priorities(clusters, result.stats)
         _sort_clusters(clusters)
     result.stats.analysis_cost = time.perf_counter() - t0
     return result.stats.analysis_cost
@@ -416,24 +416,57 @@ _LEVEL_BANDS = {
 }
 
 
-def _compute_priorities(clusters: List[ErrorCluster]) -> None:
+# 优化缺陷R77：持续性/新生度判定参数
+ONGOING_WINDOW_SEC = 60.0      # 末见距日志末尾 ≤60s 视为「持续发生」
+NEW_PATTERN_TAIL_RATIO = 0.75  # 首现于日志后 25% 时段视为「新生模式」
+
+
+def _compute_priorities(clusters: List[ErrorCluster],
+                        stats: RunStats) -> None:
+    """优先级综合评分（优化缺陷R77：加持续性/新生度，评分构成落库）。
+
+    权重：级别 35% + 频次（对数归一）25% + 根因 20% + 异常 10% +
+    持续 5%（末见贴日志末尾，此刻还在炸）+ 新生 5%（后段才出现的
+    新模式）；每项贡献与档位钳制说明写入 c.priority_detail，
+    供详情面板展示"这分是怎么算的"。
+    """
     max_count = max((c.count for c in clusters), default=0)
     denom = math.log10(max_count + 1) if max_count > 1 else 1.0
+    duration: Optional[float] = None
+    if stats.time_start is not None and stats.time_end is not None:
+        duration = stats.time_end - stats.time_start
     for c in clusters:
         level_w = LEVEL_WEIGHT.get(c.level, 0.5)
         freq = math.log10(c.count + 1) / denom if max_count > 1 else 1.0
         root = 1.0 if c.is_root_cause else 0.0
         anomaly = 1.0 if c.anomaly else 0.0
-        # 权重：级别 40% + 频次 30% + 根因 20% + 异常 10%
-        score = 100.0 * (0.40 * level_w + 0.30 * freq + 0.20 * root + 0.10 * anomaly)
+        ongoing = 0.0
+        if (stats.time_end is not None and c.last_seen is not None
+                and 0 <= stats.time_end - c.last_seen
+                <= ONGOING_WINDOW_SEC):
+            ongoing = 1.0
+        new_pat = 0.0
+        if (duration and duration > 0 and c.first_seen is not None
+                and c.first_seen >= stats.time_start
+                + NEW_PATTERN_TAIL_RATIO * duration):
+            new_pat = 1.0
+        parts = (("级别", 35.0 * level_w), ("频次", 25.0 * freq),
+                 ("根因", 20.0 * root), ("异常", 10.0 * anomaly),
+                 ("持续", 5.0 * ongoing), ("新生", 5.0 * new_pat))
+        score = sum(v for _, v in parts)
         # 修复缺陷R40：按级别分档钳制（ERROR 保底 80 确保 P0 前置；
         # 原 FATAL 强制 90 随 FATAL 删除移除）
         lo, hi = _LEVEL_BANDS.get(c.level, (None, None))
-        if lo is not None:
-            score = max(score, lo)
-        if hi is not None:
-            score = min(score, hi - 0.1)
+        clamp_note = ""
+        if lo is not None and score < lo:
+            score = lo
+            clamp_note = f"（{c.level} 档保底 {lo:.0f}）"
+        elif hi is not None and score >= hi:
+            score = hi - 0.1
+            clamp_note = f"（{c.level} 档封顶 {hi - 0.1:.0f}）"
         c.priority = round(score, 1)
+        segs = [f"{k}{v:.0f}" for k, v in parts if v > 0.05]
+        c.priority_detail = "+".join(segs) + clamp_note
 
 
 def _sort_clusters(clusters: List[ErrorCluster]) -> None:

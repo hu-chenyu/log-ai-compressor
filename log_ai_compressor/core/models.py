@@ -211,6 +211,13 @@ class ErrorCluster:
     root_cause_reason: str = ""
     anomaly: str = ""                    # 'burst'/'periodic'/'novel'/'rare'/''
     priority: float = 0.0
+    # 优化缺陷R77：优先级评分构成（详情面板判断依据，
+    # 形如 "级别35+频次25+根因20（ERROR 档保底 80）"）
+    priority_detail: str = ""
+    # 优化缺陷R78：相似簇关联（模板 Jaccard ≥0.8 的簇 id 列表）
+    related_clusters: List[int] = field(default_factory=list)
+    # 优化缺陷R78：根因时间线叙事（因果图传播链文本，仅根因簇有值）
+    root_timeline: str = ""
 
     @property
     def level_weight(self) -> float:

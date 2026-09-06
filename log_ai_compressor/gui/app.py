@@ -5249,9 +5249,12 @@ class LogCompressorApp(_make_app_base()):
         meta(f"出现 {cluster.count} 次 | 级别 {cluster.level} | "
              f"模块 {cluster.module or '-'} | "
              f"行 {cluster.first_line}~{cluster.last_line}")
+        # 优化缺陷R77：优先级附评分构成（判断依据，这分怎么算的）
+        prio = f"优先级 {cluster.priority_label}（{cluster.priority:.0f}）"
+        if cluster.priority_detail:
+            prio += f" = {cluster.priority_detail}"
         meta(f"时间范围 {format_timestamp(cluster.first_seen)} ~ "
-             f"{format_timestamp(cluster.last_seen)} | "
-             f"优先级 {cluster.priority_label}（{cluster.priority:.0f}）")
+             f"{format_timestamp(cluster.last_seen)} | {prio}")
         notes = []
         if cluster.is_root_cause:
             notes.append(f"根因：{cluster.root_cause_reason}")

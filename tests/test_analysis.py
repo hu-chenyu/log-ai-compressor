@@ -381,6 +381,57 @@ class TestPriority:
 
 
 # ---------------------------------------------------------------------------
+# 优化缺陷R77：优先级强化（持续性/新生度 + 评分构成落库）
+# ---------------------------------------------------------------------------
+class TestPriorityEnhanced:
+    @staticmethod
+    def _with_time(result, t0, t1):
+        result.stats.time_start, result.stats.time_end = t0, t1
+        return result
+
+    def test_ongoing_boosts_priority(self):
+        """末见贴日志末尾（≤60s）→ 持续 +5，评分构成含「持续」。"""
+        t0, t1 = 1704067200.0, 1704067600.0
+        old = make_cluster(0, "old warn", level="WARN", count=10,
+                           first_seen=t0, first_line=1)
+        old.last_seen = t0 + 100
+        hot = make_cluster(1, "hot warn", level="WARN", count=10,
+                           first_seen=t0, first_line=2)
+        hot.last_seen = t1 - 10
+        result = self._with_time(
+            make_result([old, hot], error_entries=20), t0, t1)
+        analyze_clusters(result)
+        assert "持续" in hot.priority_detail
+        assert "持续" not in old.priority_detail
+        assert hot.priority > old.priority
+
+    def test_new_pattern_boosts_priority(self):
+        """首现于日志后 25% 时段 → 新生 +5，评分构成含「新生」。"""
+        t0, t1 = 1704067200.0, 1704067600.0
+        early = make_cluster(0, "early warn", level="WARN", count=10,
+                             first_seen=t0 + 10, first_line=1)
+        early.last_seen = t0 + 10
+        late = make_cluster(1, "late warn", level="WARN", count=10,
+                            first_seen=t0 + 330, first_line=2)
+        late.last_seen = t0 + 330     # 距末尾 70s：新生但不持续
+        result = self._with_time(
+            make_result([early, late], error_entries=20), t0, t1)
+        analyze_clusters(result)
+        assert "新生" in late.priority_detail
+        assert "新生" not in early.priority_detail
+        assert "持续" not in late.priority_detail
+        assert late.priority > early.priority
+
+    def test_priority_detail_recorded(self):
+        """评分构成落库：含各级别分项与档位钳制说明（判断依据）。"""
+        c = make_cluster(0, "minor error", level="ERROR", count=1)
+        result = make_result([c], error_entries=1)
+        analyze_clusters(result)
+        assert "级别" in c.priority_detail
+        assert "保底" in c.priority_detail, "ERROR 档钳制应注明"
+
+
+# ---------------------------------------------------------------------------
 # 时间格式化
 # ---------------------------------------------------------------------------
 class TestFormatTimestamp:
