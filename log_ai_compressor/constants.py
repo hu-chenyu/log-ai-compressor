@@ -10,10 +10,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-APP_NAME = "log-ai-compressor"
-APP_VERSION = "1.0.0"
-HUMAN_NAME = "日志AI压缩器"
-
 # ---------------------------------------------------------------------------
 # 日志级别体系
 # ---------------------------------------------------------------------------
@@ -90,22 +86,6 @@ def normalize_level(raw: str) -> str:
 # ---------------------------------------------------------------------------
 # 堆栈跟踪与降噪规则
 # ---------------------------------------------------------------------------
-# 判定一行是否为堆栈帧的启发特征（顺序敏感，先判 Java/C 再判 Python）
-STACK_FRAME_HINTS = tuple(
-    re.compile(p)
-    for p in (
-        r"^\s*at\s+[\w$.]+\(.*\)",              # Java: at com.foo.Bar.run(Bar.java:10)
-        r"^\s*Caused by\s*:?",                  # Java: Caused by: java.lang.Null...
-        r"^Traceback \(most recent call last\)",  # Python 回溯头
-        r'^\s*File\s+"[^"]+".*,\s*line\s+\d+',   # Python: File "x.py", line 1
-        r"^\s*raise\s+\w",                      # Python: raise ValueError(...)
-        r"^\s*#?\d+\s+0x[0-9a-f]+\s+in\s+\S+",  # Go/C: 8 0x4a1b2c in main.main
-        r"^Backtrace:",                          # 通用 Backtrace 头
-        r"^\s*~?\$?\s*0x[0-9a-fA-F]{4,}\s*<",   # 带地址的符号帧
-        r"^[A-Za-z_][\w.$]*(?:Exception|Error|Fault|Interrupt)\s*[:({]",  # 异常摘要行
-    )
-)
-
 # 堆栈降噪：系统库 / 第三方框架帧特征（匹配则视为噪声帧，折叠隐藏）
 STACK_NOISE_PATTERNS = tuple(
     re.compile(p, re.IGNORECASE)
@@ -160,11 +140,6 @@ def is_noise_stack_frame(line: str) -> bool:
     return any(p.search(line) for p in STACK_NOISE_PATTERNS)
 
 
-def looks_like_stack_frame(line: str) -> bool:
-    """启发式判断一行是否为堆栈帧 / 回溯行。"""
-    return any(p.search(line) for p in STACK_FRAME_HINTS)
-
-
 # ---------------------------------------------------------------------------
 # 智能分析词表
 # ---------------------------------------------------------------------------
@@ -199,7 +174,6 @@ CASCADE_KEYWORDS = (
 # 常量移除）——过大值的内存代价随「上下文行数×簇数」线性增长，由用户
 # 按需控制；下限保留（GUI 5 行 / 配置 0 行）
 DEFAULT_CONTEXT_LINES = 50     # 典型样例前后上下文行数
-MIN_CONTEXT_LINES = 5          # 上下文行数下限（GUI 输入钳制）
 DEFAULT_TOP_N = 20             # 默认展示 / 导出的 Top N 错误数（无上限）
 CLUSTER_SIMILARITY_THRESHOLD = 0.85   # 聚类编辑距离相似度阈值
 # 优化缺陷R84：相似度阈值三档预设（严格=几乎相同才并簇 / 标准=默认
