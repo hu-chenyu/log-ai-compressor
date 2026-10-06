@@ -119,6 +119,78 @@ class TestMatchLine:
         # 模块未用括号包裹时由解析器后处理推断，此处 message 含模块词
         assert "auth" in m.group("message")
 
+    # -- ZooKeeper / log4j2 的「<时间戳> - <级别> [<模块>] - <内容>」 --
+    # Loghub 实测：此前整份 ZooKeeper 日志掉进无结构兜底，89 种标注
+    # 事件只覆盖 64 种，message 里还留着完整时间戳。这几条钉住该格式。
+
+    def test_zookeeper_dash_level_module(self, generic):
+        m = generic.match_line(
+            "2015-07-29 17:41:41,555 - INFO  [main:DatadirCleanupManager@79] "
+            "- autopurge.purgeInterval set to 0")
+        assert m is not None, "ZooKeeper 风格应命中 iso_dash_level_module"
+        assert m.group("timestamp") == "2015-07-29 17:41:41,555"
+        assert m.group("level") == "INFO"
+        assert m.group("module") == "main:DatadirCleanupManager@79"
+        assert m.group("message") == "autopurge.purgeInterval set to 0"
+
+    def test_zookeeper_module_with_nested_brackets(self, generic):
+        """模块串内部自带方括号（QuorumPeer[myid=1]/...）时不能被截断。
+
+        普通 [^)\\]] 类在第一个 ] 处就断了，会把后面整段错当 message。
+        """
+        m = generic.match_line(
+            "2015-07-29 17:42:28,549 - INFO  "
+            "[QuorumPeer[myid=1]/0:0:0:0:0:0:0:0:2181:Environment@100] "
+            "- Server environment:host.name=node1")
+        assert m is not None
+        assert m.group("module") == (
+            "QuorumPeer[myid=1]/0:0:0:0:0:0:0:0:2181:Environment@100")
+        assert m.group("message") == "Server environment:host.name=node1"
+
+    def test_dash_level_without_module(self, generic):
+        m = generic.match_line("2024-01-01 10:00:00 - ERROR - Failed to start")
+        assert m is not None
+        assert m.group("level") == "ERROR"
+        assert m.group("message") == "Failed to start"
+
+    def test_new_pattern_does_not_hijack_bracket_module(self, generic):
+        """新增规则不能抢走原有 iso_level_module 的匹配（方括号模块格式）。"""
+        m = generic.match_line(
+            "2024-01-01 10:00:00,123 ERROR [db] Connection refused")
+        assert m.group("module") == "db"
+        assert m.group("message").strip() == "Connection refused"
+        assert m.group("timestamp") == "2024-01-01 10:00:00,123"
+
+    # -- 管道分隔设备日志（Android/嵌入式），无级别字段 --
+    # Loghub HealthApp 实测：此前整行落入 message，时间戳为 None、
+    # 直方图为空，156 种标注事件只覆盖 123 种。
+
+    def test_pipe_delimited_device_log(self, generic):
+        m = generic.match_line(
+            "20171223-22:15:29:606|Step_LSC|30002312|onStandStepChanged 3579")
+        assert m is not None, "管道分隔设备日志应命中 pipe_delimited_device"
+        assert m.group("timestamp") == "20171223-22:15:29:606"
+        assert m.group("module") == "Step_LSC"
+        # 末尾附加字段（用户 id）被丢弃，最后一段才是消息
+        assert m.group("message") == "onStandStepChanged 3579"
+        # 该格式无级别字段，留空交由关键词推断兜底
+        assert (m.groupdict().get("level") or "") == ""
+
+    def test_pipe_delimited_timestamp_parsed(self, generic):
+        """时间戳组能真正解析成 epoch 秒（此前为 None，直方图整个是空的）。"""
+        from log_ai_compressor.core.parser import TimestampParser
+        m = generic.match_line(
+            "20171223-22:15:29:606|Step_LSC|30002312|onStandStepChanged 3579")
+        epoch = TimestampParser().parse(m.group("timestamp"))
+        assert epoch is not None, "紧凑时间戳应能解析"
+        # 毫秒位 :606 按 strptime %f 语义 = 0.606 秒
+        assert abs(epoch % 1 - 0.606) < 1e-6
+
+    def test_pipe_pattern_requires_compact_date(self, generic):
+        """时间戳要求紧凑无分隔日期，避免与普通 CSV/管道转储误匹配。"""
+        assert generic.match_line(
+            "2024-01-01 10:00:00|Some Module|1234|hello") is None
+
     def test_gcc_lowercase_level(self, generic):
         m = generic.match_line("src/main.c:42:15: error: expected ';' before '}'")
         assert m is not None
