@@ -16,7 +16,12 @@ jobs:
       fail-fast: false          # 矩阵里任一格失败不影响其它格的结果可见性
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.9" }
+          # 三条矩阵的理由（别随手加）：
+          #   3.11 = pyproject 的 requires-python 下限，改这里必须同步改那边
+          #   3.12 = 当前最常用的版本
+          #   windows = 行尾 / shell / 路径处理与 unix 不同，且本项目有
+          #            start.bat 这个 Windows 一等入口，必须真机验
+          - { os: ubuntu-latest, python: "3.11" }
           - { os: ubuntu-latest, python: "3.12" }
           - { os: windows-latest, python: "3.12" }
     runs-on: ${{ matrix.os }}
@@ -51,36 +56,20 @@ jobs:
         # 在三个平台上行为一致。
         shell: python
         run: |
-          import pathlib
           import subprocess
           import sys
 
-          # mcp SDK 要求 Python >= 3.10。3.9 上装不上、tests/test_mcp.py 会
-          # 整体 importorskip 跳过，此时把 mcp 包移出覆盖率口径 ——
-          # 跑不了的代码不该把门槛拖到不及格；在装得上的矩阵上必须计入，
-          # 否则覆盖率就成了一个没人看的数字。
-          # （pytest-cov 没有 --cov-omit 参数，只能换一份 coveragerc）
-          extra = []
-          try:
-              __import__("mcp")
-          except ImportError:
-              pathlib.Path(".coveragerc.ci").write_text(
-                  "[run]\nomit =\n"
-                  "    log_ai_compressor/cli.py\n"
-                  "    log_ai_compressor/mcp/*\n",
-                  encoding="utf-8")
-              extra = ["--cov-config=.coveragerc.ci"]
-              print("::notice::mcp 不可用（Python 版本过低），本次不计入 mcp 覆盖率")
-
-          code = subprocess.call([
+          # 地板已抬到 3.11，mcp / web / ai 三个 extra 在所有矩阵上都装得上，
+          # 所以覆盖率口径统一用 pyproject 的配置，不再需要临时 coveragerc 分支
+          # （那条分支是 Python 3.9 时代的产物：mcp 装不上时把 mcp 包移出统计，
+          # 免得跑不了的代码把门槛拖到不及格。现在没有"跑不了"的矩阵了。）
+          sys.exit(subprocess.call([
               sys.executable, "-m", "pytest",
-              "--cov=log_ai_compressor", *extra,
+              "--cov=log_ai_compressor",
               "--cov-report=term-missing",
               "--cov-report=xml",
               "--cov-fail-under=90",
-          ])
-          pathlib.Path(".coveragerc.ci").unlink(missing_ok=True)
-          sys.exit(code)
+          ]))
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4

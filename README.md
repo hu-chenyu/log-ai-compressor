@@ -6,7 +6,7 @@
 > **所有计算在本机完成，日志不出网。**
 
 [![CI](https://github.com/hu-chenyu/log-ai-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/log-ai-compressor/actions)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](./pyproject.toml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](./pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./pyproject.toml)
 
 ---
@@ -318,7 +318,7 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 | 指标 | 实测值 |
 | --- | --- |
 | 测试 | **558 用例**，覆盖率 **91.31%**，`ruff` 全绿 |
-| CI | Ubuntu 3.9 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿 |
+| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿 |
 | 内存 | 与日志总行数无关，只与错误种类数相关 |
 | 硬依赖 | 仅 PyYAML（web / mcp / ai 全部为可选 extra） |
 
@@ -402,7 +402,9 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 | `test_ai.py` | 配置优先级、提示词、客户端（mock 网络）、可选性 | < 1s |
 | `test_*.py`（core） | 解析 / 聚类 / 分析 / 导出 / 编码 / 对比 | ~2s |
 
-CI（GitHub Actions）：矩阵（Ubuntu/Windows × Python 3.9/3.12）自动执行规范检查、测试与覆盖率统计。
+CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
+`ubuntu-3.12`（最常用版本）、`windows-3.12`（行尾 / shell / 路径处理与
+unix 不同，且 `start.bat` 是 Windows 一等入口）。
 
 ### 启动脚本的硬约束
 
