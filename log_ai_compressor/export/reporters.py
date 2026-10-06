@@ -197,6 +197,21 @@ def token_report_line(result: AnalysisResult, compressed_text: str) -> str:
             f"≈{_fmt_tokens(comp)} tokens（压缩 {_ratio_text(comp, raw)}%）")
 
 
+def _header_meta_lines(result: AnalysisResult, compressed_text: str,
+                       prefix: str = "> ") -> str:
+    """头部元信息：token 估算行 +（必要时）级别过滤几乎全灭的提示。
+
+    提示单独成行而不是塞进 token 行，是因为两者回答的是不同问题：
+    一个是「压了多少」，一个是「为什么结果这么少」。后者不解释的话，
+    用户无法区分"日志里确实没错误"和"工具没解析出来"。
+    """
+    parts = [prefix + token_report_line(result, compressed_text)]
+    notice = getattr(result, "notice", None)
+    if notice:
+        parts.append(prefix + "⚠ " + notice)
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Markdown 报告
 # ---------------------------------------------------------------------------
@@ -252,7 +267,7 @@ def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
             text = "\n".join(lines)
             return text.replace(
                 "__TOKEN_LINE_R99__",
-                "> " + token_report_line(result, text)) + "\n"
+                _header_meta_lines(result, text)) + "\n"
         lines.append("| # | 优先级 | 级别 | 次数 | 模块 | 根因 | 异常 | 错误摘要 |")
         lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
         for i, c in enumerate(clusters, 1):
@@ -274,7 +289,7 @@ def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
     # 优化缺陷R99：回填 token 估算行（按最终全文长度估算压缩侧）
     text = "\n".join(lines)
     text = text.replace("__TOKEN_LINE_R99__",
-                        "> " + token_report_line(result, text))
+                        _header_meta_lines(result, text))
     return text + "\n"
 
 
@@ -380,7 +395,7 @@ def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
     # 优化缺陷R99：头部第二行插入 token 估算（粘贴投喂 AI 时自带
     # 压缩率；按最终文本长度估算，忽略本行自身的自引用误差）
     body = "\n".join(out)
-    out.insert(1, token_report_line(result, body))
+    out.insert(1, _header_meta_lines(result, body, prefix=""))
     return "\n".join(out)
 
 
@@ -485,6 +500,8 @@ def to_text(result: AnalysisResult, top_n: Optional[int] = None,
     out.append(f"日志AI压缩报告：{s.source}")
     out.append("=" * 60)
     out.append(f"生成: log-ai-compressor v{__version__} | 规则 {s.rule_name}")
+    if result.notice:
+        out.append(f"! 提示: {result.notice}")
     out.append(f"{_VERDICT_LABEL.get((result.evidence or {}).get('verdict'), '初步根因')}: {_root_summary(result)}")
     ev = result.evidence or {}
     if ev.get("verdict") != "CONFIRMED":
@@ -604,6 +621,8 @@ header.band h1{margin:0 0 6px;font-size:22px}
 header.band .meta{opacity:.85;font-size:13px}
 .root{margin:16px 0;background:#fff7ed;border:1px solid #fdba74;
 border-left:6px solid #f97316;border-radius:10px;padding:12px 16px;font-size:14px}
+.notice{margin:16px 0;background:#eff6ff;border:1px solid #bfdbfe;
+border-left:6px solid #3b82f6;border-radius:10px;padding:12px 16px;font-size:14px}
 .card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;
 padding:16px 20px;margin:16px 0;box-shadow:0 1px 3px rgba(15,23,42,.06)}
 h2{font-size:17px;margin:4px 0 12px;color:#1e40af;
@@ -673,6 +692,8 @@ def to_html(result: AnalysisResult, top_n: Optional[int] = None,
                f"{esc(_rate_text(s.lines_per_second))} | 规则 {esc(s.rule_name)}"
                f" | 时间范围 {esc(_ts_range(result))}</div>")
     out.append("</header>")
+    if result.notice:
+        out.append(f'<div class="notice"><b>提示：</b>{esc(result.notice)}</div>')
     ev = result.evidence or {}
     out.append(f'<div class="root"><b>'
                f'{esc(_VERDICT_LABEL.get(ev.get("verdict"), "初步定位根因"))}：</b>'

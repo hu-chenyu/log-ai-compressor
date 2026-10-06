@@ -162,6 +162,45 @@ class PipelineConfig:
     encoding: Optional[str] = None
 
 
+# 过滤近乎全灭时提示用户（避免"点了没反应"的静默失败）
+_NOTICE_MIN_ENTRIES = 50        # 小于此条目数不提示，避免样本噪声
+_NOTICE_MAX_KEEP_RATIO = 0.10   # 保留率低于 10% 即视为"过滤近乎全灭"
+_NOTICE_TOP_LEVELS = 5
+
+
+def _build_filter_notice(stats, clusters) -> Optional[str]:
+    """级别过滤几乎滤掉全部条目时，给出一句可操作的解释。
+
+    为什么要有这个：不少系统日志压根没有级别字段（Loghub HealthApp /
+    OpenStack 实测），所有行被判为 INFO，于是默认的 ERROR/FAIL 过滤
+    只剩 1.9% 的标注事件。用户指着日志点一下，拿到一份几乎空的报告
+    且**没有任何解释** —— 这是最坏的失败形态：看不出是"没有错误"
+    还是"工具坏了"。
+
+    刻意**不自动放宽过滤**：用户要的是错误，静悄悄改成全量输出会给出
+    他没要的东西，并且让压缩比之类的数字失去意义。这里只解释、不改行为。
+    """
+    total = stats.entry_lines
+    if total < _NOTICE_MIN_ENTRIES or not clusters:
+        return None
+    # 簇内实例数是"通过过滤的条目数"的准确值；但实例有全局上限
+    # （MAX_TOTAL_INSTANCES），极端情况下可能为 0，此时退回 error_entries，
+    # 免得"恰好没有可记录的实例"被误判成"过滤没生效"而静默。
+    kept = sum(len(c.instances) for c in clusters) or stats.error_entries
+    if kept <= 0 or kept / total > _NOTICE_MAX_KEEP_RATIO:
+        return None
+    levels = sorted(stats.level_counts.items(), key=lambda kv: -kv[1])
+    shown = " / ".join(f"{lv} {cnt:,}" for lv, cnt in levels[:_NOTICE_TOP_LEVELS])
+    more = " / …" if len(levels) > _NOTICE_TOP_LEVELS else ""
+    pct = kept / total * 100
+    return (
+        f"当前级别过滤只保留了 {kept:,} / {total:,} 条（{pct:.1f}%），"
+        f"其余条目未进入分析。这份日志识别到的级别分布：{shown}{more}。"
+        f"若日志确实没有错误，这属于正常结果；"
+        f"若怀疑是级别字段格式特殊导致的漏判，可用 --level INFO 查看全量摘要。"
+    )
+
+
 class LogPipeline:
     """单文件 / 单文本的流式分析管线（可复用，线程安全边界由调用方保证）。"""
 
@@ -349,6 +388,7 @@ class LogPipeline:
             clusters=clusterer.clusters,
             global_hist=global_hist,
             keywords=self._config.filter_config.normalized_include(),
+            notice=_build_filter_notice(stats, clusterer.clusters),
         )
         if self._config.analyze and result.clusters:
             # 优化缺陷R79：深度扫描模式降阈执行（完整模式默认阈值）

@@ -437,6 +437,9 @@ def result_to_dict(result: AnalysisResult, *, top_n: Optional[int] = None,
         # v2：证据充分性评估（analysis.assess_evidence 产出）
         "evidence": result.evidence or {},
         "keywords": list(result.keywords),
+        # 级别过滤几乎滤掉全部条目时的解释（Web/MCP 据此提示用户，
+        # 而不是让人对着空报告猜是"没错误"还是"工具坏了"）
+        "notice": result.notice or "",
         "global_hist": _hist(result.global_hist),
         "root_causes": [
             {"id": c.cluster_id, "summary": c.summary, "reason": c.root_cause_reason}
