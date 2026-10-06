@@ -17,6 +17,10 @@ htmlcov/
 .ruff_cache/
 .coveragerc.ci      # CI 在 mcp 不可用时临时生成的覆盖率配置
 
+# 基准数据集（Loghub 2.0 原始日志，几十 MB，不入库）
+data/
+!data/.gitkeep
+
 # 工具产物
 *.log.tmp
 perf_bench_*.log
