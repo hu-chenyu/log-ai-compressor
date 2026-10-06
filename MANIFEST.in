@@ -1,0 +1,36 @@
+# sdist 内容清单
+#
+# wheel 只装运行时需要的东西（包内代码 + package-data），
+# 但 sdist 是"源码交付"：拿到它的人应该能跑测试、读文档、复现 README
+# 里的示例命令。setuptools 默认只打包 .py 和声明的 package-data，
+# 于是 tests/ docs/ scripts/ examples/ 全部缺失 —— README 第一条命令
+# `log-ai-compressor run examples/sample_system.log` 直接跑不通。
+#
+# 另一件事：data/ 下是 Loghub 2.0 原始数据集（实测 178 MB）。
+# 它被 .gitignore 排除，但显式 prune 一遍更稳 —— 万一以后有人
+# 改了打包方式或加了 MANIFEST 规则，178 MB 进 sdist 会直接卡死上传。
+
+include LICENSE
+include README.md
+include requirements.txt
+include requirements-dev.txt
+include requirements-optional.txt
+include .gitattributes
+
+recursive-include tests *.py
+recursive-include scripts *.py
+recursive-include docs *.md
+recursive-include examples *.log *.md *.json
+
+# 运行时资源（wheel 由 [tool.setuptools.package-data] 负责，
+# 这里列出是为了 sdist 里也有，万一 package-data 规则变动不会连带失效）
+recursive-include log_ai_compressor/rules/presets *.yaml
+recursive-include log_ai_compressor/web/static *.html *.css *.js
+
+prune data
+prune .github
+
+global-exclude *.py[cod]
+global-exclude __pycache__/*
+global-exclude .coverage
+global-exclude .DS_Store
