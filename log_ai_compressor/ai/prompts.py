@@ -204,12 +204,3 @@ def build_cluster_prompt(ctx: Dict[str, Any], question: str = "") -> str:
     if question.strip():
         parts.append(f"\n## 用户额外追问\n{question.strip()}")
     return "\n".join(parts)
-
-
-def build_raw_chat_prompt(summary_text: str, question: str) -> str:
-    """兜底：用户直接贴报告文本时的通用问答。"""
-    return (
-        "以下是一份日志分析报告（已压缩）。请基于它回答问题，"
-        "证据不足时明说，不要编造。\n\n"
-        f"```\n{summary_text}\n```\n\n问题：{question}"
-    )

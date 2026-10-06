@@ -214,14 +214,14 @@ class TestSections:
         assert "典型样例详情" not in md
 
     def test_md_default_has_instances(self, result):
-        assert "实例行号" in to_markdown(result), "默认全板块含实例索引"
+        assert "实例（" in to_markdown(result), "默认全板块含实例索引"
         md = to_markdown(result, sections={"detail"})
-        assert "实例行号" not in md
+        assert "实例（" not in md
 
     def test_txt_sections(self, result):
         txt = to_text(result, sections={"overview", "instances"})
         assert "总行数" in txt
-        assert "实例行号" in txt
+        assert "实例（" in txt
         txt2 = to_text(result, sections={"overview"})
         assert "实例行号" not in txt2
 

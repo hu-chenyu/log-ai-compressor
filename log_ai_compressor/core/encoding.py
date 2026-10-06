@@ -156,8 +156,3 @@ def open_text_stream(path, encoding: str) -> TextIO:
         return _ZipTextStream(zf, _zip_log_member(zf), encoding)
     return open(path, "r", encoding=encoding, errors="replace",
                 buffering=1 << 20, newline="")
-
-
-def decode_text(text: str) -> str:
-    """粘贴文本的清洗（GUI 文本粘贴模式入口，保留原样）。"""
-    return text

@@ -36,12 +36,61 @@ def _sections(sections) -> set:
     return set(sections) if sections else set(SECTIONS_ALL)
 
 
+# 实例行号索引的展示上限。实测 OpenStack 上单个簇有 2000 个实例时，
+# 平铺成一行的实例行长达 16,828 字符，3 个簇的报告总长 27 万字符
+# （≈68k tokens）——「压缩成几百 token」的卖点在默认的 md 输出路径上
+# 直接失效。这里改成摘要式呈现。
+_INSTANCE_LIST_LIMIT = 12   # ≤此数量则全部列出（排查小簇确实需要全量）
+_INSTANCE_EDGE = 5          # 超出时首尾各列几个
+
+
+def _instance_density(c: ErrorCluster) -> str:
+    """行号间隔的中位数描述（回答「密不密」比列两千个行号有用）。
+
+    均匀分布与突发成团是完全不同的故障形态：前者多半是稳态刷屏，
+    后者更像一次集中爆发。只给行号列表时这两种在报告里长得一样。
+    """
+    nos = [i.line_no for i in c.instances if i.line_no > 0]
+    if len(nos) < 3:
+        return ""
+    gaps = sorted(b - a for a, b in zip(nos, nos[1:]) if b > a)
+    if not gaps:
+        return ""
+    mid = len(gaps) // 2
+    med = gaps[mid] if len(gaps) % 2 else (gaps[mid - 1] + gaps[mid]) / 2
+    if med <= 0:
+        return ""
+    # 用「一半的间隔落在 med 的 0.5~2 倍内」粗判是否均匀
+    spread = sum(1 for g in gaps if 0.5 * med <= g <= 2 * med)
+    kind = "均匀" if spread * 2 >= len(gaps) else "不均匀"
+    return f"，{kind}，约每 {int(med)} 行一次"
+
+
 def _instances_line(c: ErrorCluster) -> str:
-    """实例行号索引（紧凑单行：L266, L315, …；优化缺陷R58）。"""
+    """实例行号索引 —— 数量少时列全，数量多时给摘要。
+
+    刻意不做「全部列出」。人面对一个出现 2000 次的簇，需要的是
+    「多少次、分布在什么范围、密不密」，而不是两千个可以 Ctrl+F 的
+    行号（那正是让报告从 600 token 膨胀到 68k token 的原因）。
+    完整清单本来就在 JSON 导出里，按需取用。
+    """
     if not c.instances:
         return ""
-    refs = ", ".join(f"L{i.line_no}" for i in c.instances)
-    return f"实例行号（{len(c.instances)}）：{refs}"
+    n = len(c.instances)
+    total = c.count or n
+    # 发生次数与已记录行号数不一致（实例有内存上限）时要如实区分
+    tally = (f"{total} 次，已记录 {n} 处行号" if total != n
+             else f"{n} 处")
+    if n <= _INSTANCE_LIST_LIMIT:
+        refs = ", ".join(f"L{i.line_no}" for i in c.instances)
+        return f"实例（{tally}）：{refs}"
+
+    first = c.instances[0].line_no
+    last = c.instances[-1].line_no
+    head = ", ".join(f"L{i.line_no}" for i in c.instances[:_INSTANCE_EDGE])
+    tail = ", ".join(f"L{i.line_no}" for i in c.instances[-_INSTANCE_EDGE:])
+    return (f"实例（{tally}，跨 L{first}~L{last}{_instance_density(c)}）："
+            f"前 {head} … 后 {tail}（完整清单见 JSON 导出）")
 
 
 def _iso_ts(t: Optional[float]) -> Optional[str]:
