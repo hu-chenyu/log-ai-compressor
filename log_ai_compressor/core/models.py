@@ -298,7 +298,10 @@ class AnalysisResult:
     global_hist: TimeHistogram = field(
         default_factory=lambda: TimeHistogram(max_buckets=GLOBAL_HIST_MAX_BUCKETS)
     )
-    keywords: List[str] = field(default_factory=list)   # 高亮关键字
+    keywords: List[str] = field(default_factory=list)  # 高亮关键字
+    # 级别过滤几乎滤掉全部条目时的解释（pipeline._build_filter_notice 生成）。
+    # 只解释、不改变行为：自动放宽过滤会让用户拿到他没要的东西。
+    notice: Optional[str] = None
     # v2：证据充分性评估（analysis.assess_evidence 填充）。
     # 存 dict 而非 dataclass，避免 models ↔ analysis 循环 import；
     # 结构见 analysis.EvidenceAssessment.to_dict。
