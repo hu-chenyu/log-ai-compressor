@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "log-ai-compressor"
+version = "2.0.0"
+description = "本地日志分析取证台：日志压缩投喂大模型 + 根因排查 + MCP 接入（数据不出网）"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["log", "analyzer", "llm", "compressor", "troubleshooting",
+            "mcp", "root-cause", "local-first"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Logging",
+]
+# 硬依赖只有 PyYAML —— core/rules/export 三个层零三方依赖，
+# 可以在任何环境（CI 容器、嵌入式、被锁依赖的公司环境）里直接跑。
+# Web / MCP / AI 全部做成可选 extra：重依赖会直接劝退 PyPI 用户。
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# 本地 Web 界面（双击 start.bat 走这条）
+web = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "sse-starlette>=1.6",
+]
+# MCP Server：让 Claude Code / Codex / mavis 等 Agent 调用本机日志
+# 环境标记是必须的：官方 mcp SDK 从 0.9.1 起要求 Python >= 3.10。
+# Python 3.9 上这一项会被 pip 跳过，tests/test_mcp.py 随之 importorskip 整体
+# 跳过 —— 核心引擎不受影响（只依赖 PyYAML）。
+mcp = [
+    "mcp>=1.0; python_version >= '3.10'",
+]
+# AI 解读（OpenAI 兼容端点 / 本地 Ollama 都走它）
+ai = [
+    "httpx>=0.27",
+]
+# 常用组合
+all = [
+    "log-ai-compressor[web,mcp,ai]",
+]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "pytest-timeout>=2.1", "ruff>=0.4"]
+
+[project.scripts]
+log-ai-compressor = "log_ai_compressor.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/hu-chenyu/log-ai-compressor"
+Repository = "https://github.com/hu-chenyu/log-ai-compressor"
+
+[tool.setuptools.packages.find]
+include = ["log_ai_compressor*"]
+
+[tool.setuptools.package-data]
+"log_ai_compressor.rules" = ["presets/*.yaml"]
+# 前端是零构建的静态资源，必须打进包里，否则 pip 安装后界面 404
+"log_ai_compressor.web" = ["static/*.html", "static/*.css", "static/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W6"]
+ignore = ["E741"]
+
+[tool.coverage.run]
+# 覆盖率面向核心逻辑 + 接入层（service 是 Web/MCP 共用的门面，必须计入）
+omit = [
+    "log_ai_compressor/cli.py",
+]
+
+[tool.coverage.report]
+show_missing = true

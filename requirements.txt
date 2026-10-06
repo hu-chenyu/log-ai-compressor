@@ -1,0 +1,10 @@
+# 核心引擎运行时依赖
+#
+# 这是一个**合法的 pip requirements 文件**：每行只能是包名或 URL，不能是 shell 命令。
+# 历史上这里曾被写成 `pip install log-ai-compressor` 这样的命令速查表，
+# 导致 `pip install -r requirements.txt`（CI 的第一步）直接报
+#   Invalid requirement: 'pip install log-ai-compressor'
+# 整条流水线全红。安装速查表见 README 与 requirements-optional.txt。
+#
+# 权威声明在 pyproject.toml 的 [project].dependencies，本文件与之保持一致。
+PyYAML>=6.0

@@ -1,0 +1,21 @@
+[    0.000] [INFO] [main] clock subsystem initializing
+[    0.012] [INFO] [im_pll] input reference 24.000 MHz locked
+[    0.015] [INFO] [im_divider] divider ratio set to 4
+[    0.020] [INFO] [im_gate] clock gate enabled for domain A400
+[    0.031] [INFO] [im_clk_a400] a400 domain ready
+[    0.100] [INFO] [ut] running unit test suite: clock
+[    0.105] [INFO] [ut] tc_im_pll_lock .............. PASS
+[    0.110] [INFO] [ut] tc_im_pll_jitter ............. PASS
+[    0.118] [ERR ] [im_pll] pll lock timeout after 50 ms (code -110)
+[    0.119] [ERR ] [im_pll] pll lock timeout after 50 ms (code -110)
+[    0.121] [FAIL] [ut] tc_im_pll_relock ............ FAIL
+[    0.121] [FAIL] [ut] assertion failed at im_clk_a400.c:253: expected 400000000, got 0
+[    0.122] [ERR ] [im_clk_a400] a400 clock rate mismatch: expected 400 MHz
+	#0  0x08004a1b in im_clk_a400_enable (im_clk_a400.c:253)
+	#1  0x08003f2c in im_clk_a400_init (im_clk_a400.c:88)
+	#2  0x08002d1e in clock_subsys_init (im_clock.c:120)
+	#3  0x080019f0 in main (main.c:42)
+[    0.130] [FAIL] [ut] suite summary: 2 tests failed of 5
+im_pll.c:118: error: reference clock signal lost
+im_gate.c:77: warning: gate status readback mismatch
+[    0.140] [INFO] [ut] test suite done

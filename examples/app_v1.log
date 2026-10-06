@@ -1,0 +1,13 @@
+2024-03-15 08:00:00 INFO [main] app v1.0 starting
+2024-03-15 08:00:01 INFO [db] pool initialized
+2024-03-15 08:00:05 ERROR [db] connection refused to shard-0:5432
+2024-03-15 08:00:06 ERROR [db] connection refused to shard-0:5432
+2024-03-15 08:00:07 ERROR [db] connection refused to shard-0:5432
+2024-03-15 08:00:08 ERROR [db] connection refused to shard-0:5432
+2024-03-15 08:00:10 ERROR [auth] token expired for session 9a1b2c
+2024-03-15 08:00:11 ERROR [auth] token expired for session 8f3e2d
+2024-03-15 08:00:12 ERROR [legacy] old bug: deprecated endpoint still called
+2024-03-15 08:00:15 ERROR [cache] lock contention timeout: key=job:42
+2024-03-15 08:00:16 ERROR [cache] lock contention timeout: key=job:43
+2024-03-15 08:00:20 WARN [pool] retries exhausted
+2024-03-15 08:00:25 INFO [main] app v1.0 running

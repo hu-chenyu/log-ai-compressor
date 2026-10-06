@@ -1,0 +1,52 @@
+2024-03-15 08:00:00.120 INFO [main] log-ai-compressor demo service starting, version 2.4.1
+2024-03-15 08:00:00.350 INFO [main] loading configuration from /etc/acme/config.yaml
+2024-03-15 08:00:00.900 DEBUG [pool] db connection pool initialized: size=20
+2024-03-15 08:00:01.100 INFO [api] http server listening on 0.0.0.0:8080
+2024-03-15 08:00:02.500 WARN [pool] connection pool 85% utilized
+2024-03-15 08:01:10.050 INFO [api] GET /api/users 200 12ms
+2024-03-15 08:01:10.200 INFO [api] GET /api/orders 200 33ms
+2024-03-15 08:02:11.000 INFO [api] POST /api/login 200 58ms
+2024-03-15 08:03:40.220 INFO [api] GET /api/products 200 9ms
+2024-03-15 08:04:59.900 WARN [db] slow query detected: 1203ms SELECT * FROM audit_events
+2024-03-15 08:05:12.300 ERROR [db] connection refused to db-primary:5432
+java.net.ConnectException: Connection refused (Connection refused)
+	at com.acme.db.ConnectionPool.init(ConnectionPool.java:142)
+	at java.base/java.net.AbstractPlainSocketImpl.connect(AbstractPlainSocketImpl.java:229)
+	at java.base/java.net.Socket.connect(Socket.java:606)
+	at com.acme.core.ServiceManager.start(ServiceManager.java:88)
+	at org.springframework.context.support.DefaultLifecycleProcessor.doStart(DefaultLifecycleProcessor.java:182)
+2024-03-15 08:05:12.320 WARN [pool] retrying connection attempt 1 of 5
+2024-03-15 08:05:13.100 ERROR [db] connection refused to db-primary:5432
+	at com.acme.db.ConnectionPool.init(ConnectionPool.java:142)
+	at java.base/java.net.Socket.connect(Socket.java:606)
+Caused by: java.net.ConnectException: Connection refused
+2024-03-15 08:05:13.610 ERROR [db] connection refused to db-primary:5432
+2024-03-15 08:05:13.900 WARN [pool] retrying connection attempt 3 of 5
+2024-03-15 08:05:14.100 ERROR [db] connection refused to db-primary:5432
+2024-03-15 08:05:14.180 ERROR [api] request 10842 failed: upstream unavailable
+2024-03-15 08:05:14.190 ERROR [api] request 10843 failed: upstream unavailable
+2024-03-15 08:05:14.220 ERROR [api] request 10844 failed: upstream unavailable
+2024-03-15 08:05:14.310 ERROR [api] request 10845 failed: upstream unavailable
+2024-03-15 08:05:15.050 ERROR [api] request 10851 failed: upstream unavailable
+2024-03-15 08:05:15.140 ERROR [api] request 10852 failed: upstream unavailable
+2024-03-15 08:05:15.230 ERROR [api] request 10853 failed: upstream unavailable
+2024-03-15 08:05:15.310 ERROR [api] request 10854 failed: upstream unavailable
+2024-03-15 08:05:15.450 ERROR [api] request 10855 failed: upstream unavailable
+2024-03-15 08:05:16.020 ERROR [api] request 10861 failed: upstream unavailable
+2024-03-15 08:05:16.090 ERROR [api] request 10862 failed: upstream unavailable
+2024-03-15 08:05:20.700 ERROR [api] request 10901 failed: upstream unavailable
+2024-03-15 08:05:21.000 ERROR [scheduler] task cleanup aborted after 3 retries
+2024-03-15 08:06:00.000 ERROR [auth] session token validation failed: token expired
+2024-03-15 08:06:30.250 ERROR [cache] redis protocol error: invalid bulk length
+Traceback (most recent call last):
+  File "/opt/acme/cache_client.py", line 88, in get
+    value = self._read_bulk(sock)
+  File "/usr/lib/python3.9/site-packages/redis/connection.py", line 221, in read_response
+    response = self._parser.read_response()
+ValueError: invalid bulk length: 18446744073709551615
+2024-03-15 08:07:45.000 FATAL [core] out of memory: worker-3 aborted, allocation of 1073741824 bytes failed
+2024-03-15 08:07:45.100 ERROR [core] worker-3 terminated unexpectedly (exit code 137)
+2024-03-15 08:07:45.200 INFO [supervisor] restarting worker-3
+2024-03-15 08:10:02.000 ERROR [api] rare one-time glitch in request 5123521 serialization
+2024-03-15 08:12:00.000 WARN [pool] connection pool recovered
+2024-03-15 08:12:05.000 INFO [api] service healthy again

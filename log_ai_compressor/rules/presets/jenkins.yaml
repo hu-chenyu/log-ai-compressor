@@ -1,0 +1,53 @@
+# Jenkins / CI 控制台日志解析规则
+# 适配：[时间戳] [通道] 消息、maven [ERROR]、BUILD FAILURE、shell echo 等格式
+name: jenkins
+description: Jenkins/CI 控制台日志（maven、gradle、shell 步骤、测试摘要）
+
+patterns:
+  - name: ts_channel_message
+    # [2024-01-01T12:00:00.000Z] [err] message（时间戳/通道均可缺失）
+    regex: '^(?:\[(?P<timestamp>\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]\s*)?(?:\[(?:out|err|info|debug|echo|hpi)\]\s*)?(?P<message>\S.*)$'
+
+  - name: maven_level
+    # [ERROR] Failed to execute goal... / [WARNING] ...
+    regex: '^[\[(]\s*(?P<level>ERROR|WARNING|WARN|SEVERE|INFO)\s*[\])]\s*[:\-]?\s*(?P<message>\S.*)$'
+
+  - name: gradle_style
+    # > Task :xxx FAILED / FAILURE: Build failed with an exception.
+    regex: '^(?P<message>\S.*)$'
+
+stack_indicators:
+  - '^\s*at\s+[\w$.]+\('
+  - '^\s*Caused by\s*:?'
+  - '^Traceback \(most recent call last\):'
+  - '^\s*File\s+"[^"]+".*,\s*line\s+\d+'
+  - '^\s*raise\s+\w'
+  - '^FAILURE: Build failed'
+  - '^\s*\.\.\.\s*\d+\s*more\b'           # Java "... N more" 折叠行
+  - '^[A-Za-z_][\w.$]*(?:Exception|Error|Fault|Interrupt)\s*[:({]'
+
+level_hints:
+  FATAL:
+    - 'BUILD ABORTED'
+    - 'OUT OF MEMORY'
+    - 'JVM terminated'
+    - 'fatal error'
+  ERROR:
+    - '\[err\]'
+    - '\[severe\]'
+    - '\[ERROR\]'
+    - '\bERROR\b'
+    - '\berror\b'
+    - 'Compilation error'
+    - '\bException\b'
+    - 'Could not'
+  FAIL:
+    - 'BUILD FAILURE'
+    - '\bFAILED\b'
+    - '\bfailures?\b'
+    - 'There are test failures'
+    - 'Tests run:.*(?:Failures|Errors): *[1-9]'
+  WARN:
+    - '\[warning\]'
+    - '\bWARNING\b'
+    - '\bwarning\b'

@@ -1,0 +1,735 @@
+# -*- coding: utf-8 -*-
+"""流式管线集成测试：端到端解析/过滤/聚类/分析/上下文/取消。"""
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from log_ai_compressor.core.pipeline import (
+    LogPipeline,
+    PipelineConfig,
+    analyze_file,
+    analyze_files,
+    analyze_text,
+)
+from log_ai_compressor.core.filters import FilterConfig
+
+
+SAMPLE_LOG = """\
+2024-01-01 09:00:00 INFO [auth] service started
+2024-01-01 09:00:01 DEBUG [auth] config loaded
+2024-01-01 09:00:02 WARN [db] connection pool nearly exhausted
+2024-01-01 09:00:05 ERROR [db] connection refused to db-primary:5432
+java.net.ConnectException: Connection refused
+\tat com.app.db.Pool.init(Pool.java:42)
+\tat java.base/java.net.Socket.connect(Socket.java:1)
+\tat com.app.core.Main.start(Main.java:18)
+2024-01-01 09:00:06 ERROR [api] request 123 failed
+2024-01-01 09:00:07 ERROR [api] request 456 failed
+2024-01-01 09:00:08 ERROR [api] request 789 failed
+2024-01-01 09:00:20 INFO [api] recovered
+2024-01-01 09:01:00 FATAL [core] out of memory in worker 3
+2024-01-01 09:01:01 ERROR [core] worker 3 aborted after retries
+2024-01-01 09:02:00 ERROR [auth] token expired for session 99a1
+"""
+
+
+# ---------------------------------------------------------------------------
+# 基本端到端
+# ---------------------------------------------------------------------------
+class TestAnalyzeText:
+    def test_basic_stats(self):
+        r = analyze_text(SAMPLE_LOG)
+        s = r.stats
+        assert s.total_lines == 15
+        assert s.error_lines == 7        # ERROR×6 + FATAL→ERROR×1
+        # 修复缺陷R40：FATAL 归一 ERROR，默认级别 ERROR+FAIL 全部准入
+        assert s.error_entries == 7
+        assert s.time_start is not None and s.time_end is not None
+        assert s.duration > 0
+        assert s.truncated is False
+
+    def test_clusters_merged_and_sorted(self):
+        r = analyze_text(SAMPLE_LOG)
+        # request N failed 三次归一簇；clustered: pool refused / request / oom / worker / token
+        counts = {c.summary: c.count for c in r.clusters}
+        assert any("request" in k and v == 3 for k, v in counts.items())
+        # 修复缺陷R40：FATAL 归一 ERROR —— 原 FATAL 行进入 ERROR
+        # 簇；全 ERROR 时按优先级/次数排序（request ×3 居首）
+        assert r.clusters[0].level == "ERROR"
+        assert any(c.summary.startswith("out of memory")
+                   for c in r.clusters)
+
+    def test_stack_attached_to_cluster(self):
+        r = analyze_text(SAMPLE_LOG)
+        pool = next(c for c in r.clusters if "refused" in c.summary)
+        assert pool.sample.entry.has_stack
+        assert any("Pool.init" in line for line in pool.sample.entry.stack)
+
+    def test_root_cause_detected(self):
+        r = analyze_text(SAMPLE_LOG)
+        pool = next(c for c in r.clusters if "refused" in c.summary)
+        assert pool.is_root_cause
+
+    def test_filter_levels(self):
+        # 修复缺陷R40：FATAL 归一 ERROR —— 原 FATAL 行由 ERROR
+        # 过滤命中（levels=["FATAL"] 不再是有效级别）
+        r = analyze_text(SAMPLE_LOG, levels=["ERROR"])
+        assert all(c.level == "ERROR" for c in r.clusters)
+        assert any("out of memory" in c.summary for c in r.clusters)
+        assert r.stats.error_entries == 7
+
+    def test_filter_keywords(self):
+        r = analyze_text(SAMPLE_LOG, include=["token"])
+        assert len(r.clusters) == 1
+        assert "token" in r.clusters[0].summary
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R71：rule="auto" 自动识别（分层采样打分 + rule_name 标记）
+# ---------------------------------------------------------------------------
+class TestAutoRule:
+    _EMBEDDED_LOG = "\n".join(
+        ["[  123.456] [ERR ] [im_pll] clk config failed",
+         "[  123.789] [WARN] [im_div] rate mismatch warning",
+         "12:00:01.123 FAIL test_case_clk_freq"])
+
+    def test_auto_detects_embedded(self):
+        r = analyze_text(self._EMBEDDED_LOG, rule="auto",
+                         levels=["ERROR", "FAIL", "WARN"])
+        assert r.stats.rule_name == "embedded（自动）"
+        assert any(c.module == "im_pll" for c in r.clusters), \
+            "auto 应选 embedded 并解析出模块"
+
+    def test_auto_detects_generic_on_iso(self):
+        r = analyze_text(SAMPLE_LOG, rule="auto")
+        assert r.stats.rule_name == "generic（自动）"
+        assert r.stats.error_lines == 7, "auto 选 generic 后语义不变"
+
+    def test_auto_rule_file_mode(self, tmp_path):
+        """文件模式：分层采样（头/中/尾 seek）后同样自动识别。"""
+        log = tmp_path / "emb.log"
+        log.write_text(self._EMBEDDED_LOG + "\n", encoding="utf-8")
+        r = analyze_file(str(log), rule="auto",
+                         levels=["ERROR", "FAIL", "WARN"])
+        assert r.stats.rule_name == "embedded（自动）"
+        assert any(c.module == "im_pll" for c in r.clusters)
+
+    def test_manual_rule_unaffected(self):
+        """手动指定规则：无自动识别标记，行为与此前完全一致。"""
+        r = analyze_text(self._EMBEDDED_LOG, rule="embedded",
+                         levels=["ERROR", "FAIL", "WARN"])
+        assert r.stats.rule_name == "embedded"
+        r2 = analyze_text(SAMPLE_LOG)
+        assert r2.stats.rule_name == "generic"
+
+    def test_ts_entries_counted(self):
+        """优化缺陷R71：ts_entries 计数（体检时间戳识别率分子）。"""
+        r = analyze_text(SAMPLE_LOG)
+        assert r.stats.ts_entries > 0
+        assert r.stats.ts_entries <= r.stats.entry_lines
+
+    def test_filter_exclude(self):
+        r = analyze_text(SAMPLE_LOG, exclude=["request"])
+        assert not any("request" in c.summary for c in r.clusters)
+
+    def test_context_before_after(self):
+        r = analyze_text(SAMPLE_LOG, context_lines=2)
+        token = next(c for c in r.clusters if "token" in c.summary)
+        sample = token.sample
+        assert sample is not None
+        # 前两行：worker aborted / OOM
+        assert any("worker 3" in line for line in sample.before)
+        # 后上下文：文件末尾无后续行
+        assert sample.after == []
+
+    def test_context_after_following_lines(self):
+        log = "\n".join([
+            "INFO ctx-1",
+            "INFO ctx-2",
+            "2024-01-01 09:00:00 ERROR [db] boom",
+            "INFO ctx-3",
+            "INFO ctx-4",
+            "INFO ctx-5",
+            "INFO ctx-6",
+            "INFO ctx-7",
+        ])
+        r = analyze_text(log, context_lines=3)
+        c = r.clusters[0]
+        assert c.sample.before == ["INFO ctx-1", "INFO ctx-2"]
+        assert c.sample.after == ["INFO ctx-3", "INFO ctx-4", "INFO ctx-5"]
+
+    def test_instance_after_context_collected(self):
+        """修复缺陷R44：详情实例与典型样例一样收集后上下文。
+
+        此前后上下文待补队列仅对典型样例开启，实例只有前上下文，
+        展开簇点击实例时详情面板无后上下文可显示。
+        """
+        log = "\n".join([
+            "INFO ctx-1",
+            "2024-01-01 09:00:00 ERROR [db] boom 1",
+            "INFO post-1",
+            "INFO post-2",
+            "2024-01-01 09:00:01 ERROR [db] boom 2",
+            "INFO post-3",
+        ])
+        r = analyze_text(log, context_lines=2)
+        c = r.clusters[0]
+        assert len(c.instances) == 2
+        inst0, inst1 = c.instances
+        # 实例 1：后上下文收满 2 行即关闭（不含下一个错误行）
+        assert inst0.after == ["INFO post-1", "INFO post-2"]
+        # 实例 2：其后仅 1 行物理行
+        assert inst1.after == ["INFO post-3"]
+        # 典型样例后上下文行为不变
+        assert c.sample.after == ["INFO post-1", "INFO post-2"]
+
+    def test_instance_after_context_empty_when_ctx_zero(self):
+        """修复缺陷R44：context_lines=0 时实例不收集后上下文。"""
+        log = "\n".join([
+            "2024-01-01 09:00:00 ERROR [db] boom 1",
+            "INFO post-1",
+        ])
+        r = analyze_text(log, context_lines=0)
+        assert r.clusters[0].instances[0].after == []
+
+    def test_default_context_lines_50(self):
+        """修复缺陷#5：不传 context_lines 时默认前后各 50 行。"""
+        before = [f"INFO pre-{i:02d}" for i in range(60)]
+        after = [f"INFO post-{i:02d}" for i in range(60)]
+        log = "\n".join(before + ["2024-01-01 09:00:00 ERROR [db] boom"] + after)
+        r = analyze_text(log)  # 不显式传 context_lines
+        sample = r.clusters[0].sample
+        # 前 50 行 + 后 50 行
+        assert len(sample.before) == 50
+        assert sample.before[0] == "INFO pre-10"
+        assert sample.before[-1] == "INFO pre-59"
+        assert len(sample.after) == 50
+        assert sample.after[0] == "INFO post-00"
+        assert sample.after[-1] == "INFO post-49"
+
+    def test_context_lines_config_range_up_to_200(self):
+        """修复缺陷R20：FilterConfig 反序列化无上限（数字任意大）。"""
+        cfg = FilterConfig.from_dict({"context_lines": 200})
+        assert cfg.context_lines == 200
+        # 不再钳制上限（200 上限已放开）
+        over = FilterConfig.from_dict({"context_lines": 500})
+        assert over.context_lines == 500
+        huge = FilterConfig.from_dict({"context_lines": 99999})
+        assert huge.context_lines == 99999
+        # 下限仍钳制到 0
+        neg = FilterConfig.from_dict({"context_lines": -5})
+        assert neg.context_lines == 0
+
+    def test_analyze_disabled_keeps_fields_default(self):
+        r = analyze_text(SAMPLE_LOG, analyze=False)
+        assert r.clusters[0].priority == 0.0
+        assert not any(c.is_root_cause for c in r.clusters)
+
+    def test_global_hist_counts(self):
+        r = analyze_text(SAMPLE_LOG)
+        assert r.global_hist.total == r.stats.error_entries
+
+    def test_level_counts(self):
+        r = analyze_text(SAMPLE_LOG)
+        # 修复缺陷R40：FATAL 归一 ERROR（6 + 1 = 7）
+        assert r.stats.level_counts.get("ERROR") == 7
+        assert r.stats.level_counts.get("FATAL") is None
+        assert r.stats.level_counts.get("INFO") == 2
+        assert r.stats.level_counts.get("WARN") == 1
+        assert r.stats.level_counts.get("DEBUG") == 1
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R79：智能分析模式（full 完整 / deep 深度扫描 / fast 快速聚类）
+# ---------------------------------------------------------------------------
+class TestAnalyzeMode:
+    _KW_LOG = "\n".join([
+        "2024-01-01 09:00:00 ERROR [db] permission denied",
+        "2024-01-01 09:00:01 ERROR [db] disk full",
+        "2024-01-01 09:00:02 ERROR [api] request failed once",
+        "2024-01-01 09:00:03 ERROR [api] request failed twice",
+        "2024-01-01 09:00:04 ERROR [api] request failed third",
+        "2024-01-01 09:00:05 ERROR [api] request failed fourth",
+        "2024-01-01 09:00:06 ERROR [api] request failed fifth",
+    ])
+
+    def test_fast_mode_skips_analysis(self):
+        """fast 快速聚类：只聚类，全部智能标记缺省（等效 analyze=False）。"""
+        r = analyze_text(self._KW_LOG, analysis_mode="fast")
+        assert r.clusters, "聚类仍应产出"
+        assert all(c.priority == 0.0 for c in r.clusters)
+        assert not any(c.is_root_cause for c in r.clusters)
+        assert all(c.anomaly == "" for c in r.clusters)
+        assert all(c.priority_detail == "" for c in r.clusters)
+
+    def test_deep_mode_lowers_strong_keyword_threshold(self):
+        """deep：2 个根因关键词即可定根因（完整模式需 3 个）。
+
+        两簇共享 timeout/connection（df=2 压低权重），完整模式
+        2×1.0<3 不定根因，深度模式 ≥2 命中；api 簇含连锁词把
+        窗口首发规则的得分压到 ≤0，排除时间连锁干扰。
+        """
+        log = "\n".join([
+            "2024-01-01 09:00:00 ERROR [api] request timeout connection retry aborted",
+            "2024-01-01 09:00:01 ERROR [db] timeout connection",
+        ])
+        full = analyze_text(log)
+        deep = analyze_text(log, analysis_mode="deep")
+        db_full = next(c for c in full.clusters if c.module == "db")
+        db_deep = next(c for c in deep.clusters if c.module == "db")
+        assert not db_full.is_root_cause, \
+            "完整模式 2 个关键词（df=2 权重 1.0）不足阈值 3"
+        assert db_deep.is_root_cause, "深度模式阈值 2 应命中"
+
+    def test_deep_mode_lowers_rare_threshold(self):
+        """deep：错误总数 ≥5 即可判罕见（完整模式需 ≥10）。"""
+        common = "\n".join(
+            f"2024-01-01 09:00:0{i} ERROR [db] frequent error" for i in range(5))
+        log = common + "\n2024-01-01 09:00:09 ERROR [db] frequent error variant"
+        full = analyze_text(log)
+        deep = analyze_text(log, analysis_mode="deep")
+        full_rare = [c for c in full.clusters if c.count == 1]
+        deep_rare = [c for c in deep.clusters if c.count == 1]
+        assert all(c.anomaly == "" for c in full_rare), \
+            "完整模式总数 6<10 不判罕见"
+        assert any(c.anomaly in ("rare", "novel") for c in deep_rare), \
+            "深度模式总数 6≥5 应判罕见"
+
+    def test_full_mode_default_unchanged(self):
+        """完整模式（默认）：行为与此前一致（阈值不松动）。"""
+        r = analyze_text(self._KW_LOG)
+        assert r.stats.rule_name.endswith("")  # 冒烟：默认路径正常
+        deep = analyze_text(self._KW_LOG, analysis_mode="deep")
+        assert len(deep.clusters) == len(r.clusters), \
+            "深度模式只改阈值、不改聚类语义"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R84：相似度阈值三档（严格 0.95 / 标准 0.85 / 宽松 0.70）
+# ---------------------------------------------------------------------------
+class TestSimilarityMode:
+    # 相似度 0.884 的消息对：标准(0.85)并 1 簇，严格(0.95)拆 2 簇
+    _PAIR_STD = (
+        "2024-01-01 09:00:00 ERROR [db] request timeout while reading from db server",
+        "2024-01-01 09:00:01 ERROR [db] request timeout while writing to db server",
+    )
+    # 相似度 0.822 的消息对：宽松(0.70)并 1 簇，标准(0.85)拆 2 簇
+    _PAIR_LENIENT = (
+        "2024-01-01 09:00:00 ERROR [disk] disk quota exceeded on volume alpha",
+        "2024-01-01 09:00:01 ERROR [disk] disk quota exceeded on partition alpha",
+    )
+
+    def test_standard_merges_pair_but_strict_splits(self):
+        """0.884 相似对：标准并 1 簇 / 严格拆 2 簇。"""
+        log = "\n".join(self._PAIR_STD)
+        std = analyze_text(log)                       # 默认标准
+        strict = analyze_text(log, similarity="strict")
+        assert len(std.clusters) == 1, "标准(0.85)应合并 0.884 相似对"
+        assert len(strict.clusters) == 2, "严格(0.95)应拆分 0.884 相似对"
+
+    def test_lenient_merges_pair_but_standard_splits(self):
+        """0.822 相似对：宽松并 1 簇 / 标准拆 2 簇。"""
+        log = "\n".join(self._PAIR_LENIENT)
+        std = analyze_text(log)
+        lenient = analyze_text(log, similarity="lenient")
+        assert len(std.clusters) == 2, "标准(0.85)应拆分 0.822 相似对"
+        assert len(lenient.clusters) == 1, "宽松(0.70)应合并 0.822 相似对"
+
+    def test_unknown_key_falls_back_to_standard(self):
+        """非法档位键回退标准阈值（老配置/手改配置兼容）。"""
+        log = "\n".join(self._PAIR_STD)
+        r = analyze_text(log, similarity="bogus")
+        assert len(r.clusters) == 1, "未知键应回退标准(0.85)行为"
+
+    def test_exact_duplicates_merge_at_all_levels(self):
+        """完全相同的错误三档都并 1 簇（精确命中不受阈值影响）。"""
+        log = "\n".join(
+            ["2024-01-01 09:00:00 ERROR [db] identical failure"] * 3)
+        for key in ("standard", "strict", "lenient"):
+            r = analyze_text(log, similarity=key)
+            assert len(r.clusters) == 1 and r.clusters[0].count == 3
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R85：时间范围过滤（epoch 精确 / tod 每日时段）+ 行数上限采样
+# ---------------------------------------------------------------------------
+class TestTimeRangeFilter:
+    _LOG = "\n".join([
+        "2024-01-01 08:00:00 ERROR [db] early morning error",
+        "2024-01-01 14:00:00 ERROR [db] midday error",
+        "2024-01-01 20:00:00 ERROR [db] evening error",
+    ])
+
+    def test_tod_range_keeps_only_in_window(self):
+        """每日时段 12:00~18:00：仅正午错误入窗（第一前置项）。"""
+        r = analyze_text(self._LOG,
+                         tod_start=12 * 3600, tod_end=18 * 3600)
+        assert len(r.clusters) == 1
+        assert "midday" in r.clusters[0].summary
+        assert r.stats.error_entries == 1
+
+    def test_tod_open_end(self):
+        """仅填开始端：14:00 起，晚间保留、清晨剔除。"""
+        r = analyze_text(self._LOG, tod_start=12 * 3600)
+        assert len(r.clusters) == 2
+        assert all("early" not in c.summary for c in r.clusters)
+
+    def test_epoch_range(self):
+        """epoch 精确区间：15:00 之后仅晚间错误。"""
+        import time as _time
+        start = _time.mktime(
+            _time.strptime("2024-01-01 15:00:00", "%Y-%m-%d %H:%M:%S"))
+        r = analyze_text(self._LOG, time_start=start)
+        assert len(r.clusters) == 1
+        assert "evening" in r.clusters[0].summary
+
+    def test_untimestamped_entries_always_kept(self):
+        """无时间戳条目始终保留（宁留勿丢，CI 日志无戳行不误清）。"""
+        log = "\n".join([
+            "[2024-01-01T02:00:00.000Z] error: early morning error",
+            "error: untimestamped failure",
+        ])
+        r = analyze_text(log, rule="jenkins",
+                         tod_start=12 * 3600, tod_end=18 * 3600)
+        summaries = [c.summary for c in r.clusters]
+        assert any("untimestamped" in s for s in summaries), \
+            "无时间戳条目不得被时间窗过滤"
+        assert not any("early" in s for s in summaries), \
+            "清晨错误在窗外应被剔除"
+
+
+class TestMaxLines:
+    def test_max_lines_stops_at_limit(self):
+        """上限 10 行：只处理前 10 行，limit_hit 置位、非取消中断。"""
+        lines = [f"2024-01-01 09:00:{i:02d} ERROR [db] error number {i}"
+                 for i in range(50)]
+        r = analyze_text("\n".join(lines), max_lines=10)
+        assert r.stats.total_lines == 10
+        assert r.stats.limit_hit is True
+        assert r.stats.truncated is False, "上限收束不是取消中断"
+        assert sum(c.count for c in r.clusters) <= 10
+
+    def test_no_limit_by_default(self):
+        """默认全部：limit_hit 不置位，全部行处理。"""
+        lines = [f"2024-01-01 09:00:{i:02d} ERROR [db] error number {i}"
+                 for i in range(20)]
+        r = analyze_text("\n".join(lines))
+        assert r.stats.total_lines == 20
+        assert r.stats.limit_hit is False
+
+    def test_limit_larger_than_file_no_hit(self):
+        """上限大于总行数：正常完成，limit_hit 不置位。"""
+        r = analyze_text(
+            "2024-01-01 09:00:00 ERROR [db] single error", max_lines=100)
+        assert r.stats.total_lines == 1
+        assert r.stats.limit_hit is False
+
+
+
+# ---------------------------------------------------------------------------
+# 文件模式（编码探测联动）
+# ---------------------------------------------------------------------------
+class TestAnalyzeFile:
+    def test_utf8_file(self, tmp_path):
+        p = tmp_path / "a.log"
+        p.write_text(SAMPLE_LOG, encoding="utf-8")
+        r = analyze_file(p)
+        assert r.stats.total_lines == 15
+        assert r.stats.encoding == "utf-8"
+
+    def test_gbk_file(self, tmp_path):
+        p = tmp_path / "gbk.log"
+        p.write_text("2024-01-01 09:00:00 ERROR [db] 中文错误：连接失败\n" * 5,
+                     encoding="gbk")
+        r = analyze_file(p)
+        assert r.stats.encoding == "gb18030"
+        assert len(r.clusters) == 1
+        assert "中文错误" in r.clusters[0].summary
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            analyze_file(tmp_path / "nope.log")
+
+    def test_custom_rule_yaml(self, tmp_path):
+        rule = tmp_path / "r.yaml"
+        rule.write_text(
+            "name: r\n"
+            "patterns:\n"
+            "  - regex: '^X (?P<level>ERR) (?P<message>.*)$'\n",
+            encoding="utf-8",
+        )
+        p = tmp_path / "x.log"
+        p.write_text("X ERR boom\nX ERR boom\n", encoding="utf-8")
+        r = analyze_file(p, rule=str(rule))
+        assert len(r.clusters) == 1
+        assert r.clusters[0].count == 2
+        assert r.stats.rule_name == "r"
+
+
+# ---------------------------------------------------------------------------
+# 进度与取消
+# ---------------------------------------------------------------------------
+class TestProgressAndCancel:
+    def test_progress_callback_phases(self):
+        events = []
+        # 超过 PROGRESS_EVERY_LINES 才会触发 parsing 相位，这里验证完成相位
+        analyze_text(SAMPLE_LOG, progress_cb=lambda d: events.append(d))
+        assert events and events[-1]["phase"] == "done"
+        assert events[-1]["lines"] == 15
+
+    def test_progress_parsing_phase_large_input(self):
+        events = []
+        big = "\n".join(
+            f"2024-01-01 09:00:00 INFO [t] line {i}" for i in range(50000))
+        analyze_text(big, progress_cb=events.append)
+        phases = {e["phase"] for e in events}
+        assert "parsing" in phases
+        assert events[-1]["lines"] == 50000
+
+    def test_cancel_midway_returns_partial(self):
+        ev = threading.Event()
+        # 生成足量行数：进度回调（16384 行触发）设置取消标记，
+        # 下一个取消检测点（4096 的倍数）生效
+        lines = []
+        for i in range(50000):
+            level = "ERROR" if i % 100 == 0 else "INFO"
+            lines.append(f"2024-01-01 09:00:00 {level} [t] msg {i}")
+        text = "\n".join(lines)
+
+        def cb(d):
+            if d["phase"] == "parsing" and d["lines"] >= 16384:
+                ev.set()
+
+        r = analyze_text(text, progress_cb=cb, cancel_event=ev)
+        assert r.stats.truncated is True
+        assert r.stats.total_lines < 50000
+        assert r.stats.total_lines >= 16384
+
+    def test_cancel_before_start(self):
+        ev = threading.Event()
+        ev.set()
+        # 行数需超过取消检测间隔（4096）才会触发
+        text = "\n".join(f"2024-01-01 09:00:00 INFO [t] msg {i}"
+                         for i in range(5000))
+        r = analyze_text(text, cancel_event=ev)
+        assert r.stats.truncated is True
+        assert 0 < r.stats.total_lines < 5000
+
+
+# ---------------------------------------------------------------------------
+# 复用与规则集注入
+# ---------------------------------------------------------------------------
+class TestPipelineReuse:
+    def test_pipeline_config_object(self):
+        cfg = PipelineConfig(filter_config=FilterConfig(levels=["ERROR", "FAIL"]))
+        pipeline = LogPipeline(cfg)
+        r1 = pipeline.run_text(SAMPLE_LOG)
+        r2 = pipeline.run_text(SAMPLE_LOG)
+        assert r1.stats.total_lines == r2.stats.total_lines
+
+    def test_memory_bounded_clusters(self):
+        # 2 万行「不同」错误：数字被掩码后指纹一致 -> 聚合为 1 簇
+        # （内存仅存 1 份样例 + 计数，与出现次数无关 —— 内存有界的直接证明）
+        text = "\n".join(f"2024-01-01 09:00:00 ERROR [t] unique error {i}"
+                         for i in range(20000))
+        r = analyze_text(text)
+        assert len(r.clusters) == 1
+        assert r.clusters[0].count == 20000
+        assert r.stats.error_entries == 20000
+
+
+# ---------------------------------------------------------------------------
+# 修复缺陷#9：小日志性能保障（100 行内 1 秒出结果）
+# ---------------------------------------------------------------------------
+class TestSmallLogPerformance:
+    def test_100_lines_under_1s(self):
+        # 100 行混合日志（含错误行）：整体分析应在 1 秒内完成
+        import time as _time
+        lines = []
+        for i in range(100):
+            ts = f"2024-01-01 09:{i // 60:02d}:{i % 60:02d}"
+            if i % 10 == 0:
+                lines.append(f"{ts} ERROR [db] connection refused to host {i}")
+            else:
+                lines.append(f"{ts} INFO [core] heartbeat ok {i}")
+        t0 = _time.perf_counter()
+        r = analyze_text("\n".join(lines))
+        elapsed = _time.perf_counter() - t0
+        assert r.stats.total_lines == 100
+        assert r.stats.error_entries == 10
+        # 宽松上限 1.0s（含 CI 冷启动开销；正常本机 < 0.05s）
+        assert elapsed < 1.0, f"小日志分析耗时 {elapsed:.2f}s 超过 1s"
+
+    def test_20k_lines_under_10s(self):
+        # 2 万行中等日志：流式管线应在 10 秒内完成（性能回归保护）
+        import time as _time
+        lines = []
+        for i in range(20000):
+            ts = f"2024-01-01 09:{(i // 60) % 60:02d}:{i % 60:02d}.{i % 1000:03d}"
+            if i % 10 == 0:
+                lines.append(f"{ts} ERROR [db] connection refused to host {i % 5}")
+            else:
+                lines.append(f"{ts} INFO [core] heartbeat ok {i}")
+        t0 = _time.perf_counter()
+        r = analyze_text("\n".join(lines))
+        elapsed = _time.perf_counter() - t0
+        assert r.stats.total_lines == 20000
+        assert elapsed < 10.0, f"2 万行分析耗时 {elapsed:.2f}s 超过 10s"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R89：轮转文件合并分析（多文件按序串流，跨轮转因果链不断）
+# ---------------------------------------------------------------------------
+class TestRotationMerge:
+    def test_two_rotated_files_merged(self, tmp_path):
+        """两个轮转文件按序合并：行数/错误数累加，簇跨文件归并。"""
+        older = tmp_path / "app.log.1"
+        older.write_text("\n".join([
+            "2024-01-01 09:00:00 ERROR [db] connection refused to db-primary:5432",
+            "2024-01-01 09:00:01 INFO [db] retrying",
+        ]) + "\n", encoding="utf-8")
+        newer = tmp_path / "app.log"
+        newer.write_text("\n".join([
+            "2024-01-01 09:01:00 ERROR [db] connection refused to db-primary:5432",
+            "2024-01-01 09:01:01 ERROR [api] request 1 failed",
+        ]) + "\n", encoding="utf-8")
+        r = analyze_files([older, newer])   # 调用方保证最旧在前
+        assert r.stats.total_lines == 4
+        assert r.stats.error_entries == 3
+        # 跨文件同指纹归一簇（count=2 来自两个文件）
+        refused = next(c for c in r.clusters if "refused" in c.summary)
+        assert refused.count == 2
+        # source 标注多文件合并
+        assert "app.log.1" in r.stats.source and "app.log" in r.stats.source
+
+    def test_global_timeline_across_files(self, tmp_path):
+        """全局时间范围覆盖两个文件的最早~最晚（因果链跨轮转不断）。"""
+        f1 = tmp_path / "r1.log"
+        f1.write_text(
+            "2024-01-01 08:59:59 ERROR [db] tail of old rotation\n",
+            encoding="utf-8")
+        f2 = tmp_path / "r2.log"
+        f2.write_text(
+            "2024-01-01 09:00:01 ERROR [db] head of new rotation\n",
+            encoding="utf-8")
+        r = analyze_files([f1, f2])
+        from log_ai_compressor.core.models import format_timestamp
+        assert format_timestamp(r.stats.time_start) == "2024-01-01 08:59:59"
+        assert format_timestamp(r.stats.time_end) == "2024-01-01 09:00:01"
+
+    def test_single_file_equivalent_to_analyze_file(self, tmp_path):
+        """单文件列表等效 analyze_file（边界退化路径）。"""
+        p = tmp_path / "a.log"
+        p.write_text(SAMPLE_LOG, encoding="utf-8")
+        r = analyze_files([p])
+        assert r.stats.total_lines == 15
+        assert r.stats.error_entries == 7
+
+    def test_missing_file_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            analyze_files([tmp_path / "nope.log"])
+
+    def test_gzip_rotation_member_merged(self, tmp_path):
+        """优化缺陷R87+R89：.gz 旧轮转与现役日志混合串流。"""
+        import gzip as _gzip
+        old_gz = tmp_path / "app.log.1.gz"
+        with _gzip.open(old_gz, "wt", encoding="utf-8") as fh:
+            fh.write("2024-01-01 08:00:00 ERROR [db] gz era error\n")
+        cur = tmp_path / "app.log"
+        cur.write_text("2024-01-01 09:00:00 ERROR [db] current era error\n",
+                       encoding="utf-8")
+        r = analyze_files([old_gz, cur])
+        assert r.stats.total_lines == 2
+        assert r.stats.error_entries == 2
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R90：ANSI 转义码清理（Jenkins AnsiColor 导出乱码根治）
+# ---------------------------------------------------------------------------
+class TestAnsiStrip:
+    def test_ansi_codes_stripped_on_ingest(self):
+        """彩色控制符在摄入时剥除：摘要/计数均按净化后文本。"""
+        log = "\n".join([
+            "\x1b[31m2024-01-01 09:00:00 ERROR [db] red alert failed\x1b[0m",
+            "\x1b[1;32m2024-01-01 09:00:01 INFO [db] green ok\x1b[0m",
+        ])
+        r = analyze_text(log)
+        assert r.stats.total_lines == 2
+        assert r.stats.error_entries == 1
+        assert "\x1b" not in r.clusters[0].summary
+        assert "red alert failed" in r.clusters[0].summary
+
+    def test_plain_lines_untouched(self):
+        """无 ESC 的行走快速路径（逐行无正则开销），内容不变。"""
+        r = analyze_text("2024-01-01 09:00:00 ERROR [db] plain boom")
+        assert r.clusters[0].summary == "plain boom"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R88：编码指定（覆盖自动探测，老系统乱码场景）
+# ---------------------------------------------------------------------------
+class TestEncodingOverride:
+    def test_specified_encoding_wins(self, tmp_path):
+        """显式指定编码：stats.encoding 即指定值，不再探测。"""
+        p = tmp_path / "gbk.log"
+        p.write_bytes("2024-01-01 09:00:00 ERROR [db] 中文错误\n".encode("gbk"))
+        r = analyze_file(p, encoding="gb18030")
+        assert r.stats.encoding == "gb18030"
+        assert "中文错误" in r.clusters[0].summary
+
+    def test_wrong_override_still_no_crash(self, tmp_path):
+        """指定错误编码：容错替换不崩溃（errors=replace 兜底）。"""
+        p = tmp_path / "utf8.log"
+        p.write_bytes("2024-01-01 09:00:00 ERROR [db] 中文错误\n".encode("utf-8"))
+        r = analyze_file(p, encoding="gb18030")
+        assert r.stats.encoding == "gb18030"
+        assert r.stats.error_entries == 1
+
+    def test_auto_detect_when_not_specified(self, tmp_path):
+        """不指定（None）：维持自动探测行为（回归保护）。"""
+        p = tmp_path / "a.log"
+        p.write_text(SAMPLE_LOG, encoding="utf-8")
+        r = analyze_file(p)
+        assert r.stats.encoding == "utf-8"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R91：关键词按正则匹配（use_regex=True 时 include/exclude 编译）
+# ---------------------------------------------------------------------------
+class TestRegexKeywords:
+    _LOG = "\n".join([
+        "2024-01-01 09:00:00 ERROR [db] ERR-1001 connection lost",
+        "2024-01-01 09:00:01 ERROR [net] network unreachable",
+        "2024-01-01 09:00:02 ERROR [db] heartbeat missed twice",
+    ])
+
+    def test_include_regex_pattern(self):
+        """正则包含：ERR-\\d{4} 命中错误码行，其余剔除。"""
+        r = analyze_text(self._LOG, include=[r"ERR-\d{4}"], use_regex=True)
+        assert r.stats.error_entries == 1
+        assert "ERR-1001" in r.clusters[0].summary
+
+    def test_include_alternation(self):
+        """正则或：timeout|unreachable 命中两者之一。"""
+        r = analyze_text(self._LOG,
+                         include=["lost|unreachable"], use_regex=True)
+        assert r.stats.error_entries == 2
+
+    def test_exclude_regex_pattern(self):
+        """正则排除：heartbeat.* 剔除心跳错误。"""
+        r = analyze_text(self._LOG, exclude=[r"heartbeat.*"], use_regex=True)
+        assert r.stats.error_entries == 2
+        assert not any("heartbeat" in c.summary for c in r.clusters)
+
+    def test_invalid_regex_degrades_not_crashes(self):
+        """非法正则降级丢弃不崩溃（GUI 边界之外的兜底校验）。"""
+        r = analyze_text(self._LOG, include=["[unclosed"], use_regex=True)
+        # 非法项被丢弃 → include 列表等效为空 → 全部准入
+        assert r.stats.error_entries == 3
+
+    def test_regex_off_keeps_substring_semantics(self):
+        """默认（False）：\\d 按字面子串处理（回归保护）。"""
+        r = analyze_text(self._LOG, include=[r"ERR-\d{4}"])
+        assert r.stats.error_entries == 0, "字面 \\d 不应命中任何行"

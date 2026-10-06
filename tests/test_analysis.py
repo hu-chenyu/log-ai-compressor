@@ -1,0 +1,596 @@
+# -*- coding: utf-8 -*-
+"""智能分析单元测试：根因判定、异常检测、优先级排序、堆栈降噪。"""
+from __future__ import annotations
+
+from log_ai_compressor.core.analysis import (
+    analyze_clusters,
+    cooccurring_clusters,
+    significant_in_window,
+    simplify_stack,
+)
+from log_ai_compressor.core.models import (
+    AnalysisResult,
+    ClusterInstance,
+    ClusterSample,
+    ErrorCluster,
+    LogEntry,
+    RunStats,
+    format_timestamp,
+)
+
+
+def make_cluster(cid, summary, level="ERROR", count=1, first_seen=None,
+                 first_line=1, last_line=1, stack=None, module=""):
+    entry = LogEntry(line_no=first_line, raw=summary, level=level,
+                     module=module, message=summary, timestamp=first_seen,
+                     stack=stack or [])
+    return ErrorCluster(
+        cluster_id=cid, template=f"{level} | {summary}",
+        message_template=summary, level=level, module=module, summary=summary,
+        count=count, first_line=first_line, last_line=last_line,
+        first_seen=first_seen, last_seen=first_seen,
+        sample=ClusterSample(entry=entry),
+    )
+
+
+def make_result(clusters, error_entries=None, global_adds=()):
+    from log_ai_compressor.core.models import TimeHistogram
+    gh = TimeHistogram()
+    for t in global_adds:
+        gh.add(t)
+    if error_entries is None:
+        error_entries = sum(c.count for c in clusters)
+    stats = RunStats(error_entries=error_entries)
+    return AnalysisResult(stats=stats, clusters=clusters, global_hist=gh)
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R102：错误共现分析
+# ---------------------------------------------------------------------------
+class TestCooccurrence:
+    def test_time_window_cooccurrence(self):
+        """两簇实例在同一 60s 窗口反复同现，识别为共现。"""
+        a = make_cluster(0, "connection refused", count=3)
+        a.instances = [
+            ClusterInstance(timestamp=100.0, line_no=10, summary="a"),
+            ClusterInstance(timestamp=130.0, line_no=20, summary="a"),
+        ]
+        b = make_cluster(1, "request failed", count=3)
+        b.instances = [
+            ClusterInstance(timestamp=105.0, line_no=15, summary="b"),
+            ClusterInstance(timestamp=135.0, line_no=25, summary="b"),
+        ]
+        c = make_cluster(2, "heartbeat ok", count=1)
+        c.instances = [ClusterInstance(timestamp=500.0, line_no=500,
+                                       summary="c")]
+        result = cooccurring_clusters(a, [a, b, c])
+        assert len(result) == 1
+        assert result[0][0].cluster_id == 1
+        assert result[0][1] == 4          # a2 × b2 = 4 次同窗
+
+    def test_line_window_fallback(self):
+        """无时间戳时按行距窗口判定共现。"""
+        a = make_cluster(0, "a", count=2)
+        a.instances = [ClusterInstance(line_no=10, summary="a"),
+                       ClusterInstance(line_no=80, summary="a")]
+        b = make_cluster(1, "b", count=2)
+        b.instances = [ClusterInstance(line_no=12, summary="b"),
+                       ClusterInstance(line_no=85, summary="b")]
+        c = make_cluster(2, "c", count=1)
+        c.instances = [ClusterInstance(line_no=1000, summary="c")]
+        result = cooccurring_clusters(a, [a, b, c], min_hits=2)
+        assert len(result) == 1
+        assert result[0][0].cluster_id == 1
+
+    def test_below_threshold_no_cooccurrence(self):
+        """同现次数不足 min_hits 时不报。"""
+        a = make_cluster(0, "a")
+        a.instances = [ClusterInstance(timestamp=100.0, summary="a")]
+        b = make_cluster(1, "b")
+        b.instances = [ClusterInstance(timestamp=105.0, summary="b")]
+        assert cooccurring_clusters(a, [a, b], min_hits=2) == []
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R104：故障窗口对比（刷选时段 vs 全量基线显著突增）
+# ---------------------------------------------------------------------------
+class TestSignificantInWindow:
+    def test_burst_cluster_significant(self):
+        """窗口内密集爆发的簇显著性置顶，均匀分布的簇不显著。"""
+        # 全量 0~1000s：burst 簇 10 次全在 [400,500]；flat 簇 10 次均匀
+        burst = make_cluster(0, "burst error", count=10)
+        burst.instances = [ClusterInstance(timestamp=400.0 + i * 10,
+                                           line_no=i + 1, summary="b")
+                           for i in range(10)]
+        flat = make_cluster(1, "flat error", count=10)
+        flat.instances = [ClusterInstance(timestamp=i * 100.0,
+                                          line_no=i + 100, summary="f")
+                          for i in range(10)]
+        hits = significant_in_window([burst, flat], 400.0, 500.0,
+                                     0.0, 1000.0)
+        assert [h[0].cluster_id for h in hits] == [0]
+        assert hits[0][1] == 10            # 窗口内次数
+        assert hits[0][2] >= 2.0           # Poisson z
+
+    def test_window_outside_span_empty(self):
+        """窗口与全量无交集 → 空结果。"""
+        c = make_cluster(0, "x", count=2)
+        c.instances = [ClusterInstance(timestamp=10.0, line_no=1),
+                       ClusterInstance(timestamp=20.0, line_no=2)]
+        assert significant_in_window([c], 500.0, 600.0, 0.0, 100.0) == []
+
+    def test_no_timestamp_clusters_skipped(self):
+        """无时间戳实例的簇不参与（无法定位窗口）。"""
+        c = make_cluster(0, "x", count=2)
+        c.instances = [ClusterInstance(line_no=1),
+                       ClusterInstance(line_no=2)]
+        assert significant_in_window([c], 0.0, 50.0, 0.0, 100.0) == []
+
+    def test_min_count_filter(self):
+        """窗口内次数不足 min_count 不报（单次同现不算突增）。"""
+        c = make_cluster(0, "x", count=1)
+        c.instances = [ClusterInstance(timestamp=10.0, line_no=1)]
+        assert significant_in_window([c], 0.0, 50.0, 0.0, 100.0) == []
+
+
+# ---------------------------------------------------------------------------
+# 堆栈降噪
+# ---------------------------------------------------------------------------
+class TestSimplifyStack:
+    def test_noise_frames_folded(self):
+        stack = [
+            "java.net.ConnectException: Connection refused",
+            "\tat com.app.db.Pool.init(Pool.java:42)",
+            "\tat java.base/java.net.AbstractPlainSocketImpl.connect(...)",
+            "\tat java.base/java.net.Socket.connect(Socket.java:1)",
+            "\tat com.app.core.Main.start(Main.java:18)",
+        ]
+        s = simplify_stack(stack)
+        assert s.business_count == 3
+        assert s.noise_count == 2
+        # 折叠注释出现在业务帧之间
+        assert any("已折叠 2 行" in line for line in s.lines)
+        assert "\tat com.app.db.Pool.init(Pool.java:42)" in s.lines
+
+    def test_caused_by_never_folded(self):
+        stack = [
+            "java.sql.SQLException: query failed",
+            "\tat com.app.db.Dao.query(Dao.java:99)",
+            "\tat org.hibernate.internal.SessionImpl.doWork(SessionImpl.java:1)",
+            "Caused by: java.net.ConnectException: Connection refused",
+        ]
+        s = simplify_stack(stack)
+        assert "Caused by: java.net.ConnectException: Connection refused" in s.lines
+
+    def test_traceback_header_kept(self):
+        s = simplify_stack([
+            "Traceback (most recent call last):",
+            '  File "/usr/lib/python3.9/site-packages/requests/api.py", line 75',
+            '  File "app/client.py", line 30, in fetch',
+            "ValueError: bad status",
+        ])
+        assert s.lines[0] == "Traceback (most recent call last):"
+        assert "ValueError: bad status" in s.lines
+        assert s.noise_count == 1
+
+    def test_all_noise_stack(self):
+        s = simplify_stack([
+            "\tat java.base/java.lang.Thread.run(Thread.java:1)",
+            "\tat org.springframework.context.Context.refresh(Context.java:1)",
+        ])
+        assert s.business_count == 0
+        assert s.noise_count == 2
+        assert len(s.lines) == 1   # 单条折叠注释
+
+    def test_empty(self):
+        s = simplify_stack([])
+        assert s.lines == [] and s.noise_count == 0
+
+
+# ---------------------------------------------------------------------------
+# 根因判定
+# ---------------------------------------------------------------------------
+class TestRootCause:
+    def test_caused_by_links_prior_error(self):
+        root = make_cluster(0, "pool init failed: connection refused",
+                             first_line=10, last_line=12)
+        derived = make_cluster(
+            1, "service unavailable", first_line=50, last_line=55,
+            stack=["java.sql.SQLException: query failed",
+                   "Caused by: java.net.ConnectException: Connection refused"],
+        )
+        result = make_result([root, derived])
+        analyze_clusters(result)
+        assert root.is_root_cause
+        assert "Caused-by" in root.root_cause_reason
+
+    def test_time_window_earliest_with_keyword(self):
+        # 同一 60s 窗口内：先发的根因特征错误 vs 后发的衍生错误
+        t0 = 1704067200.0
+        root = make_cluster(0, "connection refused to db host:1433",
+                            first_seen=t0, first_line=5)
+        derived = make_cluster(1, "request retry aborted after 3 attempts",
+                               first_seen=t0 + 5, first_line=9)
+        result = make_result([derived, root])
+        analyze_clusters(result)
+        assert root.is_root_cause
+        assert not derived.is_root_cause
+
+    def test_derived_flagged_by_cascade_keyword(self):
+        c = make_cluster(0, "downstream request skipped after retries")
+        result = make_result([c])
+        analyze_clusters(result)
+        assert not c.is_root_cause
+        assert "连锁衍生" in c.root_cause_reason
+
+    def test_strong_keywords_marked_root(self):
+        c = make_cluster(0, "cannot open file: permission denied, disk full")
+        result = make_result([c], error_entries=50)
+        analyze_clusters(result)
+        assert c.is_root_cause
+        assert "关键词" in c.root_cause_reason
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R76：根因强化（因果 DAG + 关键词 IDF 加权）
+# ---------------------------------------------------------------------------
+class TestRootCauseEnhanced:
+    def test_cross_reference_edge_marks_source_root(self):
+        """B 消息复述 A 的模板词（含稀有词）→ A→B 边，A 判图源头根因。"""
+        src = make_cluster(0, "auth token expired", first_line=10)
+        derived = make_cluster(
+            1, "request aborted because auth token expired", first_line=50)
+        result = make_result([derived, src])
+        analyze_clusters(result)
+        assert src.is_root_cause
+        assert "因果链源头" in src.root_cause_reason
+        assert not derived.is_root_cause
+        assert "连锁衍生" in derived.root_cause_reason
+        assert "auth token expired" in derived.root_cause_reason
+
+    def test_cross_reference_requires_rare_token(self):
+        """共享词在 ≥3 簇出现（泛词）→ 不建边、不误判根因。"""
+        a = make_cluster(0, "timeout foo bar", first_line=1)
+        b = make_cluster(1, "timeout foo baz", first_line=2)
+        c = make_cluster(2, "timeout foo qux", first_line=3)
+        result = make_result([a, b, c])
+        analyze_clusters(result)
+        assert not a.is_root_cause
+        assert not b.is_root_cause
+        assert not c.is_root_cause
+
+    def test_cross_reference_requires_temporal_order(self):
+        """互引用仅指向后发错误（先发不因后发的复述担责）。"""
+        later = make_cluster(0, "auth token expired", first_line=50)
+        earlier = make_cluster(1, "request aborted because auth token expired",
+                               first_line=10)
+        result = make_result([later, earlier])
+        analyze_clusters(result)
+        assert not earlier.is_root_cause or \
+            "因果链源头" not in earlier.root_cause_reason
+
+    def test_idf_weights_rare_keyword_stronger(self):
+        """罕见关键词（df 低）权重大于常见关键词。"""
+        from log_ai_compressor.core.analysis import _keyword_weights
+        clusters = [make_cluster(i, s) for i, s in enumerate(
+            ["deadlock detected", "timeout a", "timeout b", "timeout c"])]
+        w = _keyword_weights(clusters)
+        assert w["deadlock"] > w["timeout"]
+        # 单簇单命中权重恰为 1.0（与旧计数制兼容，阈值 3 语义不变）
+        single = _keyword_weights([make_cluster(0, "deadlock detected")])
+        assert abs(single["deadlock"] - 1.0) < 1e-9
+
+    def test_derived_reason_names_upstream(self):
+        """图内衍生错误的原因注明上游摘要（修上游别修它）。"""
+        src = make_cluster(0, "disk quota exceeded", first_line=10)
+        derived = make_cluster(1, "write failed: disk quota exceeded",
+                               first_line=20)
+        result = make_result([src, derived])
+        analyze_clusters(result)
+        assert "上游" in derived.root_cause_reason
+        assert "disk quota exceeded" in derived.root_cause_reason
+
+
+# ---------------------------------------------------------------------------
+# 异常检测
+# ---------------------------------------------------------------------------
+class TestAnomaly:
+    def test_burst_cluster_detected(self):
+        # 全局基线：每秒 1 个错误；第 600 秒爆发 50 个
+        t_base = 1704067200.0
+        adds = [t_base + i for i in range(60)]
+        adds += [t_base + 600.0] * 50
+        burst = make_cluster(0, "error storm", count=50,
+                             first_seen=t_base + 600.0, first_line=1)
+        normal = make_cluster(1, "steady error", count=60,
+                              first_seen=t_base, first_line=100)
+        # 手动填充簇级直方图
+        for _ in range(50):
+            burst.hist.add(t_base + 600.0)
+        for i in range(60):
+            normal.hist.add(t_base + i)
+        result = make_result([burst, normal], global_adds=adds)
+        analyze_clusters(result)
+        assert burst.anomaly == "burst"
+        assert normal.anomaly == ""
+
+    def test_rare_cluster_detected(self):
+        # 优化缺陷R75：罕见簇与既有簇模板相似（老错误的偶发尾巴）
+        # 才判 rare；不相似的升入 novel（见 TestAnomalyEnhanced）
+        rare = make_cluster(0, "frequent error variant", count=1)
+        common = make_cluster(1, "frequent error", count=99)
+        result = make_result([rare, common], error_entries=100)
+        analyze_clusters(result)
+        assert rare.anomaly == "rare"
+        assert common.anomaly == ""
+
+    def test_rare_not_flagged_when_total_small(self):
+        c = make_cluster(0, "solo error", count=1)
+        result = make_result([c], error_entries=1)
+        analyze_clusters(result)
+        assert c.anomaly == ""
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R75：异常检测强化（自持基线爆发 / 周期发作 / 新型错误）
+# ---------------------------------------------------------------------------
+class TestAnomalyEnhanced:
+    @staticmethod
+    def _instances(cluster, timestamps):
+        from log_ai_compressor.core.models import ClusterInstance
+        cluster.instances = [
+            ClusterInstance(timestamp=t, line_no=i + 1)
+            for i, t in enumerate(timestamps)
+        ]
+
+    def test_own_baseline_burst_without_global_burst(self):
+        """全局平稳但单簇自身陡增 → 自持基线通道判 burst（原全局通道漏报）。"""
+        t0 = 1704067200.0
+        c = make_cluster(0, "spiking error", count=70, first_seen=t0)
+        # 簇直方图：前 60 桶各 1 次，第 61 桶突增 10 次
+        for i in range(60):
+            c.hist.add(t0 + i)
+        for _ in range(10):
+            c.hist.add(t0 + 60.0)
+        # 全局直方图完全平稳（每秒 1 个）→ 无全局爆发窗口
+        flat = [t0 + i for i in range(100)]
+        result = make_result([c], global_adds=flat)
+        analyze_clusters(result)
+        assert c.anomaly == "burst", "自持基线爆发应命中（全局通道未命中）"
+
+    def test_own_baseline_quiet_when_uniform(self):
+        """簇内频次均匀 → 不误报自持基线爆发。"""
+        t0 = 1704067200.0
+        c = make_cluster(0, "steady error", count=60, first_seen=t0)
+        for i in range(60):
+            c.hist.add(t0 + i)
+        result = make_result([c], global_adds=[t0 + i for i in range(100)])
+        analyze_clusters(result)
+        assert c.anomaly == ""
+
+    def test_periodic_detected(self):
+        """定时间隔报错（变异系数≈0）→ periodic（周期发作）。"""
+        c = make_cluster(0, "watchdog keepalive failed", count=5,
+                         first_seen=100.0)
+        self._instances(c, [100.0, 130.0, 160.0, 190.0, 220.0])
+        result = make_result([c], error_entries=5)
+        analyze_clusters(result)
+        assert c.anomaly == "periodic"
+
+    def test_periodic_not_flagged_when_irregular(self):
+        """间隔忽长忽短 → 不判周期。"""
+        c = make_cluster(0, "random failure", count=5, first_seen=100.0)
+        self._instances(c, [100.0, 103.0, 190.0, 191.0, 400.0])
+        result = make_result([c], error_entries=5)
+        analyze_clusters(result)
+        assert c.anomaly == ""
+
+    def test_periodic_needs_min_samples(self):
+        """时间戳样本 <4 → 不判周期。"""
+        c = make_cluster(0, "few beats", count=3, first_seen=100.0)
+        self._instances(c, [100.0, 130.0, 160.0])
+        result = make_result([c], error_entries=3)
+        analyze_clusters(result)
+        assert c.anomaly == ""
+
+    def test_novel_detected_for_dissimilar_rare(self):
+        """罕见且与既有簇模板不相似 → novel（新型错误）。"""
+        common = make_cluster(0, "connection refused timeout error", count=10)
+        rare_new = make_cluster(1, "zqx blorptastic quantumflux failure",
+                                count=1)
+        result = make_result([common, rare_new], error_entries=11)
+        analyze_clusters(result)
+        assert rare_new.anomaly == "novel"
+
+    def test_rare_kept_for_similar_rare(self):
+        """罕见但与既有簇相似（老错误的偶发尾巴）→ 仍判 rare 不判 novel。"""
+        common = make_cluster(0, "connection refused timeout error", count=10)
+        rare_tail = make_cluster(1, "connection refused error again", count=1)
+        result = make_result([common, rare_tail], error_entries=11)
+        analyze_clusters(result)
+        assert rare_tail.anomaly == "rare"
+
+    def test_burst_precedes_periodic(self):
+        """优先级递降：既是周期又有自持爆发 → burst 优先。"""
+        t0 = 1704067200.0
+        c = make_cluster(0, "periodic spiker", count=70, first_seen=t0)
+        self._instances(c, [t0, t0 + 30, t0 + 60, t0 + 90, t0 + 120])
+        for i in range(60):
+            c.hist.add(t0 + i)
+        for _ in range(10):
+            c.hist.add(t0 + 60.0)
+        result = make_result([c], global_adds=[t0 + i for i in range(100)])
+        analyze_clusters(result)
+        assert c.anomaly == "burst", "爆发应优先于周期标注"
+
+
+# ---------------------------------------------------------------------------
+# 优先级
+# ---------------------------------------------------------------------------
+class TestPriority:
+    def test_error_always_front(self):
+        # 修复缺陷R40：ERROR 保证 P0 前置（兜底 80 ≥ P0 阈值 75；
+        # 原 FATAL 强制 90 随 FATAL 删除移除）
+        err = make_cluster(0, "minor error note", level="ERROR", count=1)
+        big_fail = make_cluster(1, "huge fail storm", level="FAIL", count=500)
+        result = make_result([big_fail, err], error_entries=501)
+        analyze_clusters(result)
+        assert result.clusters[0] is err
+        assert err.priority >= 80
+        assert err.priority_label == "P0"
+        assert big_fail.priority_label == "P1"
+
+    def test_frequency_boosts_priority(self):
+        # 修复缺陷R40：ERROR 兜底 80 会拉平同档分数（频次差异只
+        # 体现在排序），频次加分断言改用无兜底的 WARN 级
+        low = make_cluster(0, "rare warn a", level="WARN", count=1)
+        high = make_cluster(1, "frequent warn b", level="WARN", count=200)
+        result = make_result([low, high], error_entries=201)
+        analyze_clusters(result)
+        assert result.clusters[0] is high
+        assert high.priority > low.priority
+
+    def test_root_cause_boosts_priority(self):
+        t0 = 1704067200.0
+        plain = make_cluster(0, "plain error", level="ERROR", count=50,
+                             first_line=100, first_seen=t0 + 30)
+        root = make_cluster(0, "connection refused", level="ERROR", count=10,
+                            first_line=1, first_seen=t0)
+        result = make_result([plain, root], error_entries=60)
+        analyze_clusters(result)
+        assert root.is_root_cause
+        # 同量级下根因获得加分
+        assert root.priority + 20 > plain.priority - 20
+
+    def test_sort_priority_desc(self):
+        a = make_cluster(0, "a", level="ERROR", count=100)
+        b = make_cluster(1, "b", level="ERROR", count=10)
+        c = make_cluster(2, "c", level="FAIL", count=5)
+        result = make_result([c, b, a], error_entries=115)
+        analyze_clusters(result)
+        priorities = [x.priority for x in result.clusters]
+        assert priorities == sorted(priorities, reverse=True)
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R77：优先级强化（持续性/新生度 + 评分构成落库）
+# ---------------------------------------------------------------------------
+class TestPriorityEnhanced:
+    @staticmethod
+    def _with_time(result, t0, t1):
+        result.stats.time_start, result.stats.time_end = t0, t1
+        return result
+
+    def test_ongoing_boosts_priority(self):
+        """末见贴日志末尾（≤60s）→ 持续 +5，评分构成含「持续」。"""
+        t0, t1 = 1704067200.0, 1704067600.0
+        old = make_cluster(0, "old warn", level="WARN", count=10,
+                           first_seen=t0, first_line=1)
+        old.last_seen = t0 + 100
+        hot = make_cluster(1, "hot warn", level="WARN", count=10,
+                           first_seen=t0, first_line=2)
+        hot.last_seen = t1 - 10
+        result = self._with_time(
+            make_result([old, hot], error_entries=20), t0, t1)
+        analyze_clusters(result)
+        assert "持续" in hot.priority_detail
+        assert "持续" not in old.priority_detail
+        assert hot.priority > old.priority
+
+    def test_new_pattern_boosts_priority(self):
+        """首现于日志后 25% 时段 → 新生 +5，评分构成含「新生」。"""
+        t0, t1 = 1704067200.0, 1704067600.0
+        early = make_cluster(0, "early warn", level="WARN", count=10,
+                             first_seen=t0 + 10, first_line=1)
+        early.last_seen = t0 + 10
+        late = make_cluster(1, "late warn", level="WARN", count=10,
+                            first_seen=t0 + 330, first_line=2)
+        late.last_seen = t0 + 330     # 距末尾 70s：新生但不持续
+        result = self._with_time(
+            make_result([early, late], error_entries=20), t0, t1)
+        analyze_clusters(result)
+        assert "新生" in late.priority_detail
+        assert "新生" not in early.priority_detail
+        assert "持续" not in late.priority_detail
+        assert late.priority > early.priority
+
+    def test_priority_detail_recorded(self):
+        """评分构成落库：含各级别分项与档位钳制说明（判断依据）。"""
+        c = make_cluster(0, "minor error", level="ERROR", count=1)
+        result = make_result([c], error_entries=1)
+        analyze_clusters(result)
+        assert "级别" in c.priority_detail
+        assert "保底" in c.priority_detail, "ERROR 档钳制应注明"
+
+
+# ---------------------------------------------------------------------------
+# 优化缺陷R78：关联叙事（相似簇关联 + 根因时间线）
+# ---------------------------------------------------------------------------
+class TestRelatedAndTimeline:
+    def test_related_clusters_linked(self):
+        """模板词集 Jaccard ≥0.8 的簇互相登记相关簇。"""
+        a = make_cluster(0, "camera sensor init failed code 101")
+        b = make_cluster(1, "camera sensor init failed code 202")
+        c = make_cluster(2, "disk quota exceeded")
+        result = make_result([a, b, c])
+        analyze_clusters(result)
+        assert b.cluster_id in a.related_clusters
+        assert a.cluster_id in b.related_clusters
+        assert c.related_clusters == []
+
+    def test_related_requires_high_similarity(self):
+        """模板不相似的簇不得关联。"""
+        a = make_cluster(0, "camera sensor init failed")
+        b = make_cluster(1, "network socket timeout error")
+        result = make_result([a, b])
+        analyze_clusters(result)
+        assert a.related_clusters == []
+        assert b.related_clusters == []
+
+    def test_root_timeline_built(self):
+        """根因簇生成传播链：首次根因 → +Ns 衍生 → +Ns 爆发。"""
+        t0 = 1704067200.0
+        src = make_cluster(0, "auth token expired", count=1,
+                           first_seen=t0, first_line=1)
+        d1 = make_cluster(1, "request aborted because auth token expired",
+                          count=5, first_seen=t0 + 3, first_line=10)
+        d2 = make_cluster(2, "auth token expired storm", count=60,
+                          first_seen=t0 + 40, first_line=20)
+        # d2 自持基线爆发（全局平稳）
+        for i in range(60):
+            d2.hist.add(t0 + i)
+        for _ in range(10):
+            d2.hist.add(t0 + 60.0)
+        result = make_result([src, d1, d2],
+                             global_adds=[t0 + i for i in range(100)])
+        analyze_clusters(result)
+        assert src.is_root_cause
+        tl = src.root_timeline
+        assert "首次" in tl and "auth token expired" in tl
+        assert "+3s" in tl and "衍生" in tl
+        assert "+40s" in tl and "爆发" in tl
+        assert d1.root_timeline == "" and d2.root_timeline == "", \
+            "时间线仅根因簇持有"
+
+    def test_timeline_falls_back_to_line_delta(self):
+        """无时间戳时传播链退化为行号差。"""
+        src = make_cluster(0, "auth token expired", first_line=1)
+        d1 = make_cluster(1, "request aborted because auth token expired",
+                          first_line=40)
+        result = make_result([src, d1])
+        analyze_clusters(result)
+        assert "+39行" in src.root_timeline
+
+
+# ---------------------------------------------------------------------------
+# 时间格式化
+# ---------------------------------------------------------------------------
+class TestFormatTimestamp:
+    def test_none(self):
+        assert format_timestamp(None) == "-"
+
+    def test_relative(self):
+        assert format_timestamp(123.456) == "123.456s"
+
+    def test_epoch(self):
+        assert format_timestamp(1704067200.0).startswith("2024-01-01")

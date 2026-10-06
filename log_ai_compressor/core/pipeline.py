@@ -1,0 +1,539 @@
+# -*- coding: utf-8 -*-
+"""流式处理管线：逐行读取 -> 解析 -> 过滤 -> 聚类 -> 智能分析 -> 结果。
+
+性能与内存设计（核心架构约束）
+------------------------------
+1. **纯流式逐行读取**：文件以文本流迭代器逐行消费，内存占用仅与
+   错误簇数量相关，与日志总行数无关（理论无行数上限）；
+2. **典型样例上下文捕获**：
+   - 前上下文：滚动窗口（带行号的 deque，容量 context+64）按行号
+     区间截取，条目自身堆栈行不会混入前上下文；
+   - 后上下文：对「新建簇 / 更换样例」的典型样例与每个含完整
+     详情的实例开启待补队列，收集其后 context 行物理原始行，
+     收满即关闭 —— 内存严格有界；
+3. **进度与取消**：进度回调按行数间隔触发；取消事件按独立间隔轮询，
+   取消后返回已完成的增量结果（truncated 标记）。
+"""
+from __future__ import annotations
+
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import Event
+from typing import Callable, Dict, Iterable, List, Optional
+
+from log_ai_compressor.constants import (
+    CANCEL_CHECK_EVERY_LINES,
+    CLUSTER_SIMILARITY_THRESHOLD,
+    DEFAULT_SELECTED_LEVELS,
+    ERROR_LEVELS,
+    PROGRESS_EVERY_LINES,
+    SIMILARITY_PRESETS,
+)
+from log_ai_compressor.core.analysis import ANALYSIS_MODE_DEEP, analyze_clusters
+from log_ai_compressor.core.clustering import ErrorClusterer
+from log_ai_compressor.core.encoding import (
+    detect_encoding,
+    is_compressed,
+    open_text_stream,
+)
+from log_ai_compressor.core.filters import EntryFilter, FilterConfig
+from log_ai_compressor.core.models import AnalysisResult, RunStats
+from log_ai_compressor.core.parser import LogParser
+from log_ai_compressor.rules.engine import (
+    AUTO_RULE,
+    RuleSet,
+    detect_rule,
+    load_ruleset,
+    stratified_sample,
+)
+
+# 进度回调签名：cb({"lines", "lps", "clusters", "elapsed", "phase"})
+ProgressCallback = Callable[[dict], None]
+
+
+class ProcessingCancelled(Exception):
+    """用户主动取消处理（run 仍会返回增量结果前抛出/或内部捕获）。"""
+
+
+# 优化缺陷R90：ANSI 转义序列（Jenkins AnsiColor 等彩色控制符，
+# 导出/投喂大模型时为乱码垃圾字符）—— 行摄入时剥除（含 ESC 才
+# 启动正则，无 ANSI 的日志零额外开销）
+_ANSI_ESCAPE_RE = None  # 延迟编译（模块导入零成本）
+
+
+def _strip_ansi(line: str) -> str:
+    global _ANSI_ESCAPE_RE
+    if "\x1b" not in line:
+        return line
+    if _ANSI_ESCAPE_RE is None:
+        import re as _re
+        _ANSI_ESCAPE_RE = _re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+    return _ANSI_ESCAPE_RE.sub("", line)
+
+
+def _sample_compressed(path: Path, encoding: str,
+                       total: int = 150) -> List[str]:
+    """压缩包分层采样（优化缺陷R87：gzip/zip 无法按字节 seek 估算
+    行偏移 —— 头部 50 + 流式跳读解压后 64KB/256KB 各取 50，
+    开销与文件大小无关；日志格式通常整体统一，足敷规则识别）。
+    """
+    third = total // 3
+    out: List[str] = []
+    with open_text_stream(path, encoding) as stream:
+        for line in stream:                     # 头段
+            out.append(line.rstrip("\r\n"))
+            if len(out) >= third:
+                break
+        for skip_bytes in (1 << 16, 1 << 18):   # 中/尾近似段
+            skipped = 0
+            for line in stream:
+                skipped += len(line)
+                if skipped >= skip_bytes:
+                    break
+            seg = 0                             # 每段取 third 行
+            for line in stream:
+                out.append(line.rstrip("\r\n"))
+                seg += 1
+                if seg >= third:
+                    break
+    return out
+
+
+def _sample_log_file(path: Path, encoding: str,
+                     total: int = 150) -> List[str]:
+    """文件分层采样（头 50 + 中 50 + 尾 50，优化缺陷R71）。
+
+    中部/尾部按文件大小估算行均长后 seek 读取（不整读大文件）；
+    seek 落点可能截断多字节字符，首行残段直接丢弃，解码错误替换。
+    小文件（估算行数 ≤total）退化为全量头部读取。
+    优化缺陷R87：压缩包（gzip/zip）走流式跳读采样（无法 seek）。
+    """
+    if is_compressed(path):
+        return _sample_compressed(path, encoding, total)
+    head: List[str] = []
+    with open_text_stream(path, encoding) as stream:
+        for i, line in enumerate(stream):
+            if i >= total // 3:
+                break
+            head.append(line.rstrip("\r\n"))
+    try:
+        size = path.stat().st_size
+        avg = max(1, sum(len(l) + 1 for l in head) // max(1, len(head)))
+        if size // avg <= total:
+            return head
+        for frac in (0.5, 1.0):
+            offset = int(size * frac) - avg * (total // 3)
+            with open(path, "rb") as fh:
+                fh.seek(max(0, offset))
+                data = fh.read(avg * (total // 3 + 4))
+            seg = data.decode(encoding, errors="replace").splitlines()[1:]
+            head.extend(seg[:total // 3])
+    except (OSError, UnicodeError, LookupError):
+        pass
+    return head
+
+
+@dataclass
+class PipelineConfig:
+    """管线配置：过滤参数 + 解析规则 + 分析开关。"""
+    filter_config: FilterConfig = field(default_factory=FilterConfig.defaults)
+    rule: Optional[str] = None          # 规则集名（generic/embedded/jenkins）或 YAML 路径
+    analyze: bool = True                # 是否执行智能分析（根因/异常/优先级）
+    # 优化缺陷R79：智能分析模式 full（完整，默认阈值）/ deep（深度扫描，
+    # 降阈宁多报不漏报）/ fast（快速聚类，等效 analyze=False）
+    analysis_mode: str = "full"
+    # 优化缺陷R84：相似度阈值档位 strict（严格0.95）/ standard（标准
+    # 0.85，默认）/ lenient（宽松0.70）—— 控制错误聚类合并激进度
+    similarity: str = "standard"
+    # 优化缺陷R85：时间范围过滤（第一前置项）—— epoch 精确区间
+    # （time_start/time_end，秒）或每日时段区间（tod_start/tod_end，
+    # 当日秒数）；None 表示该端不限；无时间戳条目始终保留
+    time_start: Optional[float] = None
+    time_end: Optional[float] = None
+    tod_start: Optional[float] = None
+    tod_end: Optional[float] = None
+    # 优化缺陷R85：行数上限采样（None=全部；达上限收束并标记
+    # stats.limit_hit，与取消中断区分）
+    max_lines: Optional[int] = None
+    # 优化缺陷R88：编码指定（None=自动探测；老系统日志自动探测失灵
+    # 时手动纠正乱码，如 "utf-8" / "gb18030"）
+    encoding: Optional[str] = None
+
+
+class LogPipeline:
+    """单文件 / 单文本的流式分析管线（可复用，线程安全边界由调用方保证）。"""
+
+    def __init__(self,
+                 config: Optional[PipelineConfig] = None,
+                 progress_cb: Optional[ProgressCallback] = None,
+                 cancel_event: Optional[Event] = None,
+                 ruleset: Optional[RuleSet] = None):
+        self._config = config or PipelineConfig()
+        self._progress_cb = progress_cb
+        self._cancel_event = cancel_event
+        # 规则集：外部注入优先（复用已编译规则），否则按配置名加载；
+        # 优化缺陷R71：rule=auto 时延迟到行源处自动识别后再加载
+        self._auto_rule = ruleset is None and self._config.rule == AUTO_RULE
+        if ruleset is not None:
+            self._ruleset = ruleset
+        elif self._auto_rule:
+            self._ruleset = None
+        else:
+            self._ruleset = load_ruleset(self._config.rule)
+        self._entry_filter = EntryFilter(self._config.filter_config)
+        self._ctx = self._config.filter_config.context_lines
+
+    # ------------------------------------------------------------------
+    # 运行入口
+    # ------------------------------------------------------------------
+    def run_file(self, path) -> AnalysisResult:
+        """流式分析日志文件（编码自动探测或配置指定，优化缺陷R88）。"""
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(f"日志文件不存在: {path}")
+        encoding = self._config.encoding or detect_encoding(path)
+        auto = self._resolve_ruleset(_sample_log_file(path, encoding))
+        stats = RunStats(source=str(path), encoding=encoding,
+                         rule_name=self._ruleset.name + ("（自动）" if auto else ""))
+        with open_text_stream(path, encoding) as stream:
+            return self._process_lines(stream, stats)
+
+    def run_files(self, paths) -> AnalysisResult:
+        """轮转文件合并分析（优化缺陷R89：多文件按序串流，跨轮转
+        因果链不断 —— 簇/根因/时间线基于全局时间戳，与文件边界
+        无关；调用方负责排序（最旧在前，见 GUI 轮转序号排序））。
+        """
+        paths = [Path(p) for p in paths]
+        for p in paths:
+            if not p.is_file():
+                raise FileNotFoundError(f"日志文件不存在: {p}")
+        # 编码：取首个文件（同系列轮转文件编码一致；指定编码时全用指定值）
+        encoding = self._config.encoding or detect_encoding(paths[0])
+        # 规则识别采样：取首个文件（同系列格式一致）
+        auto = self._resolve_ruleset(_sample_log_file(paths[0], encoding))
+        stats = RunStats(
+            source=" ␞ ".join(p.name for p in paths) if len(paths) > 1
+            else str(paths[0]),
+            encoding=encoding,
+            rule_name=self._ruleset.name + ("（自动）" if auto else ""))
+
+        def chained():
+            for p in paths:
+                with open_text_stream(p, encoding) as stream:
+                    yield from stream
+
+        return self._process_lines(chained(), stats)
+
+    def run_text(self, text: str, source: str = "<粘贴文本>") -> AnalysisResult:
+        """分析粘贴的日志文本。"""
+        lines = text.splitlines()
+        auto = self._resolve_ruleset(stratified_sample(lines))
+        stats = RunStats(source=source, encoding="utf-8",
+                         rule_name=self._ruleset.name + ("（自动）" if auto else ""))
+        return self._process_lines(lines, stats)
+
+    def _resolve_ruleset(self, sample: List[str]) -> bool:
+        """auto 模式：按分层采样打分选规则并加载（返回是否自动识别）。
+
+        优化缺陷R71：rule_name 追加「（自动）」标记，状态栏/报告可见
+        实际生效的规则；手动指定规则时直接返回 False（原行为不变）。
+        """
+        if not self._auto_rule:
+            return False
+        self._ruleset = load_ruleset(detect_rule(sample))
+        return True
+
+    # ------------------------------------------------------------------
+    # 核心流式处理
+    # ------------------------------------------------------------------
+    def _process_lines(self, lines: Iterable[str], stats: RunStats) -> AnalysisResult:
+        t0 = time.perf_counter()
+        parser = LogParser(self._ruleset)
+        # 优化缺陷R84：相似度档位映射阈值（未知键回退标准，配置兼容）
+        clusterer = ErrorClusterer(
+            similarity_threshold=SIMILARITY_PRESETS.get(
+                self._config.similarity, CLUSTER_SIMILARITY_THRESHOLD))
+
+        from log_ai_compressor.core.models import TimeHistogram
+        from log_ai_compressor.constants import GLOBAL_HIST_MAX_BUCKETS
+        global_hist = TimeHistogram(max_buckets=GLOBAL_HIST_MAX_BUCKETS)
+
+        # 前上下文滚动窗口：(行号, 行文本)，容量 context+64 保证
+        # 常规堆栈长度下仍能取到条目之前的上下文
+        window = self._ctx + 64
+        recent: deque = deque(maxlen=window)
+        # 后上下文待补队列：id(样例/实例) -> {"target", "start_line", "lines"}
+        pending: Dict[int, dict] = {}
+
+        line_no = 0
+        cancelled = False
+        limit_hit = False     # 优化缺陷R85：行数上限采样命中标记
+
+        def notify(phase: str) -> None:
+            if self._progress_cb:
+                elapsed = time.perf_counter() - t0
+                self._progress_cb({
+                    "lines": line_no,
+                    "lps": line_no / elapsed if elapsed > 0 else 0.0,
+                    "clusters": len(clusterer),
+                    "elapsed": elapsed,
+                    "phase": phase,
+                })
+
+        try:
+            for raw_line in lines:
+                line_no += 1
+                # 优化缺陷R99：原始字符数逐行累计（Token 压缩率原始侧）
+                stats.raw_chars += len(raw_line)
+                line = _strip_ansi(raw_line.rstrip("\r\n"))
+
+                # 1) 新条目开始 -> 处理上一个完整条目
+                completed = parser.feed(line, line_no)
+                if completed is not None:
+                    self._handle_entry(completed, stats, clusterer,
+                                       global_hist, recent, pending)
+
+                # 2) 后上下文补录（仅对开启待补的样例）
+                if pending:
+                    for item in list(pending.values()):
+                        if (line_no > item["start_line"]
+                                and len(item["lines"]) < self._ctx):
+                            item["lines"].append(line)
+                            if len(item["lines"]) >= self._ctx:
+                                self._close_pending(item, pending)
+
+                # 3) 前上下文滚动窗口
+                recent.append((line_no, line))
+
+                # 4) 取消轮询（独立间隔，开销极低）
+                if (self._cancel_event is not None
+                        and line_no % CANCEL_CHECK_EVERY_LINES == 0
+                        and self._cancel_event.is_set()):
+                    cancelled = True
+                    break
+
+                # 4.5) 行数上限采样（优化缺陷R85）：达上限即收束 ——
+                # 标记 limit_hit（与取消中断区分，非用户取消）
+                if (self._config.max_lines is not None
+                        and line_no >= self._config.max_lines):
+                    limit_hit = True
+                    break
+
+                # 5) 进度上报（按行数间隔）
+                if line_no % PROGRESS_EVERY_LINES == 0:
+                    notify("parsing")
+
+            # 流结束：产出最后一个条目
+            last = parser.flush()
+            if last is not None:
+                self._handle_entry(last, stats, clusterer, global_hist,
+                                   recent, pending)
+        except ProcessingCancelled:
+            cancelled = True
+
+        # 关闭所有待补样例的后上下文
+        for item in list(pending.values()):
+            self._close_pending(item, pending)
+
+        stats.total_lines = line_no
+        stats.truncated = cancelled
+        stats.limit_hit = limit_hit       # 优化缺陷R85：上限采样命中
+        stats.duration = time.perf_counter() - t0
+        stats.lines_per_second = (line_no / stats.duration
+                                  if stats.duration > 0 else 0.0)
+
+        result = AnalysisResult(
+            stats=stats,
+            clusters=clusterer.clusters,
+            global_hist=global_hist,
+            keywords=self._config.filter_config.normalized_include(),
+        )
+        if self._config.analyze and result.clusters:
+            # 优化缺陷R79：深度扫描模式降阈执行（完整模式默认阈值）
+            if self._config.analysis_mode == "deep":
+                analyze_clusters(result, **ANALYSIS_MODE_DEEP)
+            else:
+                analyze_clusters(result)
+        notify("done" if not cancelled else "cancelled")
+        return result
+
+    # ------------------------------------------------------------------
+    # 条目处理
+    # ------------------------------------------------------------------
+    def _handle_entry(self, entry, stats: RunStats, clusterer: ErrorClusterer,
+                      global_hist, recent: deque, pending: Dict[int, dict]) -> None:
+        """统计 + 过滤 + 聚类；必要时开启样例后上下文待补。"""
+        # 优化缺陷R85：时间范围过滤（第一前置项，先于一切统计）——
+        # epoch 精确区间 / 每日时段区间；无时间戳条目无法定位，
+        # 始终保留（宁留勿丢，避免 CI 日志大量无戳行被误清）
+        ts = entry.timestamp
+        if ts is not None:
+            if (self._config.time_start is not None
+                    and ts < self._config.time_start):
+                return
+            if (self._config.time_end is not None
+                    and ts > self._config.time_end):
+                return
+            if (self._config.tod_start is not None
+                    or self._config.tod_end is not None):
+                lt = time.localtime(ts)
+                tod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+                if (self._config.tod_start is not None
+                        and tod < self._config.tod_start):
+                    return
+                if (self._config.tod_end is not None
+                        and tod > self._config.tod_end):
+                    return
+        stats.entry_lines += 1
+        stats.level_counts[entry.level] = stats.level_counts.get(entry.level, 0) + 1
+
+        # 日志时间范围（所有带时间戳条目，不限级别）
+        if entry.timestamp is not None:
+            stats.ts_entries += 1     # 优化缺陷R71：时间戳识别率分子
+            if stats.time_start is None or entry.timestamp < stats.time_start:
+                stats.time_start = entry.timestamp
+            if stats.time_end is None or entry.timestamp > stats.time_end:
+                stats.time_end = entry.timestamp
+
+        if entry.level in ERROR_LEVELS:
+            stats.error_lines += 1
+
+        # 修复缺陷R40：聚类准入由过滤器决定 —— 级别复选框选中
+        # WARN/INFO/DEBUG 时同样聚类展示（五级别五色五档）；
+        # error_lines/error_entries 统计口径不变（仍只计错误类级别）
+        if not self._entry_filter.match(entry):
+            return
+        if entry.level in ERROR_LEVELS:
+            stats.error_entries += 1
+
+        # 前上下文快照：按行号区间截取（排除条目自身的堆栈/折行）
+        before: Optional[List[str]] = None
+        if self._ctx > 0:
+            before = [text for (no, text) in recent
+                      if entry.line_no - self._ctx <= no < entry.line_no]
+
+        cluster, replaced, instance = clusterer.add(entry, before)
+        if replaced and self._ctx > 0:
+            # 新建簇或样例升级 -> 开启样例后上下文待补
+            pending[id(cluster.sample)] = {
+                "target": cluster.sample,
+                "start_line": entry.last_line_no or entry.line_no,
+                "lines": [],
+            }
+        # 修复缺陷R44：详情实例同样开启后上下文待补（此前仅典型
+        # 样例收集，点击实例时详情面板无后上下文可显示）；
+        # 元数据实例（entry=None，超详情上限）不收集，内存有界
+        if (instance is not None and instance.entry is not None
+                and self._ctx > 0):
+            pending[id(instance)] = {
+                "target": instance,
+                "start_line": entry.last_line_no or entry.line_no,
+                "lines": [],
+            }
+
+        # 全局错误时间直方图（过滤后的错误，与结果口径一致）
+        if entry.timestamp is not None:
+            global_hist.add(entry.timestamp)
+
+    def _close_pending(self, item: dict, pending: Dict[int, dict]) -> None:
+        """收束待补目标：写入 after 上下文并移除队列。
+
+        修复缺陷R44：目标泛化为典型样例或详情实例（两者均有
+        after 字段），键为 id(target) —— 同簇的样例与多个实例
+        可同时待补，互不覆盖。
+        """
+        target = item["target"]
+        target.after = list(item["lines"])
+        pending.pop(id(target), None)
+
+
+# ---------------------------------------------------------------------------
+# 便捷 API（GUI / CLI / 测试共用）
+# ---------------------------------------------------------------------------
+def _build_config(levels, include, exclude, top_n, context_lines, rule,
+                  analyze, analysis_mode="full", similarity="standard",
+                  time_start=None, time_end=None, tod_start=None,
+                  tod_end=None, max_lines=None,
+                  encoding=None, use_regex=False) -> PipelineConfig:
+    cfg = FilterConfig(
+        levels=list(levels) if levels else list(DEFAULT_SELECTED_LEVELS),
+        include=list(include or []),
+        exclude=list(exclude or []),
+        top_n=top_n if top_n else FilterConfig.defaults().top_n,
+        context_lines=context_lines if context_lines is not None
+        else FilterConfig.defaults().context_lines,
+        # 优化缺陷R91：关键词按正则解释（透传 GUI 开关）
+        use_regex=use_regex,
+    )
+    # 优化缺陷R79：fast 快速聚类等效关闭智能分析
+    return PipelineConfig(filter_config=cfg, rule=rule,
+                          analyze=analyze and analysis_mode != "fast",
+                          analysis_mode=analysis_mode,
+                          similarity=similarity,
+                          time_start=time_start, time_end=time_end,
+                          tod_start=tod_start, tod_end=tod_end,
+                          max_lines=max_lines, encoding=encoding)
+
+
+def analyze_file(path, *, levels=None, include=None, exclude=None,
+                 top_n=None, context_lines=None, rule=None, analyze=True,
+                 analysis_mode: str = "full",
+                 similarity: str = "standard",
+                 time_start=None, time_end=None, tod_start=None,
+                 tod_end=None, max_lines=None, encoding=None,
+                 use_regex: bool = False,
+                 progress_cb: Optional[ProgressCallback] = None,
+                 cancel_event: Optional[Event] = None) -> AnalysisResult:
+    """分析单个日志文件（详见 LogPipeline.run_file）。"""
+    pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
+                                         context_lines, rule, analyze,
+                                         analysis_mode, similarity,
+                                         time_start, time_end, tod_start,
+                                         tod_end, max_lines, encoding,
+                                         use_regex),
+                           progress_cb=progress_cb, cancel_event=cancel_event)
+    return pipeline.run_file(path)
+
+
+def analyze_files(paths, *, levels=None, include=None, exclude=None,
+                  top_n=None, context_lines=None, rule=None, analyze=True,
+                  analysis_mode: str = "full",
+                  similarity: str = "standard",
+                  time_start=None, time_end=None, tod_start=None,
+                  tod_end=None, max_lines=None, encoding=None,
+                  use_regex: bool = False,
+                  progress_cb: Optional[ProgressCallback] = None,
+                  cancel_event: Optional[Event] = None) -> AnalysisResult:
+    """轮转文件合并分析（优化缺陷R89，详见 LogPipeline.run_files）。
+
+    调用方负责 paths 排序（最旧在前）；单文件时等效 analyze_file。
+    """
+    pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
+                                         context_lines, rule, analyze,
+                                         analysis_mode, similarity,
+                                         time_start, time_end, tod_start,
+                                         tod_end, max_lines, encoding,
+                                         use_regex),
+                           progress_cb=progress_cb, cancel_event=cancel_event)
+    return pipeline.run_files(paths)
+
+
+def analyze_text(text: str, *, source: str = "<粘贴文本>", levels=None,
+                 include=None, exclude=None, top_n=None, context_lines=None,
+                 rule=None, analyze=True, analysis_mode: str = "full",
+                 similarity: str = "standard",
+                 time_start=None, time_end=None, tod_start=None,
+                 tod_end=None, max_lines=None, use_regex: bool = False,
+                 progress_cb: Optional[ProgressCallback] = None,
+                 cancel_event: Optional[Event] = None) -> AnalysisResult:
+    """分析粘贴文本（详见 LogPipeline.run_text）。"""
+    pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
+                                         context_lines, rule, analyze,
+                                         analysis_mode, similarity,
+                                         time_start, time_end, tod_start,
+                                         tod_end, max_lines, None,
+                                         use_regex),
+                           progress_cb=progress_cb, cancel_event=cancel_event)
+    return pipeline.run_text(text, source=source)

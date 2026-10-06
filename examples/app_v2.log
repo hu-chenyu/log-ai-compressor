@@ -1,0 +1,13 @@
+2024-03-15 08:00:00 INFO [main] app v1.1 starting
+2024-03-15 08:00:01 INFO [db] pool initialized
+2024-03-15 08:00:05 ERROR [db] connection refused to shard-0:5432
+2024-03-15 08:00:10 ERROR [auth] token expired for session 7c4d5e
+2024-03-15 08:00:11 ERROR [auth] token expired for session 6b5a4f
+2024-03-15 08:00:12 ERROR [auth] token expired for session 5a3b2c
+2024-03-15 08:00:13 ERROR [auth] token expired for session 4c2d1e
+2024-03-15 08:00:14 ERROR [auth] token expired for session 3e4f5a
+2024-03-15 08:00:15 ERROR [newmod] regression: new payment module crash
+2024-03-15 08:00:16 ERROR [newmod] regression: new payment module crash
+2024-03-15 08:00:17 ERROR [newmod] regression: new payment module crash
+2024-03-15 08:00:20 WARN [pool] retries exhausted
+2024-03-15 08:00:25 INFO [main] app v1.1 running
