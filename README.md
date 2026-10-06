@@ -106,23 +106,43 @@
 ### 安装
 
 ```bash
-git clone https://github.com/hu-chenyu/log-ai-compressor.git
-cd log-ai-compressor
-pip install -r requirements.txt
+# 本地 Web 界面（推荐：自动开浏览器，端口 8765 起，被占用自动顺延）
+pip install "log-ai-compressor[web]"
+log-ai-compressor web
 ```
 
-### 启动（推荐：双击）
+> 只在命令行里压缩日志、不需要界面：`pip install log-ai-compressor`（硬依赖只有 PyYAML）
 
-双击项目根目录的 **`start.bat`** —— 自动定位 Python、首次运行自动装依赖、启动本地服务并打开浏览器。
+### Windows：双击运行
 
-端口 8765 被占用时会自动顺延到 8766、8767…，不用手动改。
+从源码运行时，项目根目录的 **`start.bat`** 会自动定位 Python、首次运行自动装依赖、
+启动本地服务并打开浏览器。
 
-### 命令行启动
+### 命令行
 
 ```bash
-log-ai-compressor web              # 本地 Web 界面（等价于双击 start.bat）
-log-ai-compressor web --port 9000  # 指定端口
-log-ai-compressor web --no-browser # 不自动开浏览器
+log-ai-compressor web               # 本地 Web 界面
+log-ai-compressor web --port 9000   # 指定端口
+log-ai-compressor web --no-browser  # 不自动开浏览器
+
+log-ai-compressor run app.log --top 20 -o report.md   # 分析并导出 Markdown
+```
+
+### 从源码运行（开发者）
+
+```bash
+git clone https://github.com/hu-chenyu/log-ai-compressor.git
+cd log-ai-compressor
+pip install -r requirements-dev.txt
+python -m pytest                       # 583 个测试
+python scripts/benchmark_loghub.py     # 复现上面的实测表（需先下载数据集）
+```
+
+### 让 AI Agent 直接调用本机日志（MCP）
+
+```bash
+pip install "log-ai-compressor[mcp]"
+log-ai-compressor mcp                  # 打印现成的客户端配置
 ```
 
 ---
