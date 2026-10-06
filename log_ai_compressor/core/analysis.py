@@ -81,6 +81,29 @@ COOC_MIN_HITS = 2              # 至少同现次数（1 次可能是巧合）
 
 # 关键因果行（降噪时永不折叠）
 _CAUSED_BY_RE = re.compile(r"^\s*Caused by\s*[:：]", re.IGNORECASE)
+# Caused by 行里**异常本体**（`Caused by: java.io.IOException: boom` → 异常文本）
+_CAUSED_BY_TEXT = re.compile(r"^\s*Caused by\s*[:：]\s*(.+?)\s*$", re.IGNORECASE)
+
+
+def deepest_caused_by(stack: Sequence[str]) -> str:
+    """从堆栈里取**最内层**（最后一条）Caused by 的异常文本。
+
+    这才是真正的根因。Java 语义下：
+
+        java.lang.RuntimeException: query failed      <- 外层：症状
+        Caused by: java.sql.SQLTimeoutException: ... <- 内层：因
+        Caused by: java.lang.OutOfMemoryError: ...  <- 最内层：根因
+
+    历史实现把「时间上紧邻在它之前的另一个错误簇」当成因，那是**时间相邻性**
+    —— 统计猜测，不是因果证明。现已改为只认本函数给出的链内证据。
+    """
+    deepest = ""
+    for line in stack or []:
+        m = _CAUSED_BY_TEXT.match(line)
+        if m:
+            deepest = m.group(1).strip()
+    return deepest
+
 _TRACEBACK_RE = re.compile(r"^Traceback \(|Backtrace:", re.IGNORECASE)
 _EXCEPTION_RE = re.compile(r"^[A-Za-z_][\w.$]*(?:Exception|Error|Fault|Interrupt)\s*[:({]")
 _RAISE_RE = re.compile(r"^\s*raise\s+\w")
@@ -369,21 +392,27 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
                       ) -> None:
     """因果图根因判定（优化缺陷R76：从关键词投票升级为因果 DAG）。
 
-    建边（均为保守强证据，宁缺毋错）：
-    a. Caused-by 链：带 "Caused by:" 堆栈的错误 → 其紧邻前置错误；
-    b. 消息互引用：模板词高包含 + 稀有词的后发错误；
+    建边：
+    a. 同一条目内的 Caused-by 链 —— **确定性**证据，链上最内层异常即根因；
+    b. 跨簇时间相邻：带堆栈的错误 → 其紧邻前置错误（仅时间相邻，属统计线索）；
+    c. 消息互引用：模板词高包含 + 稀有词的后发错误；
     判定：
-    1. 图源头（出度>0 且入度=0）→ 根因（Caused-by 源优先注明）；
+    1. 图源头（出度>0 且入度=0）→ 根因（Caused-by 链直连的见 a）；
     2. 时间连锁：60s 窗口首发 + IDF 加权根因分 >0 → 根因；
     3. 强关键词：加权分 ≥ 阈值 → 根因；
     4. 入度>0 或含连锁关键词 → 疑似连锁衍生（修上游，别修它）。
+
+    **CONFIRMED 的唯一来源是 a（条目内 Caused by 链）。**
+    历史版本把 b（时间相邻）也当成 CONFIRMED，理由写着「因果方向由解析器
+    确定」—— 但时间相邻恰恰是**统计猜测**。实测后果：一条
+    `INFO request started id=1` 会被判成 CONFIRMED 根因，正是这个功能
+    声称要消灭的「自信的错误答案」。
     """
     ordered = sorted(clusters, key=_cluster_sort_key)
     weights = _keyword_weights(clusters)
     by_id = {id(c): c for c in ordered}
     out_edges: dict = {}
     in_edges: dict = {}
-    caused_by_src: set = set()
 
     def _add(src: int, dst: int) -> None:
         if src == dst:
@@ -391,33 +420,40 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
         out_edges.setdefault(src, set()).add(dst)
         in_edges.setdefault(dst, set()).add(src)
 
-    # a) Caused-by 因果链
+    # a) 同一条目内的 Caused-by 链 —— 唯一的确定性因果证据。
+    #    根因是链上**最内层**的异常，证据就在这条目自己的堆栈里，
+    #    与「时间上排在它前面的另一个错误」无关。
+    for c in ordered:
+        deepest = deepest_caused_by(c.sample.entry.stack if c.sample else [])
+        if not deepest:
+            continue
+        c.is_root_cause = True
+        c.root_cause_confidence = CONF_CONFIRMED
+        c.root_cause_reason = f"Caused-by 因果链直连，根因：{deepest[:60]}"
+
+    # b) 跨簇时间相邻：保留为边（用于「谁衍生自谁」的展示），但**绝不升级
+    #    成 CONFIRMED** —— 前一个错紧接着出现，只是统计线索。
     for c in ordered:
         stack = c.sample.entry.stack if c.sample else []
         if any(_CAUSED_BY_RE.match(line) for line in stack):
             prior = _nearest_prior(ordered, c)
             if prior is not None:
                 _add(id(prior), id(c))
-                caused_by_src.add(id(prior))
 
-    # b) 消息互引用边
+    # c) 消息互引用边
     _add_cross_reference_edges(ordered, _add)
 
     # 1) 图源头 → 根因
     for c in ordered:
+        if c.root_cause_confidence == CONF_CONFIRMED:
+            continue                     # 条目内因果链已定论，不再降级
         outs = out_edges.get(id(c), set())
         if outs and not in_edges.get(id(c)):
             c.is_root_cause = True
-            if id(c) in caused_by_src:
-                c.root_cause_reason = "被 Caused-by 因果链指向"
-                # 唯一够得上 CONFIRMED 的证据：栈里有 Caused-by 直连，
-                # 因果方向由解析器确定，不是靠统计猜出来的
-                c.root_cause_confidence = CONF_CONFIRMED
-            else:
-                c.root_cause_reason = (
-                    f"因果链源头（{len(outs)} 个错误由其衍生）")
-                # 消息互引用建边是"模板词高包含"这类启发式，属指向非直连
-                c.root_cause_confidence = CONF_LIKELY
+            c.root_cause_reason = (
+                f"因果链源头（{len(outs)} 个错误由其衍生）")
+            # 时间相邻与消息互引用都只是指向性线索，不是因果证明
+            c.root_cause_confidence = CONF_LIKELY
 
     # 2) 时间连锁：突发窗口内首发 + 加权根因分 >0
     windows = {}
