@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import gzip
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -271,7 +272,14 @@ class TestParamValidation:
 # 必须把异常收敛成 {"ok": false, "error": ...} 返回，而不是把栈糊到
 # 协议流里把会话带崩。
 # ---------------------------------------------------------------------------
-mcp = pytest.importorskip("mcp")
+# 注意：不能用模块顶层的 pytest.importorskip("mcp")。
+# 那会在 import 阶段就跳过**整个文件** —— 而本文件里不只有 MCP 测试，
+# 时区 / 采样 / 参数校验那些与 mcp 无关，在 Python 3.9 上会跟着一起被跳过
+# （3.9 不装 mcp，因为 pyproject 的 extra 带 python_version >= '3.10' 门）。
+# 结果就是「3.9 通过」其实是「什么都没跑」。
+#
+# 这里用 find_spec 探测 + 类级 skipif，只跳过 MCP 那一类。
+_MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
 
 
 def _call(tool: str, **kwargs):
@@ -294,6 +302,7 @@ def _call(tool: str, **kwargs):
         return {"_raw": str(text)}
 
 
+@pytest.mark.skipif(not _MCP_AVAILABLE, reason="需要 mcp SDK")
 class TestMcpToolErrorPaths:
     """只测**真能到达**我们异常处理器的输入。
 
