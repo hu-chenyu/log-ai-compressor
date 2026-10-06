@@ -56,11 +56,20 @@ class TestTimezoneSuffix:
                 == TimestampParser().parse("2024-01-01T15:00:00Z"))
 
     def test_suffix_actually_affects_result(self):
-        """带后缀与不带后缀必须不同 —— 否则等于后缀被当装饰忽略了。"""
-        a = TimestampParser().parse("2024-01-01T10:00:00Z")
-        b = TimestampParser().parse("2024-01-01T10:00:00")
-        assert a is not None and b is not None
-        assert a != b, "时区后缀未生效"
+        """`Z` 必须真按 UTC 算，且偏移量必须被真的应用。
+
+        第二次踩同一个坑：最初断言「带 Z 与不带 Z 必须不同」——
+        那依赖运行机器的时区。GitHub runner 在 UTC 时，无后缀的
+        「10:00」按 UTC 解释，与「10:00Z」**本就相等**；我这台机器在
+        UTC+8 才不相等。于是这个断言在 CI 上假红、本地却「通过」。
+
+        改成断言**绝对值**（与时区无关），不再断言差值。
+        """
+        tp = TimestampParser()
+        # 2024-01-01T00:00:00Z = 1704067200，加 10 小时
+        assert tp.parse("2024-01-01T10:00:00Z") == 1704103200.0
+        # +08:00 表示东八区，同一时刻要早 8 小时被折算
+        assert tp.parse("2024-01-01T10:00:00+08:00") == 1704103200.0 - 8 * 3600
 
     def test_comma_millis_with_z(self):
         got = TimestampParser().parse("2024-01-01 10:00:00,123Z")
