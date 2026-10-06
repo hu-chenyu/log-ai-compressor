@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from log_ai_compressor.core.analysis import (
+    CONF_CONFIRMED,
     analyze_clusters,
     cooccurring_clusters,
     significant_in_window,
@@ -191,18 +192,70 @@ class TestSimplifyStack:
 # 根因判定
 # ---------------------------------------------------------------------------
 class TestRootCause:
-    def test_caused_by_links_prior_error(self):
-        root = make_cluster(0, "pool init failed: connection refused",
-                             first_line=10, last_line=12)
-        derived = make_cluster(
-            1, "service unavailable", first_line=50, last_line=55,
-            stack=["java.sql.SQLException: query failed",
-                   "Caused by: java.net.ConnectException: Connection refused"],
+    def test_caused_by_confirms_the_entry_that_carries_the_chain(self):
+        """CONFIRMED 只能给**携带 Caused-by 链的那一条目**，且根因是链上最内层。
+
+        历史实现（已修）反过来：把「时间上紧邻在它之前的另一个错误簇」
+        标成 CONFIRMED，理由写「因果方向由解析器确定」—— 但时间相邻是
+        统计猜测。实测后果：一条 `INFO request started` 会被判成确定性根因，
+        正是这个功能声称要消灭的「自信的错误答案」。
+        """
+        prior = make_cluster(0, "request started id=1",
+                             first_line=1, last_line=1)
+        carrier = make_cluster(
+            1, "handle failed id=1", first_line=2, last_line=11,
+            stack=["java.lang.RuntimeException: query failed",
+                   "\tat com.acme.Svc.handle(Svc.java:41)",
+                   "Caused by: java.sql.SQLTimeoutException: lock timeout",
+                   "\tat com.acme.Query.run(Query.java:120)"],
         )
-        result = make_result([root, derived])
+        result = make_result([prior, carrier])
         analyze_clusters(result)
-        assert root.is_root_cause
-        assert "Caused-by" in root.root_cause_reason
+        # 携带因果链的条目才是 CONFIRMED
+        assert carrier.root_cause_confidence == CONF_CONFIRMED
+        assert carrier.is_root_cause
+        assert "SQLTimeoutException" in carrier.root_cause_reason
+        # 时间上在它之前的那个簇**绝不能**拿到 CONFIRMED
+        assert prior.root_cause_confidence != CONF_CONFIRMED
+
+    def test_deepest_caused_by_wins(self):
+        """嵌套 Caused by 时根因是最内层那个异常，不是外层也不是中间层。"""
+        c = make_cluster(
+            0, "svc failed", first_line=2, last_line=20,
+            stack=["java.lang.RuntimeException: outer",
+                   "Caused by: java.sql.SQLTimeoutException: middle",
+                   "Caused by: java.lang.OutOfMemoryError: heap space"],
+        )
+        result = make_result([c])
+        analyze_clusters(result)
+        assert c.root_cause_confidence == CONF_CONFIRMED
+        assert "OutOfMemoryError" in c.root_cause_reason
+        assert "SQLTimeoutException" not in c.root_cause_reason
+
+    def test_info_cluster_never_confirmed(self):
+        """INFO 级的行永远不该是确定性根因 —— 这是被真实 bug 咬过的点。"""
+        prior = make_cluster(0, "heartbeat ok",
+                             first_line=1, last_line=1, level="INFO")
+        err = make_cluster(
+            1, "db timeout", first_line=5, last_line=9,
+            stack=["java.sql.SQLTimeoutException: x",
+                   "Caused by: java.net.SocketException: reset"],
+        )
+        result = make_result([prior, err])
+        analyze_clusters(result)
+        assert prior.root_cause_confidence != CONF_CONFIRMED
+        assert err.root_cause_confidence == CONF_CONFIRMED
+
+    def test_stack_without_caused_by_is_not_confirmed(self):
+        """只有异常摘要、没有 Caused by 链 -> 没有确定性因果方向。"""
+        only = make_cluster(
+            0, "db timeout", first_line=5, last_line=9,
+            stack=["java.sql.SQLTimeoutException: query timed out",
+                   "\tat com.acme.Query.run(Query.java:120)"],
+        )
+        result = make_result([only])
+        analyze_clusters(result)
+        assert only.root_cause_confidence != CONF_CONFIRMED
 
     def test_time_window_earliest_with_keyword(self):
         # 同一 60s 窗口内：先发的根因特征错误 vs 后发的衍生错误
