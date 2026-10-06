@@ -193,14 +193,88 @@ OpenStack 10.4%）。这些系统把级别写在非标准位置，工具判不�
 已知缺陷 —— 语义上没错（那些行本就不是错误），但对用户是灾难：指着日志点一下，
 拿到一份几乎空的报告且没有任何解释。
 
+## 根因判定评测（CONFIRMED 档的精确率 / 召回率）
+
+本文上面的「证据保留率」衡量的是**事件类型还在不在**，与本项目的置信三档
+（CONFIRMED / LIKELY / INSUFFICIENT）无关。本节单独验证后者。
+
+### 地面真相怎么来的
+
+Loghub-2.0 标注的是日志模板、不是故障根因，所以本文第一版**完全没有验证
+根因判定**。补救办法是绕开 Loghub：
+
+`core/analysis.py` 里 CONFIRMED 的判据本身是**客观**的 —— 条目内有没有
+`Caused by:` 链。于是可以**完全独立于本项目**、直接扫原始日志构造地面
+真相，再与工具输出对账（`scripts/eval_rootcause.py`）。
+
+Java 语义下链的方向：
+
+```
+java.lang.RuntimeException: query failed       <- 外层：症状
+Caused by: java.sql.SQLTimeoutException: ...   <- 内层：因
+Caused by: java.lang.OutOfMemoryError: ...    <- 最内层：根因
+```
+
+- **精确率（不乱说）** = 标为 CONFIRMED 且其引用行区间内确有 `Caused by` 的簇 / 全部 CONFIRMED 簇
+- **自信错误率** = 1 − 精确率 ← 最该压到 0 的那个数
+- **召回率（该说时说）** = 被正确认领的链 / 原始日志中真实存在的链
+
+### 结果
+
+| 数据集 | 行数 | 真实因果链 | CONFIRMED | 精确率 | **自信错误率** | 召回率 |
+|---|---:|---:|---:|---:|---:|---:|
+| Zookeeper | 74,273 | **0** | **0** | — | **0%** | — |
+| 其余 4 个数据集 | 455,324 | 0 | 0 | — | 0% | — |
+
+**零因果链时零确定性断言。** 20 个簇被标为根因（全是 LIKELY），63 个
+INSUFFICIENT，整体判定 `LIKELY`、`can_conclude: False`。
+
+### 这次评测抓到一个真 bug
+
+第一版实现在 Zookeeper 上给出**自信错误率 100%** —— 一条
+`INFO request started id=1` 被判成了确定性根因。根因：
+
+```python
+if any(_CAUSED_BY_RE.match(line) for line in stack):
+    prior = _nearest_prior(ordered, c)   # 时间上最近的前一个错误簇
+    caused_by_src.add(id(prior))         # 把「前一个」当成因
+```
+
+然后标 `CONFIRMED`，注释写着「因果方向由解析器确定，不是靠统计猜出来的」
+—— **但时间相邻恰恰就是统计猜测**。真正的因果证据（同一条目堆栈里
+`Caused by:` 指向的最内层异常）压根没被用上。
+
+已改为：CONFIRMED **只**给携带 `Caused by:` 链的那一条目，reason 里点名
+链上最内层的异常；跨簇时间相邻的边保留但降级为 LIKELY。修复后同一份日志：
+
+```
+[1] ERROR conf=CONFIRMED  根因：java.lang.OutOfMemoryError: Java heap space
+[0] INFO  conf=LIKELY      因果链源头（2 个错误由其衍生）
+```
+
+注意根因从外层的 `RuntimeException: query failed`（**症状**）纠正成了
+`OutOfMemoryError: Java heap space`（**真正的因**）。
+
+**这个 bug 在 91% 覆盖率、三矩阵 CI 全绿、5 胜 0 负的状态下存在了整整一天，
+是靠独立构造地面真相对账才发现的 —— 不是靠覆盖率。**
+
+### 本文不能证明什么（根因部分）
+
+- **召回率仍然没有真实数据。** 需要一份含真实异常栈的日志，Loghub 1.0 的
+  Android_v1（23.7 MB）在本机网络下反复下载失败（Zenodo 截断、GitHub
+  502），GitHub 2k 样本同样不可达。**没有测出来的数字这里就不写。**
+- 手写构造的日志**只验证机制**（能不能正确认领一条链），不构成准确率证据。
+- 「Caused by 链存在」被当作「因果方向确定」的充分条件。这在 Java /
+  Python 异常语义下成立，但对**跨服务的分布式因果**不成立 —— 本工具
+  不声称覆盖那种场景。
+
 ## 本文不能证明什么
 
 写清楚边界，避免过度解读：
 
-- **本文没有验证根因判定的准确率。** Loghub-2.0 的标注是"日志模板"，
-  不是"故障根因"。本文的"证据保留率"衡量的是**事件类型是否还在**，
-  完全不涉及本项目的置信三档（CONFIRMED/LIKELY/INSUFFICIENT）。
-  **根因判对判错，本文一个字都没证明。**
+- **本文的「证据保留率」不涉及根因判定。** Loghub-2.0 的标注是"日志模板"，
+  不是"故障根因"。保留率衡量的是**事件类型是否还在**。根因置信三档由
+  上一节单独评测，且**只覆盖了负例**（不乱说），召回率仍无真实数据。
 - **Drain3 的保留率有测量偏袒**：它的输出是模板而非原始行，没有 LineId 可查，
   只能与标注模板做归一化模糊匹配（阈值 0.8）。这一项对 Drain3 略偏宽松，
   但也可能误判。
