@@ -30,9 +30,6 @@ LEVEL_TOKENS = (
     "CRITICAL|CRIT|PANIC|EMERG|ALERT|FAILURE|FAILED|FAIL|EXCEPTION|ASSERTION|ASSERT"
 )
 
-# 单字母/短缩写级别（仅建议在明确的括号上下文中使用）
-SHORT_LEVEL_TOKENS = "ERR|E|W|I|D|T|F|P"
-
 # 非结构化行的级别关键词提示（引擎默认值，可被 YAML 覆盖）
 # 修复缺陷R18：删除 FATAL 提示（\bFATAL\b 忽略大小写误中 gcc 选项
 # -Wfatal-errors —— 构建日志编译命令行被批量误判为致命错误；真实

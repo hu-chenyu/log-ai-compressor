@@ -45,10 +45,6 @@ ENCODING_PRESETS = {
 }
 DEFAULT_LEVELS = ("ERROR", "FAIL")
 
-# 单个簇详情返回的最大实例数（防止十万行日志把响应体撑爆；
-# 完整实例仍保留在内存结果里，导出报告不受此限制）
-MAX_INSTANCES_IN_PAYLOAD = 200
-
 
 class ServiceError(ValueError):
     """参数校验失败（接入层应转成 4xx 而非 5xx）。"""
