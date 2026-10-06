@@ -1,0 +1,13 @@
+# 开发 / CI 依赖
+#
+# CI（.github/workflows/ci.yml）执行的就是本文件。
+# 注意：`-e .[web,mcp,ai]` 装的是**本项目本体**加运行时可选能力，
+# 这样 tests/test_web.py、test_mcp.py、test_ai.py 才不会被 importorskip 跳过
+# 或在收集阶段因缺 httpx 报错。
+-r requirements.txt
+-e .[web,mcp,ai]
+
+pytest>=7.0
+pytest-cov>=4.0
+pytest-timeout>=2.1
+ruff>=0.4
