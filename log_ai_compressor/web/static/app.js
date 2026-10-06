@@ -403,6 +403,15 @@ const VERDICT_LABEL = {
   INSUFFICIENT: '无法判定根因',
 };
 
+/** 渲染级别过滤提示：过滤几乎滤掉全部条目时解释原因，而不是给一份空报告 */
+function renderNotice(data) {
+  const card = $('#notice-card');
+  const text = data && data.notice;
+  if (!text) { card.hidden = true; card.innerHTML = ''; return; }
+  card.hidden = false;
+  card.innerHTML = `<b>提示</b>${esc(text)}`;
+}
+
 /** 渲染证据充分性卡片：判定 + 缺口清单 + 实际用到的证据 */
 function renderVerdict(data) {
   const card = $('#verdict-card');
@@ -441,6 +450,7 @@ function renderResult(data) {
   $('#compare-panel').hidden = true;
   $('#result-panel').hidden = false;
   renderVerdict(data);
+  renderNotice(data);
 
   const s = data.stats;
   const roots = (data.root_causes || []).length;
