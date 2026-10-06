@@ -46,6 +46,9 @@ _TS_FORMATS = (
     "%b %d %H:%M:%S",              # syslog（无年份，相对排序足够）
     "%H:%M:%S.%f",
     "%H:%M:%S",
+    # 紧凑无分隔日期 + 管道分隔设备日志（Android/嵌入式，Loghub HealthApp
+    # 实测：此前整份日志时间戳为 None，时间直方图与时间范围全空）
+    "%Y%m%d-%H:%M:%S:%f",
 )
 # 尾部时区（fromisoformat 不支持的紧凑形式）
 _TS_TZ_SUFFIX = re.compile(r"\s*(?:Z|[+-]\d{2}:?\d{2})\s*$")
