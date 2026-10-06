@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "log-ai-compressor"
-version = "2.0.0"
+version = "2.0.1"
 description = "本地日志分析取证台：日志压缩投喂大模型 + 根因排查 + MCP 接入（数据不出网）"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -59,6 +59,11 @@ dev = ["pytest>=7.0", "pytest-cov>=4.0", "pytest-timeout>=2.1", "ruff>=0.4"]
 
 [project.scripts]
 log-ai-compressor = "log_ai_compressor.cli:main"
+# 独立 MCP 入口。MCP 客户端与官方 Registry 按「可执行名 = 包名」的约定
+# 拉起服务器（uvx log-ai-compressor），而主 CLI 需要子命令，裸跑只会
+# 打印 usage 并以退出码 2 结束 —— 客户端拿到的是一段帮助文本而不是
+# MCP 服务器。有了这个入口，Registry 收录才能真正开箱即用。
+log-ai-compressor-mcp = "log_ai_compressor.cli:main_mcp"
 
 [project.urls]
 Homepage = "https://github.com/hu-chenyu/log-ai-compressor"

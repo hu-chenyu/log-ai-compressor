@@ -1,0 +1,80 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.hu-chenyu/log-ai-compressor",
+  "title": "log-ai-compressor",
+  "description": "Local log forensics: compress logs into citable evidence with root-cause confidence tiers.",
+  "version": "2.0.1",
+  "repository": {
+    "url": "https://github.com/hu-chenyu/log-ai-compressor",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/hu-chenyu/log-ai-compressor",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "log-ai-compressor",
+      "version": "2.0.1",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--from",
+          "value": "log-ai-compressor[mcp]"
+        },
+        {
+          "type": "positional",
+          "value": "log-ai-compressor-mcp",
+          "valueHint": "command"
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "tool": "mcp-publisher",
+      "toolVersion": "1.8.1",
+      "tools": [
+        {
+          "name": "analyze_log_file",
+          "description": "Analyze one or more local log files (merged oldest-first by mtime, suitable for rotated logs). Returns error clusters ranked by priority, each with a root-cause confidence tier (CONFIRMED / LIKELY / INSUFFICIENT) and an explicit list of what evidence is still missing. Runs fully on-device."
+        },
+        {
+          "name": "analyze_log_text",
+          "description": "Analyze a log text directly — pasted content, command output, or a fragment an agent already read. Same clustering and root-cause confidence output, without touching the filesystem."
+        },
+        {
+          "name": "compare_log_files",
+          "description": "Compare 2-5 log files and list errors that are new, disappeared, or common relative to a baseline file. Answers 'what changed between this deploy and the last one'."
+        },
+        {
+          "name": "export_report",
+          "description": "Export analysis as a compressed report in md / json / text / html / summary format. Markdown and summary are tuned for pasting into an LLM: a few hundred tokens instead of millions of raw log lines, with every finding still carrying its line numbers for citation."
+        },
+        {
+          "name": "get_cluster_detail",
+          "description": "Retrieve the full evidence for one error cluster: representative raw log line, surrounding context lines, de-noised stack trace, instance line-number index, and the reasoning behind its root-cause verdict."
+        },
+        {
+          "name": "list_rules",
+          "description": "List built-in log parsing rule templates and the log formats each targets. Check this first when a log parses badly."
+        },
+        {
+          "name": "check_environment",
+          "description": "Self-check with no arguments: confirms the tool is importable and reports version, available built-in rules, and whether optional AI interpretation is configured."
+        }
+      ],
+      "privacy": {
+        "dataEgress": "none",
+        "note": "All analysis runs on-device. The server only reads local file paths the calling agent passes in; no network calls are made unless the optional AI-interpretation layer is explicitly configured."
+      },
+      "benchmark": {
+        "source": "https://zenodo.org/record/8275861",
+        "note": "Measured on 5 Loghub-2.0 datasets (ISSTA'24) whose event templates are human-annotated. Output size stays bounded at 470-746 tokens regardless of log size (21k-212k lines), whereas Drain3's output grows from 317 to 566,802 tokens. Full methodology and limitations: https://github.com/hu-chenyu/log-ai-compressor/blob/main/docs/BENCHMARK.md"
+      }
+    }
+  }
+}

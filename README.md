@@ -145,6 +145,16 @@ pip install "log-ai-compressor[mcp]"
 log-ai-compressor mcp                  # 打印现成的客户端配置
 ```
 
+已收录于官方 MCP Registry（`registry.modelcontextprotocol.io`），MCP 客户端可直接发现并安装：
+
+```
+mcp-name: io.github.hu-chenyu/log-ai-compressor
+```
+
+提供 7 个只读工具：`analyze_log_file`、`analyze_log_text`、`compare_log_files`、
+`export_report`、`get_cluster_detail`、`list_rules`、`check_environment`。
+全部在本机执行，**日志不出网**。
+
 ---
 
 ## 3. 核心特性

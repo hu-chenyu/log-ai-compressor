@@ -383,6 +383,32 @@ def cmd_mcp(args) -> int:
     return EXIT_OK
 
 
+def main_mcp() -> int:
+    """独立 MCP 入口（console script ``log-ai-compressor-mcp``）。
+
+    为什么需要它：MCP 客户端与官方 Registry 都按「**可执行名 = 包名**」
+    的约定去拉起服务器（例如 ``uvx log-ai-compressor``）。而主 CLI 需要
+    子命令，裸跑只会打印帮助并以退出码 2 结束 —— 客户端拿到的不是 MCP
+    服务器，而是一段 usage 文本。这个入口让该约定成立，Registry 收录
+    后才能真正开箱即用。
+
+    诊断信息一律走 stderr：stdio 传输下 stdout 是 JSON-RPC 协议通道，
+    任何 print 都会污染协议流。
+    """
+    try:
+        from log_ai_compressor.mcp.server import main as mcp_main
+    except ImportError as exc:
+        print(f"错误：MCP 组件不可用（{exc}）。\n"
+              f"      安装：pip install \"log-ai-compressor[mcp]\"",
+              file=sys.stderr)
+        return EXIT_ERROR
+    print("log-ai-compressor MCP 服务器启动中"
+          "（stdout 为 JSON-RPC 协议通道，诊断信息走 stderr）",
+          file=sys.stderr)
+    mcp_main("stdio")
+    return EXIT_OK
+
+
 def _import_ai():
     """导入 AI 层；缺可选依赖时给出可执行的提示而不是裸 ImportError。
 
