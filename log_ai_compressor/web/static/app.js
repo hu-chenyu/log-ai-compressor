@@ -920,8 +920,11 @@ function onProviderChange() {
   $('#ai-env-hint').textContent = env
     ? `留空则读取环境变量 ${env}`
     : '该服务商不需要 API Key';
+  // 修复：这里原来写的是 `sel.value`，而 sel 只是弹窗点击回调里的
+  // 局部 const，在本函数作用域不存在 —— 每切换一次服务商就抛
+  // ReferenceError，base_url 占位符永远设不上。
   $('#ai-base').placeholder = (State.health?.providers || [])
-    .find((p) => p.key === sel.value)?.label || '';
+    .find((p) => p.key === opt?.value)?.label || '';
 }
 $('#ai-provider').addEventListener('change', onProviderChange);
 $('#ai-save').addEventListener('click', async () => {
