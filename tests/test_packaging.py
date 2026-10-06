@@ -10,6 +10,7 @@ pyproject 把 web / mcp / ai 拆成了 extras，硬依赖只有 PyYAML
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import textwrap
@@ -89,18 +90,40 @@ class TestPackaging:
                     assert item.startswith("log-ai-compressor[")
         assert not offenders, f"extras 里出现了本机路径：{offenders}"
 
-    def test_mcp_extra_is_version_gated(self, pyproject):
-        """mcp SDK 要求 Python >= 3.10，必须带环境标记。
+    def test_requires_python_matches_ci_floor(self, pyproject):
+        """requires-python 的下限必须与 CI 矩阵里最低的 Python 一致。
 
-        否则 Python 3.9 的 CI job 会在 pip 阶段直接失败
-        （No matching distribution found for mcp>=1.0）。
+        两边脱节过一次：地板还写着 3.9，矩阵最低也是 3.9，于是看起来
+        "每个支持版本都在 CI 里验过"。后来地板抬到 3.11 但矩阵忘了改，
+        就会出现「声称支持 3.9 却从没在 3.9 上跑过」的空档。
         """
-        mcp_items = pyproject["project"]["optional-dependencies"]["mcp"]
-        assert mcp_items, "mcp extra 不能为空"
-        for item in mcp_items:
-            assert "python_version" in item, (
-                f"mcp 依赖缺环境标记，3.9 上会装不上：{item}")
-            assert "3.10" in item, f"环境标记版本不对：{item}"
+        floor = pyproject["project"]["requires-python"].lstrip(">=.")
+        assert "." in floor, f"版本写法不对：{floor}"
+        major, minor = floor.split(".")[:2]
+        assert (int(major), int(minor)) >= (3, 11), \
+            f"地板 {floor} 过低（3.10 已于 2026-10 EOL）"
+
+        ci = (Path(__file__).resolve().parent.parent /
+              ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        versions = set(re.findall(r'python:\s*"(\d+\.\d+)"', ci))
+        assert floor in versions, (
+            f"CI 矩阵 {sorted(versions)} 里没有 requires-python 的下限 {floor}")
+        for v in versions:
+            assert (int(v.split(".")[0]), int(v.split(".")[1])) >= (3, 11), \
+                f"CI 矩阵里还有低于地板的版本：{v}"
+
+    def test_mcp_extra_needs_no_version_gate(self, pyproject):
+        """地板 >= 3.11 后，mcp extra 不该再带 python_version 环境标记。
+
+        那种标记是 3.9 时代的产物；留着会让人以为还有版本分支，
+        实际早已失效 —— 而且它会静默改变「这个包支持哪些 Python」的语义。
+        """
+        items = pyproject["project"]["optional-dependencies"]["mcp"]
+        assert items, "mcp extra 不能为空"
+        for item in items:
+            assert "python_version" not in item, (
+                f"地板已 >= 3.11，mcp 依赖不该再带环境标记：{item}")
+            assert ";" not in item, f"不该有条件依赖：{item}"
 
     def test_static_assets_shipped(self, pyproject):
         """前端是零构建静态资源，不打进包的话 pip 安装后界面直接 404。"""
