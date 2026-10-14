@@ -157,7 +157,7 @@ $ python scripts/prove.py
 
 注意压缩那一行：在这个 **52 行的小日志**上，完整 md 报告比原文**大 9.9 倍**。
 脚本不回避这一点 —— 完整报告带样例与上下文，小文件上必然比原文长，这是事实。
-压缩比 15x–388x 那组数字来自 Loghub 真实数据集，口径见 §5.1 与
+压缩比 15x–388x 那组数字来自 Loghub 真实数据集，口径见 §6.1 与
 [`docs/BENCHMARK.md`](docs/BENCHMARK.md)，**不要拿本节的小文件数字去宣称压缩比**。
 
 `prove.py` 也是 CI 门禁之一：README 与产品不允许漂移。
@@ -285,7 +285,7 @@ log-ai-compressor verify app.log                        # 当场自检
 git clone https://github.com/hu-chenyu/log-ai-compressor.git
 cd log-ai-compressor
 pip install -r requirements-dev.txt
-python -m pytest                        # 790 个测试
+python -m pytest                        # 817 个测试
 python scripts/adversarial_eval.py      # 对抗性评测评分卡（CI 门禁之一）
 python scripts/benchmark_loghub.py      # 复现上面的实测表（需先下载数据集）
 ```
@@ -342,7 +342,7 @@ npx skills add <github>/log-forensics
   - **证据充分性评估（v2 核心）**：根因置信三档 `CONFIRMED` / `LIKELY` /
     `INSUFFICIENT`。只有 Caused-by 因果链直连才算 CONFIRMED；关键词投票、
     时间连锁这类统计线索只到 LIKELY。证据不足时**不输出「根因」措辞**，
-    改为列出「还缺什么才能定论」—— 见第 0 节
+    改为列出「还缺什么才能定论」—— 见第 1 节
   - **缺口自闭环**：缺口清单由日志里**实际有什么**驱动。日志带 `trace_id` →
     调用链重建成功 → 「缺少调用链关联」这条缺口自动关闭；一条都没有 →
     如实申报并说清补什么格式就能补上。只加不减的缺口清单同样是不可信的
@@ -446,7 +446,7 @@ log-ai-compressor rules list
 
 ## 6. 实测数据
 
-### 5.1 真实日志上的压缩与证据保留（Loghub 2.0）
+### 6.1 真实日志上的压缩与证据保留（Loghub 2.0）
 
 数据来自 [Loghub-2.0](https://zenodo.org/record/8275861)（ISSTA'24 配套数据集），
 其 event template 为**人工标注**。对照组为 Drain3（ICWS'17 论文，821★）、
@@ -473,20 +473,20 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 
 > 本节**没有验证根因判定准确率** —— Loghub 标注的是日志模板，不是故障根因。
 
-### 5.2 工程指标
+### 6.2 工程指标
 
 | 指标 | 实测值 |
 | --- | --- |
 | 生产代码 | 8,906 行（28 个模块） |
-| 测试 | **790 用例**，覆盖率 **94%**，`ruff` 全绿 |
-| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**四道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 |
+| 测试 | **817 用例**，覆盖率 **94%**，`ruff` 全绿 |
+| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**五道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 |
 | 内存 | 与日志总行数无关，只与错误种类数相关 |
 | 硬依赖 | 仅 PyYAML（web / mcp / ai 全部为可选 extra） |
 
 > 覆盖率不是目标，只是底线（CI 卡 90%）。真正卡回归的是那套对抗性评分卡 ——
 > 覆盖率衡量「代码被执行过」，它衡量「该出错的时候会不会出错」。
 
-### 5.3 速度
+### 6.3 速度
 
 合成日志，仅供吞吐参考（**不代表压缩效果**，真实效果见 6.1）：
 ~25 万行/秒，10 万行 / 7.03MB 用时 **0.40 秒**。复现：`python scripts/benchmark.py`
@@ -580,8 +580,8 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 
 CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
 `ubuntu-3.12`（最常用版本）、`windows-3.12`（行尾 / shell / 路径处理与
-unix 不同，且 `start.bat` 是 Windows 一等入口）。**四道门禁**：ruff →
-pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹。
+unix 不同，且 `start.bat` 是 Windows 一等入口）。**五道门禁**：ruff →
+pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证脚本。
 
 ### 启动脚本的硬约束
 
