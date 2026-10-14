@@ -63,6 +63,20 @@ _EXC = re.compile(rf"^{_CLS}(?::\s*(.*))?$")
 _CAUSED = re.compile(rf"^Caused by:\s*({_CLS})(?::\s*(.*))?$")
 # 纯单词行（"Timeout" / "Done"）不是异常类，需带包名点或类名后缀才认
 _SUFFIXES = ("Exception", "Error", "Throwable")
+# 修复评测器缺陷#1：真实日志的异常摘要常**内嵌在带时间戳的日志行里**
+# （Hadoop `2015-10-19 17:41:30,296 INFO [...] Task: Communication exception:
+# java.io.IOException: ...`），旧行为只认「裸异常摘要行」开头的链，把这类
+# 链整条漏扫 —— 于是工具正确的 Caused-by 判定反被对账判成"自信错误"。
+# 用时间戳行作为**条目边界**重建扫描（与工具解析器同口径），内嵌异常的链
+# 不再漏。地面真相一旦失真，评测数字全是错的，所以这一条必须修。
+_TS_LINE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}")
+# 堆栈续行：帧 / 折叠计数 / 被抑制异常 / 空白（不构成条目边界）
+_CONT = re.compile(r"^(?:at |\.\.\. |\s*Suppressed:)", re.IGNORECASE)
+
+
+def _is_cont(s: str) -> bool:
+    """堆栈续行（保持当前链继续累积）。"""
+    return (not s) or bool(_CONT.match(s))
 
 
 def _exc_line(s: str):
@@ -190,35 +204,48 @@ Caused by: org.apache.kafka.common.errors.SerializationException: 未知的消�
 
 
 def scan_chains(path: Path) -> list[Chain]:
-    """独立扫描原始日志，抽出所有 Caused-by 因果链。"""
+    """独立扫描原始日志，抽出所有 Caused-by 因果链。
+
+    修复评测器缺陷#1：条目边界用**时间戳行或裸异常行**判定（而非只认
+    裸异常行）。真实日志把异常摘要内嵌在带时间戳的日志行里，链的真正
+    信号是堆栈块里的 `Caused by:` —— 只要在一条目内出现 ≥1 个
+    `Caused by:` 就是一条链，最内层那个即根因。
+    """
     chains: list[Chain] = []
     cur: dict | None = None
+
+    def flush() -> None:
+        nonlocal cur
+        if cur and cur["depth"] > 0:
+            chains.append(Chain(cur["first_line"], cur["deepest_line"],
+                                cur["depth"], cur["deepest_sig"]))
+        cur = None
+
     with path.open(encoding="utf-8", errors="replace") as fh:
         for i, line in enumerate(fh, 1):
             s = line.strip()
             m = _CAUSED.match(s)
-            if m and cur is not None:
+            if m:
+                # Caused by 是链的直接信号：即便前面没有裸异常行（内嵌
+                # 异常），也在此开启/续接链
+                if cur is None:
+                    cur = {"first_line": i, "deepest_line": i, "depth": 0,
+                           "deepest_sig": ""}
                 cur["depth"] += 1
                 cur["deepest_line"] = i
                 cur["deepest_sig"] = _sig(m.group(1), m.group(2))
                 continue
-            exc = _exc_line(s)
-            if exc:
-                if cur and cur["depth"] > 0:
-                    chains.append(Chain(cur["first_line"], cur["deepest_line"],
-                                        cur["depth"], cur["deepest_sig"]))
+            # 条目边界：时间戳行（新条目，异常可能内嵌其内）或裸异常摘要行
+            if _TS_LINE.match(s) or _exc_line(s):
+                flush()
                 cur = {"first_line": i, "deepest_line": i, "depth": 0,
-                       "deepest_sig": _sig(*exc)}
-            elif s == "" or s.startswith("at ") or s.startswith("... "):
+                       "deepest_sig": ""}
                 continue
-            else:
-                if cur and cur["depth"] > 0:
-                    chains.append(Chain(cur["first_line"], cur["deepest_line"],
-                                        cur["depth"], cur["deepest_sig"]))
-                cur = None
-    if cur and cur["depth"] > 0:
-        chains.append(Chain(cur["first_line"], cur["deepest_line"],
-                            cur["depth"], cur["deepest_sig"]))
+            if _is_cont(s):
+                continue                      # 帧/折叠/被抑制/空白：续行
+            # 其它行：突发的消息分隔（无时间戳），结束当前链，防两条链误并
+            flush()
+    flush()
     return chains
 
 
