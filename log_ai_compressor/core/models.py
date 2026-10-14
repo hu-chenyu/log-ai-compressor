@@ -18,6 +18,7 @@ from log_ai_compressor.constants import (
     HIST_MAX_BUCKETS,
     LEVEL_WEIGHT,
 )
+from log_ai_compressor.core.evidence import EvidenceRef
 
 
 def format_timestamp(t: Optional[float]) -> str:
@@ -141,6 +142,24 @@ class LogEntry:
     message_extra: List[str] = field(default_factory=list)  # 折行续接内容
     stack: List[str] = field(default_factory=list)          # 堆栈/回溯行
     last_line_no: int = 0               # 条目结束行号（含堆栈与续行）
+    # 轮转合并分析时这一行来自哪个文件（单文件时等于该文件路径）。
+    # 证据引用要精确到文件，否则 app.log.1 / app.log.2 合并后
+    # "第 42 行"指向两个不同的地方，引用就没法复核了。
+    source_file: str = ""
+    # 结构化日志（JSON Lines / logfmt）的关联键 —— 跨服务调用链的原料。
+    # 纯文本日志里这些键可能藏在 message 中，这里只装结构化解析认领到的
+    # 值；没抽到就是空串，不猜测。
+    trace_id: str = ""
+    request_id: str = ""
+    span_id: str = ""
+    # 本条是否由结构化解析产出（报告里据此说明字段来自原生字段而非正则）
+    structured: bool = False
+    fields: Dict[str, Any] = field(default_factory=dict)   # 未认领字段原样保留
+
+    @property
+    def correlation_id(self) -> str:
+        """跨服务关联键：优先 request_id（调用链语义），其次 trace_id。"""
+        return self.request_id or self.trace_id
 
     @property
     def has_stack(self) -> bool:
@@ -224,6 +243,18 @@ class ErrorCluster:
     related_clusters: List[int] = field(default_factory=list)
     # 优化缺陷R78：根因时间线叙事（因果图传播链文本，仅根因簇有值）
     root_timeline: str = ""
+    # 该簇出现过的调用链关联键（analysis 填充）。**不提升置信档位** ——
+    # 链路只证明同一次请求的先后顺序，不证明因果。
+    traces: List[str] = field(default_factory=list)
+    # 证据引用（analysis 填充）：把簇的存在与判定绑定到日志原文的具体行。
+    # 没有它，「根因是 X」只是一句话；有了它，每条结论都能被调用方
+    # 重新读原文核对 —— 见 core/evidence.py。
+    evidence: List[EvidenceRef] = field(default_factory=list)
+
+    @property
+    def primary_evidence(self) -> Optional[EvidenceRef]:
+        """主证据引用（取第一条；无证据时返回 None）。"""
+        return self.evidence[0] if self.evidence else None
 
     @property
     def level_weight(self) -> float:
@@ -274,18 +305,27 @@ class RunStats:
     analysis_cost: float = 0.0           # 智能分析耗时（秒，用于开销核算）
 
     def as_dict(self) -> dict:
-        """导出 JSON 友好的字典。"""
+        """导出 JSON 友好的字典。
+
+        limit_hit 必须在这里：JSON 导出是给脚本二次处理的，脚本据此
+        才能知道「这份结果只覆盖了前 N 行」。此前 JSON meta 里只有
+        truncated（用户取消），行数上限采样完全不落盘 —— 一份 5 万行
+        日志前 1000 行的报告与完整报告在机器眼里完全一样。
+        """
         return {
             "source": self.source, "encoding": self.encoding,
             "rule": self.rule_name, "total_lines": self.total_lines,
             "raw_chars": self.raw_chars,
             "entry_lines": self.entry_lines, "error_lines": self.error_lines,
             "error_entries": self.error_entries,
+            "ts_entries": self.ts_entries,
             "level_counts": dict(self.level_counts),
             "duration_sec": round(self.duration, 3),
             "lines_per_second": round(self.lines_per_second, 1),
             "time_start": self.time_start, "time_end": self.time_end,
             "truncated": self.truncated,
+            "limit_hit": self.limit_hit,
+            "analysis_cost_sec": round(self.analysis_cost, 3),
         }
 
 
@@ -306,6 +346,9 @@ class AnalysisResult:
     # 存 dict 而非 dataclass，避免 models ↔ analysis 循环 import；
     # 结构见 analysis.EvidenceAssessment.to_dict。
     evidence: Optional[Dict[str, Any]] = None
+    # 重建出的调用链（core/traces.TraceChain）。只在结构化日志里存在
+    # 关联键时非空 —— 纯文本日志没有关联键，这里就诚实地是空的。
+    traces: List[Any] = field(default_factory=list)
 
     @property
     def top_clusters(self) -> List[ErrorCluster]:

@@ -20,6 +20,10 @@ from typing import Any, Dict, List, Optional, Sequence
 from log_ai_compressor.core.analysis import cooccurring_clusters, simplify_stack
 from log_ai_compressor.core.clustering import extract_variable_distribution
 from log_ai_compressor.core.comparator import CompareResult, compare_files
+from log_ai_compressor.core.evidence import (
+    result_fingerprint,
+    verify_refs,
+)
 from log_ai_compressor.core.models import AnalysisResult, ErrorCluster
 from log_ai_compressor.core.pipeline import analyze_file, analyze_files, analyze_text
 from log_ai_compressor.core.redact import redact_text
@@ -65,13 +69,21 @@ _SEP_TRANSLATION = str.maketrans({
 
 
 def _as_list(value: Any) -> Optional[List[str]]:
-    """把逗号/空格分隔的关键词串或列表统一成 list[str]。"""
+    """把逗号/空格分隔的关键词串或列表统一成 list[str]。
+
+    非字符串、非序列（如 include 传了个数字）必须报 ServiceError 让接入层
+    转 4xx；此前直接迭代会抛 TypeError，在 Web 层变成 500「服务器内部
+    错误」—— 参数写错却报服务崩了，用户既看不懂也不知道怎么改。
+    """
     if value is None:
         return None
     if isinstance(value, str):
         raw = value.translate(_SEP_TRANSLATION)
         items = [k.strip() for k in re.split(r"[,\s]+", raw) if k.strip()]
         return items or None
+    if not isinstance(value, (list, tuple, set)):
+        raise ServiceError(
+            f"关键词必须是字符串或列表，收到 {type(value).__name__}: {value!r}")
     items = [str(k).strip() for k in value if str(k).strip()]
     return items or None
 
@@ -305,6 +317,9 @@ def _entry(entry) -> Optional[Dict[str, Any]]:
         "stack": list(entry.stack),
         "timestamp": _fnum(entry.timestamp),
         "time_text": _ts(entry.timestamp),
+        "trace_id": getattr(entry, "trace_id", ""),
+        "request_id": getattr(entry, "request_id", ""),
+        "structured": bool(getattr(entry, "structured", False)),
     }
 
 
@@ -325,6 +340,10 @@ def cluster_to_dict(cluster: ErrorCluster, *,
         "template": cluster.template,
         "count": cluster.count,
         "priority": cluster.priority,
+        # 档位标签（P0~P4）随分数一起下发：前端此前直接拼 `P${priority}`，
+        # 于是界面显示「P80.0」—— 一个看着像 80 分的数字，而不是优先级
+        # 分档。模型和各类报告里都有这个标签，唯独 Web API 漏了。
+        "priority_label": cluster.priority_label,
         "priority_detail": cluster.priority_detail,
         # v2：置信档位 CONFIRMED / LIKELY / INSUFFICIENT
         "root_cause_confidence": cluster.root_cause_confidence or "",
@@ -339,9 +358,15 @@ def cluster_to_dict(cluster: ErrorCluster, *,
         "root_timeline": cluster.root_timeline,
         "anomaly": cluster.anomaly,
         "related_clusters": list(cluster.related_clusters),
+        "traces": list(cluster.traces),
         "hist": _hist(cluster.hist),
         "instances_truncated": cluster.instances_truncated,
+        # 证据引用：每条结论都能指回日志原文的具体行，调用方可自行
+        # 用 verify_evidence 重读原文核对（不必相信本工具）。
+        "evidence": [e.as_dict() for e in cluster.evidence],
     }
+    if cluster.evidence:
+        data["evidence_citation"] = cluster.evidence[0].citation()
 
     if include_sample and cluster.sample is not None:
         smp = cluster.sample
@@ -353,6 +378,12 @@ def cluster_to_dict(cluster: ErrorCluster, *,
             "entry": _entry(entry),
             "before": list(smp.before),
             "after": list(smp.after),
+            # 结构化日志：字段来自原生字段而非正则刮取，前端/Agent 需要
+            # 知道这一点才能正确解读（timestamp 已是 epoch，level 是真字段）
+            "structured": bool(getattr(entry, "structured", False)),
+            "trace_id": getattr(entry, "trace_id", ""),
+            "request_id": getattr(entry, "request_id", ""),
+            "fields": dict(getattr(entry, "fields", {}) or {}),
             "stack_simplified": (
                 {
                     "lines": list(simplified.lines),
@@ -379,8 +410,13 @@ def cluster_to_dict(cluster: ErrorCluster, *,
             for inst in cluster.instances
         ]
         try:
+            # 必须用 message_template（不含级别与堆栈），不能用 template。
+            # template 是「级别 | 消息 | 堆栈前 3 帧」三段拼接，拿它去
+            # 匹配只有消息文本的实例摘要，尾部堆栈字面量永远匹配不上 ——
+            # 带堆栈的簇（也就是几乎所有真错误）变量分布恒为空。
             _, slots = extract_variable_distribution(
-                cluster.template, [i.summary for i in cluster.instances])
+                cluster.message_template or cluster.template,
+                [i.summary for i in cluster.instances])
             data["variables"] = [
                 {"name": name, "values": [[v, n] for v, n in values]}
                 for name, values in slots
@@ -430,6 +466,9 @@ def result_to_dict(result: AnalysisResult, *, top_n: Optional[int] = None,
             "truncated": stats.truncated,
             "limit_hit": stats.limit_hit,
         },
+        # 确定性指纹：同一份日志两次分析必须逐字节相同（耗时等易变
+        # 字段已排除）。这个数不需要相信厂商 —— 跑两遍比一下就知道。
+        "determinism_fingerprint": result_fingerprint(result),
         # v2：证据充分性评估（analysis.assess_evidence 产出）
         "evidence": result.evidence or {},
         "keywords": list(result.keywords),
@@ -442,6 +481,8 @@ def result_to_dict(result: AnalysisResult, *, top_n: Optional[int] = None,
             for c in roots
         ],
         "cooccurring": cooc,
+        # 调用链（结构化日志里有 trace_id / request_id 时非空）
+        "traces": [t.as_dict() for t in (getattr(result, "traces", None) or [])],
         "clusters": [cluster_to_dict(c, include_sample=with_samples)
                      for c in clusters],
         "total_clusters": len(result.clusters),
@@ -529,3 +570,26 @@ def export_text(result: AnalysisResult, fmt: str, *,
 
 def media_type(fmt: str) -> str:
     return MEDIA_TYPES.get((fmt or "md").lower(), "text/plain; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 取证：证据自校验
+# ---------------------------------------------------------------------------
+def verify_result(result: AnalysisResult) -> Dict[str, Any]:
+    """重读原始日志，核对本次分析引用的每一条证据。
+
+    这是本工具对「你凭什么这么说」的唯一回答方式：不解释、不辩护，
+    直接把原文拉出来重算摘要给你看。
+    - 日志被改过 / 被截断 → MISMATCH，verdict=TAMPERED；
+    - 源文件已不在（换机器、日志轮转清理）→ MISSING_SOURCE；
+    - 粘贴文本没有可回读的源文件 → NO_SOURCE，如实说明而不是谎称通过。
+
+    verdict 只有三种：VERIFIED（全对）/ TAMPERED（有对不上的）/
+    NO_EVIDENCE（本来就没有证据）。**没有"大部分通过"这个档位** ——
+    一份掺了假证据的报告不该因为大部分为真就放行。
+    """
+    refs = [ref for c in result.clusters for ref in c.evidence]
+    report = verify_refs(refs).as_dict()
+    report["fingerprint"] = result_fingerprint(result)
+    report["source"] = result.stats.source
+    return report

@@ -38,6 +38,7 @@ from log_ai_compressor.core.encoding import (
     is_compressed,
     open_text_stream,
 )
+from log_ai_compressor.core.evidence import KIND_SAMPLE, make_ref
 from log_ai_compressor.core.filters import EntryFilter, FilterConfig
 from log_ai_compressor.core.models import AnalysisResult, RunStats
 from log_ai_compressor.core.parser import LogParser
@@ -55,6 +56,50 @@ ProgressCallback = Callable[[dict], None]
 
 class ProcessingCancelled(Exception):
     """用户主动取消处理（run 仍会返回增量结果前抛出/或内部捕获）。"""
+
+
+def _in_tod_window(tod: float, start: Optional[float],
+                   end: Optional[float]) -> bool:
+    """每日时段区间判定（秒），**支持跨零点**。
+
+    修复：此前是两个独立的 `tod < start` / `tod > end` 早退，于是
+    tod_start > tod_end 的区间（22:00~06:00 这种夜间窗口，日志分析的
+    常规需求）会把一天里**所有**条目都判为区间外 —— 用户设了窗口却
+    拿到一份空报告，且没有任何提示。现在 start > end 解释为跨零点。
+    """
+    lo = 0.0 if start is None else start
+    hi = 86400.0 if end is None else end
+    if lo <= hi:
+        return lo <= tod <= hi
+    return tod >= lo or tod <= hi          # 跨零点：22:00~06:00
+
+
+def _attach_evidence(cluster, entry, recent: deque, replace: bool = False) -> None:
+    """给簇挂上第一条证据引用（典型样例所在的原文行区间）。
+
+    为什么挂在聚类这一步而不是分析层：证据要的是**原始行**，
+    而原始行只有摄入时还在窗口里 —— 分析层再来取就只剩剥过 ANSI 的
+    展示文本，摘要对不上原文。
+
+    行区间超出滚动窗口（超长堆栈）时**不**硬造证据：宁可少一条引用，
+    也不能给一条验不过的引用 —— 一个会失配的证据引用比没有更糟。
+    """
+    if cluster.evidence and not replace:
+        return
+    start = entry.line_no
+    end = entry.last_line_no or entry.line_no
+    raw_lines = [raw for (no, _text, raw) in recent
+                 if start <= no <= end]
+    if len(raw_lines) != end - start + 1:
+        return
+    ref = make_ref(entry.source_file or "<粘贴文本>", start, end, raw_lines,
+                   kind=KIND_SAMPLE, note="典型样例原文")
+    if replace:
+        # 样例被升级成带堆栈的版本时，证据必须跟着换 —— 引用指向的行
+        # 和实际展示的样例对不上，比没有引用更容易误导人。
+        cluster.evidence = [ref]
+    else:
+        cluster.evidence.append(ref)
 
 
 # 优化缺陷R90：ANSI 转义序列（Jenkins AnsiColor 等彩色控制符，
@@ -154,7 +199,7 @@ class PipelineConfig:
     time_end: Optional[float] = None
     tod_start: Optional[float] = None
     tod_end: Optional[float] = None
-    # 优化缺陷R85：行数上限采样（None=全部；达上限收束并标记
+    # 优化缺陷R85：行数上限采样（None 或 ≤0 = 全部；达上限收束并标记
     # stats.limit_hit，与取消中断区分）
     max_lines: Optional[int] = None
     # 优化缺陷R88：编码指定（None=自动探测；老系统日志自动探测失灵
@@ -257,11 +302,14 @@ class LogPipeline:
             else str(paths[0]),
             encoding=encoding,
             rule_name=self._ruleset.name + ("（自动）" if auto else ""))
+        # 每行带上来源文件名：轮转合并后「第 42 行」在几个文件里都有，
+        # 证据引用必须精确到文件才复核得了（core/evidence.py）
 
         def chained():
             for p in paths:
                 with open_text_stream(p, encoding) as stream:
-                    yield from stream
+                    for line in stream:
+                        yield line, str(p)
 
         return self._process_lines(chained(), stats)
 
@@ -299,8 +347,11 @@ class LogPipeline:
         from log_ai_compressor.constants import GLOBAL_HIST_MAX_BUCKETS
         global_hist = TimeHistogram(max_buckets=GLOBAL_HIST_MAX_BUCKETS)
 
-        # 前上下文滚动窗口：(行号, 行文本)，容量 context+64 保证
-        # 常规堆栈长度下仍能取到条目之前的上下文
+        # 前上下文滚动窗口：(行号, 处理后文本, 原始文本)，容量
+        # context+64 保证常规堆栈长度下仍能取到条目之前的上下文。
+        # 保留原始文本是因为证据摘要必须基于**文件原始字节**（证据要能
+        # 被 verify_refs 重读原文复核）；用剥过 ANSI 的文本算摘要，
+        # 自校验会永远失配。
         window = self._ctx + 64
         recent: deque = deque(maxlen=window)
         # 后上下文待补队列：id(样例/实例) -> {"target", "start_line", "lines"}
@@ -309,6 +360,7 @@ class LogPipeline:
         line_no = 0
         cancelled = False
         limit_hit = False     # 优化缺陷R85：行数上限采样命中标记
+        cur_source = str(stats.source)
 
         def notify(phase: str) -> None:
             if self._progress_cb:
@@ -322,29 +374,35 @@ class LogPipeline:
                 })
 
         try:
-            for raw_line in lines:
+            for item in lines:
+                if isinstance(item, tuple):
+                    raw_line, cur_source = item
+                else:
+                    raw_line = item
                 line_no += 1
                 # 优化缺陷R99：原始字符数逐行累计（Token 压缩率原始侧）
                 stats.raw_chars += len(raw_line)
-                line = _strip_ansi(raw_line.rstrip("\r\n"))
+                stripped = raw_line.rstrip("\r\n")
+                line = _strip_ansi(stripped)
 
                 # 1) 新条目开始 -> 处理上一个完整条目
                 completed = parser.feed(line, line_no)
                 if completed is not None:
+                    completed.source_file = cur_source
                     self._handle_entry(completed, stats, clusterer,
                                        global_hist, recent, pending)
 
                 # 2) 后上下文补录（仅对开启待补的样例）
                 if pending:
-                    for item in list(pending.values()):
-                        if (line_no > item["start_line"]
-                                and len(item["lines"]) < self._ctx):
-                            item["lines"].append(line)
-                            if len(item["lines"]) >= self._ctx:
-                                self._close_pending(item, pending)
+                    for item_ in list(pending.values()):
+                        if (line_no > item_["start_line"]
+                                and len(item_["lines"]) < self._ctx):
+                            item_["lines"].append(line)
+                            if len(item_["lines"]) >= self._ctx:
+                                self._close_pending(item_, pending)
 
                 # 3) 前上下文滚动窗口
-                recent.append((line_no, line))
+                recent.append((line_no, line, stripped))
 
                 # 4) 取消轮询（独立间隔，开销极低）
                 if (self._cancel_event is not None
@@ -355,7 +413,10 @@ class LogPipeline:
 
                 # 4.5) 行数上限采样（优化缺陷R85）：达上限即收束 ——
                 # 标记 limit_hit（与取消中断区分，非用户取消）
+                # （max_lines ≤ 0 视为不限，与 service 层「0 = 全部」
+                # 的口径一致；此前 0 会让第一行就命中上限，只读 1 行）
                 if (self._config.max_lines is not None
+                        and self._config.max_lines > 0
                         and line_no >= self._config.max_lines):
                     limit_hit = True
                     break
@@ -367,6 +428,7 @@ class LogPipeline:
             # 流结束：产出最后一个条目
             last = parser.flush()
             if last is not None:
+                last.source_file = cur_source
                 self._handle_entry(last, stats, clusterer, global_hist,
                                    recent, pending)
         except ProcessingCancelled:
@@ -420,11 +482,8 @@ class LogPipeline:
                     or self._config.tod_end is not None):
                 lt = time.localtime(ts)
                 tod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
-                if (self._config.tod_start is not None
-                        and tod < self._config.tod_start):
-                    return
-                if (self._config.tod_end is not None
-                        and tod > self._config.tod_end):
+                if not _in_tod_window(tod, self._config.tod_start,
+                                      self._config.tod_end):
                     return
         stats.entry_lines += 1
         stats.level_counts[entry.level] = stats.level_counts.get(entry.level, 0) + 1
@@ -451,10 +510,14 @@ class LogPipeline:
         # 前上下文快照：按行号区间截取（排除条目自身的堆栈/折行）
         before: Optional[List[str]] = None
         if self._ctx > 0:
-            before = [text for (no, text) in recent
+            before = [text for (no, text, _raw) in recent
                       if entry.line_no - self._ctx <= no < entry.line_no]
 
         cluster, replaced, instance = clusterer.add(entry, before)
+        # 证据引用：把「这个簇是存在的」绑定到日志原文的具体行区间。
+        # 摘要取自文件原始文本（recent 的第三元），这样 verify 能重读
+        # 原文核对 —— 这是结论可被独立复核的前提。
+        _attach_evidence(cluster, entry, recent, replace=replaced)
         if replaced and self._ctx > 0:
             # 新建簇或样例升级 -> 开启样例后上下文待补
             pending[id(cluster.sample)] = {

@@ -28,6 +28,28 @@ _MASK_URL_CRED = re.compile(
 _MASK_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")
 _MASK_PHONE = re.compile(r"\b1[3-9]\d{9}\b")
 _MASK_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b")
+# 版本号语境：紧跟在 version/ver/release/版本 之后的四段数字不是 IP
+# （实测 "version 1.2.3.4 released" 被整段打成 [IP]，把最关键的排查
+# 线索从报告里抹掉了 —— 与本模块「宁漏勿滥、避免误伤可读性」的立场
+# 相悖）。这些词后面的点分数字直接跳过。
+# 词表刻意不含 build：日志里 "build 10.1.2.3" 不如 "from 10.0.0.1"
+# 常见，把它算成版本号就等于放过了一个真实 IP —— 宁可误伤也不漏打。
+_VERSION_CTX = re.compile(
+    r"(?:version|ver|release|版本号?)\s*[:=]?\s*$", re.IGNORECASE)
+
+
+def _mask_ipv4(text: str) -> str:
+    """IPv4 打码，跳过版本号语境。"""
+    out: list = []
+    last = 0
+    for m in _MASK_IPV4.finditer(text):
+        if _VERSION_CTX.search(text[last:m.start()]):
+            continue                       # 版本号，原样保留
+        out.append(text[last:m.start()])
+        out.append("[IP]")
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out)
 
 
 def redact_text(text: str, custom_rules: list = None) -> str:
@@ -45,7 +67,7 @@ def redact_text(text: str, custom_rules: list = None) -> str:
     text = _MASK_URL_CRED.sub(r"\1[账号]@", text)
     text = _MASK_EMAIL.sub("[邮箱]", text)
     text = _MASK_PHONE.sub("[电话]", text)
-    text = _MASK_IPV4.sub("[IP]", text)
+    text = _mask_ipv4(text)
     for rule in (custom_rules or []):
         if rule:
             try:

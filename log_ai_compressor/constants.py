@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # 日志级别体系
@@ -70,17 +71,29 @@ LEVEL_ALIASES = {
 }
 
 
+def canonical_level(raw: str) -> Optional[str]:
+    """级别写法 -> 规范级别；**无法识别时返回 None**（不猜）。
+
+    级别串两端常见分隔符（``[ERROR]`` / ``ERROR:`` / ``ERROR -``）一并
+    剥掉：拼写带分隔符时此前一律落到 normalize_level 的 INFO 兜底，而
+    ERROR 行的级别一旦变 INFO 就会被默认的「只看 ERROR/FAIL」过滤
+    **整条丢掉** —— 用户拿到一份「没有错误」的报告，日志里却全是错误。
+
+    与 normalize_level 的区别就在「不认得的写法」上：本函数说不知道，
+    normalize_level 保守当 INFO（解析层需要不丢行），而**参数校验**必须
+    用本函数 —— 否则 `--level EROR` 会被悄悄改成 INFO，报告里全是
+    信息级条目，比报错更糟。
+    """
+    token = raw.strip(" \t[]():-|>").strip().upper()
+    return LEVEL_ALIASES.get(token) or (token if token in LEVEL_ORDER else None)
+
+
 def normalize_level(raw: str) -> str:
     """将任意级别写法归一化到 LEVEL_ORDER 中的规范级别。
 
     无法识别时返回 "INFO"（保守降级，避免未知级别丢失行）。
     """
-    token = raw.strip().strip("[]()").upper()
-    if token in LEVEL_ALIASES:
-        return LEVEL_ALIASES[token]
-    if token in LEVEL_ORDER:
-        return token
-    return "INFO"
+    return canonical_level(raw) or "INFO"
 
 
 # ---------------------------------------------------------------------------

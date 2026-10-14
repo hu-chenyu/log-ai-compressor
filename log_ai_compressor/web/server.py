@@ -68,16 +68,19 @@ def _fs_entry(p: Path) -> Dict[str, Any]:
         st = p.stat()
         is_dir = p.is_dir()
         size = 0 if is_dir else st.st_size
+        mtime = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
     except OSError:
-        is_dir, size = p.is_dir(), 0
+        # 权限不足 / 条目在列举后被删除 / 路径过长。mtime 必须在同一个
+        # try 里取：此前它在返回字典里单独 stat 一次，条目刚好消失时
+        # 这个二次调用会抛 OSError，把整个目录列举变成 500。
+        is_dir, size, mtime = p.is_dir(), 0, ""
     return {
         "name": p.name,
         "path": str(p),
         "is_dir": is_dir,
         "size": size,
         "size_text": "" if is_dir else _human_size(size),
-        "mtime": (lambda m: time.strftime("%Y-%m-%d %H:%M", time.localtime(m))
-                  )(p.stat().st_mtime) if p.exists() else "",
+        "mtime": mtime,
     }
 
 

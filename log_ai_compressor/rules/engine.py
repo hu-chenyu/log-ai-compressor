@@ -140,18 +140,33 @@ class RuleSet:
                 ) from exc
             patterns.append(PatternRule(str(item.get("name") or f"p{i}"), compiled, text))
 
-        stack_indicators = [
-            re.compile(cls._expand(t))
-            for t in (data.get("stack_indicators") or DEFAULT_STACK_INDICATORS)
-        ]
+        # 堆栈特征与级别提示同样要翻译成 RuleSetError：patterns 已经这么
+        # 做了，这两处却让裸 re.error 逃出去。`run --rule bad.yaml` 撞上
+        # 一个写错的 stack_indicator，用户看到的是一整页 Python
+        # traceback，而不是「规则文件第 N 条正则非法」这一句话。
+        stack_indicators: List[Pattern[str]] = []
+        for j, t in enumerate(data.get("stack_indicators")
+                              or DEFAULT_STACK_INDICATORS):
+            try:
+                stack_indicators.append(re.compile(cls._expand(t)))
+            except re.error as exc:
+                raise RuleSetError(
+                    f"规则集 {name!r} 第 {j + 1} 条堆栈特征正则非法: {exc}"
+                ) from exc
 
         level_hints: Dict[str, List[Pattern[str]]] = {}
         raw_hints = data.get("level_hints") or DEFAULT_LEVEL_HINTS
         for raw_level, pats in raw_hints.items():
             canon = normalize_level(str(raw_level))
-            level_hints.setdefault(canon, []).extend(
-                re.compile(p, re.IGNORECASE) for p in pats
-            )
+            for p in pats:
+                try:
+                    level_hints.setdefault(canon, []).append(
+                        re.compile(p, re.IGNORECASE))
+                except re.error as exc:
+                    raise RuleSetError(
+                        f"规则集 {name!r} 级别 {raw_level!r} 的关键词"
+                        f"正则非法: {p!r} ({exc})"
+                    ) from exc
         return cls(name=name, description=str(data.get("description") or ""),
                    patterns=patterns, stack_indicators=stack_indicators,
                    level_hints=level_hints, source=source)
