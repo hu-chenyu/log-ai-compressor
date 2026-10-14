@@ -21,7 +21,11 @@
 """
 from __future__ import annotations
 
+import os
+import pathlib
 import random
+import subprocess
+import sys
 
 import pytest
 
@@ -227,6 +231,49 @@ class TestIdempotence:
         for chain in (r.traces or []):
             line_nos = [s.line_no for s in chain.steps]
             assert len(line_nos) == len(set(line_nos)), "链路出现重复步骤"
+
+
+# ---------------------------------------------------------------------------
+# I7 门禁脚本必须在任何控制台编码下都能跑完
+# ---------------------------------------------------------------------------
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
+CI_GATE_SCRIPTS = ("scripts/adversarial_eval.py", "scripts/prove.py")
+
+
+class TestGateScriptsEncodingSafe:
+    """CI 门禁脚本打印中文，必须在非 UTF-8 控制台下也能跑完。
+
+    实测事故：Windows runner 控制台是 cp1252，`adversarial_eval.py`
+    评分**全绿**却在 print() 中文表格时抛 UnicodeEncodeError，整个 step
+    变红 —— 症状是「CI 红了」，真相是「只是打印不出来」。
+
+    门禁红必须意味着**主张不成立**，不能是控制台编码。否则门禁会训练
+    所有人忽略红色，这比没有门禁更糟。
+    """
+
+    @pytest.mark.parametrize("script", CI_GATE_SCRIPTS)
+    def test_source_reconfigures_stdout(self, script):
+        """源码层面的快速检查（拼写错也能抓到）。"""
+        src = (_ROOT / script).read_text(encoding="utf-8")
+        assert 'reconfigure(encoding="utf-8"' in src, (
+            f"{script} 必须把 stdout/stderr 切到 UTF-8")
+
+    @pytest.mark.parametrize("script", CI_GATE_SCRIPTS)
+    def test_runs_under_cp1252_stdout(self, script):
+        """真的用 cp1252 跑一遍。
+
+        只有真跑才能证明「Windows CI 会绿」—— 断言源码里有某行代码
+        只是在检查拼写。
+        """
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "cp1252"
+        env.pop("PYTHONUTF8", None)
+        proc = subprocess.run(
+            [sys.executable, str(_ROOT / script)],
+            capture_output=True, env=env, timeout=300)
+        assert proc.returncode == 0, (
+            f"{script} 在 cp1252 控制台下退出码 {proc.returncode}: "
+            f"{proc.stderr[-400:].decode('utf-8', 'replace')}")
 
 
 # ---------------------------------------------------------------------------
