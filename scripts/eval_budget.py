@@ -182,7 +182,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="同预算公平对照")
     ap.add_argument("--noise-lines", type=int, default=2000,
                     help="背景噪音行数（真实底座均匀采样）")
-    ap.add_argument("--budgets", default="100,200,400,800")
+    # 默认档位必须与 docs/BENCHMARK.md 里发布的那张表逐列一致 ——
+    # 否则"照文档敲命令"复现不出"文档里的数"，等于结论不可复核。
+    ap.add_argument("--budgets", default="200,400,800,1600,3200,6400")
     ap.add_argument("--no-drain3", action="store_true")
     args = ap.parse_args()
     budgets = [int(b) for b in args.budgets.split(",") if b.strip()]
