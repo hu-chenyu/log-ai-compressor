@@ -27,6 +27,16 @@
 工具判定的是「被 Caused-by 指向的簇」，对应链上**最内层**那个异常。
 
 用法：python scripts/eval_rootcause.py [日志路径 ...]
+      python scripts/eval_rootcause.py --repro      # 复现语料（自建场景）
+
+复现语料（--repro）是什么、不是什么
+----------------------------------
+外部真实数据集（Loghub Android_v1 / Hadoop 全量，含真实 Java 异常栈）托管在
+zenodo，当前网络环境反复下载失败 —— **真实数据的召回率至今仍无数字，此处
+不编**。`--repro` 提供的是：自建故障场景 + 真实 Java 异常类/栈帧/日志格式
+的**功能基准**，用来证明「精确率/召回率/自信错误率」这三个指标的机制能
+抓住回归（例如历史上那个把 INFO 行判成 CONFIRMED 的 bug）。它的数字
+**不能**替代真实数据集结论，报告里分开列、分开标注。
 """
 from __future__ import annotations
 
@@ -44,10 +54,27 @@ from log_ai_compressor.core.analysis import (              # noqa: E402
     CONF_CONFIRMED,
 )
 
-# 异常摘要行：`java.io.IOException: xxx` / `java.lang.OutOfMemoryError: xxx`
-_EXC = re.compile(r"^(?:[\w.$]+\.)?([\w$]*(?:Exception|Error|Throwable))(?::\s*(.*))?$")
-# Caused by: 的因果边（链上非首行）
-_CAUSED = re.compile(r"^Caused by:\s*(?:[\w.$]+\.)?([\w$]*(?:Exception|Error|Throwable))(?::\s*(.*))?$")
+# 异常摘要行：`java.lang.RuntimeException: xxx`。类名允许 `$` 内部类/匿名类
+# （真实日志里 `com.zaxxer.hikari.pool.HikariPool$1: ...` 这类异常很常见），
+# 不再要求以 Exception/Error/Throwable 结尾 —— 否则整条链会被漏成噪音，
+# 地面真相自己先失真，评测就白做了。
+_CLS = r"(?:[\w$]+\.)*[\w$]+"
+_EXC = re.compile(rf"^{_CLS}(?::\s*(.*))?$")
+_CAUSED = re.compile(rf"^Caused by:\s*({_CLS})(?::\s*(.*))?$")
+# 纯单词行（"Timeout" / "Done"）不是异常类，需带包名点或类名后缀才认
+_SUFFIXES = ("Exception", "Error", "Throwable")
+
+
+def _exc_line(s: str):
+    """行首异常摘要：返回 (类名, 消息) 或 None（纯单词行拒绝）。"""
+    m = _EXC.match(s)
+    if not m:
+        return None
+    cls = s.split(":", 1)[0].strip()
+    if "." not in cls and not cls.endswith(_SUFFIXES):
+        return None
+    rest = s[len(cls):].lstrip()[1:] if ":" in s[len(cls):] else ""
+    return cls, rest.strip()
 
 
 @dataclass
@@ -78,6 +105,90 @@ def _sig(cls: str, msg: str | None) -> str:
     return f"{cls}:{m}".strip(":").lower()
 
 
+# ---------------------------------------------------------------------------
+# 复现语料（--repro）：自建故障场景 + 真实 Java 异常类/栈帧/日志格式。
+# 地面真相仍由 scan_chains 独立扫描产生，不手工标注。
+# ---------------------------------------------------------------------------
+REPRO_CORPUS: dict[str, str] = {
+    # 场景 1：双链 —— 一条 3 层（连接池→连接→拒绝），一条 2 层（缓存预热）
+    "order_service.log": """\
+2026-10-14 09:12:30,101 INFO  [http-nio-8080-exec-7] c.e.order.OrderService - 开始处理订单 order=88213
+2026-10-14 09:12:33,456 ERROR [http-nio-8080-exec-7] c.e.order.OrderService - 订单创建失败 order=88213
+java.lang.RuntimeException: 订单创建失败
+\tat com.example.order.OrderService.create(OrderService.java:42)
+\tat com.example.order.OrderController.submit(OrderController.java:88)
+\tat jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+\t... 32 more
+Caused by: com.zaxxer.hikari.pool.HikariPool$1: Connection is not available, request timed out after 30000ms.
+\tat com.zaxxer.hikari.pool.HikariPool.createTimeoutException(HikariPool.java:696)
+\tat com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:181)
+\t... 41 more
+Caused by: java.net.ConnectException: Connection refused (Connection refused)
+\tat java.base/java.net.PlainSocketImpl.socketConnect(Native Method)
+\tat java.base/java.net.AbstractPlainSocketImpl.doConnect(AbstractPlainSocketImpl.java:412)
+\t... 12 more
+2026-10-14 09:12:33,470 WARN  [http-nio-8080-exec-7] c.e.order.OrderService - 订单 88213 已回滚
+2026-10-14 09:13:02,880 ERROR [scheduler-1] c.e.cache.CacheWarmup - 缓存预热失败 key=hot:sku
+java.lang.IllegalStateException: 缓存预热失败
+\tat com.example.cache.CacheWarmup.warm(CacheWarmup.java:57)
+\t... 9 more
+Caused by: redis.clients.jedis.exceptions.JedisConnectionException: Unexpected end of stream.
+\tat redis.clients.jedis.Connection.readProtocolWithCheckingBroken(Connection.java:313)
+\t... 11 more
+2026-10-14 09:13:05,000 INFO  [scheduler-1] c.e.cache.CacheWarmup - 预热任务结束
+""",
+    # 场景 2：单链 3 层 + 厚噪音（OOM 在最内层），验证深链能被召回
+    "batch_job.log": """\
+2026-10-14 02:00:01,000 INFO  [batch-1] c.e.batch.JobRunner - 批处理开始 job=daily-settle
+2026-10-14 02:00:05,231 INFO  [batch-1] c.e.batch.JobRunner - 已读取分片 shard=1/12
+2026-10-14 02:00:09,876 INFO  [batch-1] c.e.batch.JobRunner - 已读取分片 shard=2/12
+2026-10-14 02:03:41,554 ERROR [batch-1] c.e.batch.JobRunner - 批处理中断 job=daily-settle
+java.lang.RuntimeException: 批处理中断
+\tat com.example.batch.JobRunner.run(JobRunner.java:133)
+\tat java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.lang.IllegalStateException: 结果集物化失败
+\tat com.example.batch.SettleAggregator.materialize(SettleAggregator.java:201)
+\t... 4 more
+Caused by: java.lang.OutOfMemoryError: Java heap space
+\tat com.example.batch.SettleAggregator.<init>(SettleAggregator.java:44)
+\t... 7 more
+2026-10-14 02:03:41,560 WARN  [batch-1] c.e.batch.JobRunner - 开始清理临时表
+2026-10-14 02:03:42,111 INFO  [batch-1] c.e.batch.JobRunner - 清理完成
+""",
+    # 场景 3：对照组 —— 关键词堆砌但**无任何因果链**（0 条链，必须 0 CONFIRMED）
+    "no_chain_control.log": """\
+2026-10-14 08:00:01,000 WARN  [worker-2] c.e.task.TaskExecutor - connection refused to db-replica:5432, 重试中
+2026-10-14 08:00:02,000 WARN  [worker-2] c.e.task.TaskExecutor - connection refused to db-replica:5432, 重试中
+2026-10-14 08:00:03,000 ERROR [worker-2] c.e.task.TaskExecutor - out of memory 告警：堆使用率 97%，GC 时间占比 31%
+2026-10-14 08:00:04,000 ERROR [worker-2] c.e.task.TaskExecutor - timeout: 下游 payment 调用 30s 无响应
+2026-10-14 08:00:05,000 ERROR [worker-2] c.e.task.TaskExecutor - task failed after 3 retries: 无法连接到主库 10.0.0.11:3306
+2026-10-14 08:00:06,000 WARN  [worker-2] c.e.task.TaskExecutor - 降级为兜底逻辑
+""",
+    # 场景 4：混排 —— 2 条链 + 无链错误 + INFO 噪音，精确率召回率同时受压
+    "mixed.log": """\
+2026-10-14 15:30:00,120 INFO  [http-nio-8080-exec-1] c.e.api.Gateway - 请求进入 GET /api/v2/report
+2026-10-14 15:30:00,333 ERROR [http-nio-8080-exec-1] c.e.api.Gateway - 报表生成失败
+java.lang.RuntimeException: 报表生成失败
+\tat com.example.api.ReportService.generate(ReportService.java:61)
+\t... 24 more
+Caused by: java.io.FileNotFoundException: /data/export/template.xlsx (No such file or directory)
+\tat java.base/java.io.FileInputStream.open0(Native Method)
+\tat com.example.api.ReportService.loadTemplate(ReportService.java:72)
+\t... 26 more
+2026-10-14 15:30:01,400 ERROR [http-nio-8080-exec-2] c.e.api.Gateway - 上游鉴权服务返回 502
+2026-10-14 15:30:02,001 WARN  [http-nio-8080-exec-2] c.e.api.Gateway - 请求已降级处理 GET /api/v2/report
+2026-10-14 15:30:07,665 ERROR [kafka-consumer-3] c.e.msg.OrderConsumer - 消息消费失败 topic=order-events
+java.lang.IllegalStateException: 消息消费失败
+\tat com.example.msg.OrderConsumer.onMessage(OrderConsumer.java:39)
+\t... 6 more
+Caused by: org.apache.kafka.common.errors.SerializationException: 未知的消息版本 v7
+\tat com.example.msg.OrderDecoder.decode(OrderDecoder.java:28)
+\t... 8 more
+2026-10-14 15:30:08,000 INFO  [kafka-consumer-3] c.e.msg.OrderConsumer - 位点已回滚
+""",
+}
+
+
 def scan_chains(path: Path) -> list[Chain]:
     """独立扫描原始日志，抽出所有 Caused-by 因果链。"""
     chains: list[Chain] = []
@@ -91,13 +202,13 @@ def scan_chains(path: Path) -> list[Chain]:
                 cur["deepest_line"] = i
                 cur["deepest_sig"] = _sig(m.group(1), m.group(2))
                 continue
-            m = _EXC.match(s)
-            if m:
+            exc = _exc_line(s)
+            if exc:
                 if cur and cur["depth"] > 0:
                     chains.append(Chain(cur["first_line"], cur["deepest_line"],
                                         cur["depth"], cur["deepest_sig"]))
                 cur = {"first_line": i, "deepest_line": i, "depth": 0,
-                       "deepest_sig": _sig(m.group(1), m.group(2))}
+                       "deepest_sig": _sig(*exc)}
             elif s == "" or s.startswith("at ") or s.startswith("... "):
                 continue
             else:
@@ -111,20 +222,8 @@ def scan_chains(path: Path) -> list[Chain]:
     return chains
 
 
-def _cluster_sigs(c) -> set[str]:
-    """簇自身及其实例里出现过的异常签名。"""
-    sigs = set()
-    texts = [c.message_template or "", c.summary or ""]
-    for inst in getattr(c, "instances", []) or []:
-        texts.append(getattr(inst, "summary", "") or "")
-    for t in texts:
-        for m in re.finditer(r"([\w$]*(?:Exception|Error|Throwable)):\s*([^\n]{0,80})", t or ""):
-            sigs.add(_sig(m.group(1), m.group(2)))
-    return sigs
-
-
-def evaluate(path: Path) -> Outcome:
-    o = Outcome(name=path.parent.name or path.stem)
+def evaluate(path: Path, name: str = "") -> Outcome:
+    o = Outcome(name=name or (path.parent.name or path.stem))
     chains = scan_chains(path)
     o.chains = len(chains)
 
@@ -148,17 +247,15 @@ def evaluate(path: Path) -> Outcome:
         else:
             o.false_conf.append(c)
 
-    # --- 召回率：每条真实因果链，是否有 CONFIRMED 簇认领它 ---
-    all_sigs = [(_cluster_sigs(c), c) for c in result.clusters]
+    # --- 召回率：每条真实因果链，是否有 CONFIRMED 簇的行区间覆盖其最内层异常。
+    #     与精确率用同一把尺子（行区间含链最内层行 = 认领该链）。不再做异常
+    #     签名匹配：簇文本只有消息模板、不含栈，拿签名对账会把真召回判成
+    #     漏报 —— 首跑复现语料时召回率因此整体假 0%，评测器自己的 bug。
     for ch in chains:
-        matched = False
-        for sigs, c in all_sigs:
-            if not (c.first_line <= ch.deepest_line <= c.last_line):
-                continue
-            if any(ch.deepest_sig in s or s in ch.deepest_sig for s in sigs):
-                matched = c.root_cause_confidence == CONF_CONFIRMED
-                break
-        if matched:
+        hit = any(c.root_cause_confidence == CONF_CONFIRMED
+                  and c.first_line <= ch.deepest_line <= c.last_line
+                  for c in result.clusters)
+        if hit:
             o.chains_matched += 1
         else:
             o.misses.append(ch)
@@ -171,25 +268,38 @@ def evaluate(path: Path) -> Outcome:
 
 def main() -> int:
     args = sys.argv[1:]
-    if args:
-        paths = [Path(a) for a in args]
+    repro = args == ["--repro"]
+    named: list[tuple[Path, str]] = []
+    if repro:
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="rootcause_repro_"))
+        for name, text in REPRO_CORPUS.items():
+            p = tmp / name
+            p.write_text(text, encoding="utf-8")
+            named.append((p, name))
+    elif args:
+        named = [(Path(a), "") for a in args]
     else:
-        paths = sorted(
+        named = [(p, "") for p in sorted(
             p for p in (ROOT / "data" / "loghub").rglob("*_full.log")
-            if scan_chains(p))            # 只评有真实因果链的数据集
-    if not paths:
+            if scan_chains(p))]            # 只评有真实因果链的数据集
+    if not named:
         print("没有找到含 Caused-by 因果链的日志。")
-        print("请先下载 Loghub 1.0 的 Android_v1（含真实 Java 异常堆栈）。")
+        print("真实数据：下载 Loghub Android_v1 / Hadoop 全量（zenodo，含真实 Java 异常栈）")
+        print("功能基准：python scripts/eval_rootcause.py --repro（复现语料，非生产日志）")
         return 1
 
     print("=" * 78)
     print("  根因判定评测 —— CONFIRMED 档的精确率 / 召回率")
     print("  地面真相：独立扫描原始日志的 Caused by 链（不依赖本项目解析器）")
+    if repro:
+        print("  [口径] 复现语料：自建故障场景 + 真实 Java 异常/栈帧/日志格式，")
+        print("         **非生产日志** —— 验证指标机制与回归，不替代真实数据集结论。")
     print("=" * 78)
 
     tot = Outcome()
-    for p in paths:
-        o = evaluate(p)
+    for p, name in named:
+        o = evaluate(p, name)
         print(f"\n  【{o.name}】{o.rows:,} 行")
         print(f"    真实因果链        : {o.chains}")
         print(f"    判为 CONFIRMED    : {o.confirmed}")
