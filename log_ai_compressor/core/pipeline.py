@@ -74,7 +74,8 @@ def _in_tod_window(tod: float, start: Optional[float],
     return tod >= lo or tod <= hi          # 跨零点：22:00~06:00
 
 
-def _attach_evidence(cluster, entry, recent: deque, replace: bool = False) -> None:
+def _attach_evidence(cluster, entry, recent: deque, replace: bool = False,
+                     encoding: str = "") -> None:
     """给簇挂上第一条证据引用（典型样例所在的原文行区间）。
 
     为什么挂在聚类这一步而不是分析层：证据要的是**原始行**，
@@ -92,8 +93,9 @@ def _attach_evidence(cluster, entry, recent: deque, replace: bool = False) -> No
                  if start <= no <= end]
     if len(raw_lines) != end - start + 1:
         return
+    # 修复缺陷#1：encoding 随证据记录，verify 回读时复现同一解码路径
     ref = make_ref(entry.source_file or "<粘贴文本>", start, end, raw_lines,
-                   kind=KIND_SAMPLE, note="典型样例原文")
+                   kind=KIND_SAMPLE, note="典型样例原文", encoding=encoding)
     if replace:
         # 样例被升级成带堆栈的版本时，证据必须跟着换 —— 引用指向的行
         # 和实际展示的样例对不上，比没有引用更容易误导人。
@@ -517,7 +519,8 @@ class LogPipeline:
         # 证据引用：把「这个簇是存在的」绑定到日志原文的具体行区间。
         # 摘要取自文件原始文本（recent 的第三元），这样 verify 能重读
         # 原文核对 —— 这是结论可被独立复核的前提。
-        _attach_evidence(cluster, entry, recent, replace=replaced)
+        _attach_evidence(cluster, entry, recent, replace=replaced,
+                         encoding=stats.encoding or "")
         if replaced and self._ctx > 0:
             # 新建簇或样例升级 -> 开启样例后上下文待补
             pending[id(cluster.sample)] = {
