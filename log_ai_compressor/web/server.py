@@ -227,6 +227,24 @@ def create_app() -> FastAPI:
         job.cancel_event.set()
         return {"cancelled": True}
 
+    @app.post("/api/verify")
+    def verify(req: Dict[str, Any] = Body(...)):
+        """重读原始日志，核对本次分析引用的每一条证据出处。
+
+        Web 界面的「复核证据」按钮。存在的理由是取证层的核心主张在
+        浏览器里也必须**当场可验**：用户不能只在命令行跑 verify 才知道
+        自己的日志有没有被改过 —— 否则「可复核」只是一句 README 里的
+        话。job.result 是内存中的 AnalysisResult，直接交给 service 层
+        复用同一套 verify_refs，不另写一份校验逻辑。
+        """
+        job = J.REGISTRY.get(str(req.get("job_id") or ""))
+        if job is None or job.result is None:
+            raise HTTPException(404, "结果不存在或已被淘汰（请重新分析）")
+        try:
+            return S.verify_result(job.result)
+        except Exception as exc:                        # noqa: BLE001
+            raise HTTPException(500, f"复核失败：{exc}")
+
     # ---- 导出 -----------------------------------------------------------
     def _export_common(req: ExportRequest) -> tuple:
         job = J.REGISTRY.get(req.job_id)

@@ -469,3 +469,19 @@ code { background: var(--bg); padding: 1px 5px; border-radius: 4px;
 .trace-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-top: 6px; }
 .trace-row code { font-family: var(--mono); color: #6b21a8; }
 .trace-narr { font-size: 12px; color: #6b21a8; opacity: .9; padding-left: 4px; }
+/* ---- 证据自校验（浏览器内当场可验） ---- */
+.verify-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 0 14px; padding: 10px 14px; font-size: 13px;
+  background: var(--bg-card, #fff); border: 1px solid var(--border);
+  border-left: 4px solid var(--ok, #16a34a); border-radius: var(--radius);
+}
+.verify-bar .dim { color: var(--text-faint); font-size: 12px; }
+.verify-box { width: 100%; margin-top: 8px; padding: 8px 10px; border-radius: 8px;
+  font-size: 12.5px; line-height: 1.6; }
+.verify-box.ok   { background: #f0fdf4; border: 1px solid #bbf7d0; color: #14532d; }
+.verify-box.warn { background: #fffbeb; border: 1px solid #fde68a; color: #78350f; }
+.verify-box.bad  { background: #fef2f2; border: 1px solid #fecaca; color: #7f1d1d; }
+.verify-head { font-weight: 700; margin-bottom: 3px; }
+.verify-list { margin: 6px 0 0; padding-left: 18px; font-family: var(--mono);
+  font-size: 11.5px; word-break: break-all; }
