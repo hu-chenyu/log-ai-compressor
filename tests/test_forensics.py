@@ -557,6 +557,9 @@ class TestVerifySavedReport:
         logfile.write_text("".join(lines), encoding="utf-8")
         bad = verify_evidence(report_path=str(rp))
         assert bad["verdict"] == "TAMPERED" and bad["mismatched"] >= 1
+        # 修复缺陷#3：篡改时 ok 必须是 False —— 此前被无条件覆写成 True，
+        # Agent 按「ok=False 才不转述」的契约就会照常转述被篡改的结论
+        assert bad["ok"] is False
 
     def test_mcp_verify_requires_an_argument(self):
         pytest.importorskip("mcp")

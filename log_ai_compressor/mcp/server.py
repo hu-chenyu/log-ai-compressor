@@ -377,10 +377,13 @@ def verify_evidence(
         rule: 解析规则
 
     Returns:
-        {"ok": True, "verdict": "VERIFIED"|"TAMPERED"|"NO_EVIDENCE",
+        {"ok": bool, "verdict": "VERIFIED"|"TAMPERED"|"NO_EVIDENCE",
          "mode": "report"|"self-check", "checked": n, "matched": n,
          "mismatched": n, "fingerprint": sha256, "citations": [...]}
-        ok=False 时**不要**照常转述结论 —— 日志与结论已对不上。
+        ok 是**校验结论**（True 仅当全部证据对得上）：ok=False 时**不要**
+        照常转述结论 —— 日志与结论已对不上。调用本身失败（参数错误、
+        文件不存在等）返回 {"ok": False, "error": ...}，两类失败靠有无
+        verdict/error 字段区分。
     """
     if not path and not report_path:
         return {"ok": False, "error": "需要 path（当场自检）或 report_path（复核报告）"}
@@ -426,7 +429,11 @@ def verify_evidence(
                  "confidence": c.root_cause_confidence}
                 for c in result.clusters[:20] for e in c.evidence[:1]
             ]
-        report["ok"] = True
+        # 修复缺陷#3：ok 必须如实反映校验结论 —— 此前这里无条件覆写
+        # True，TAMPERED 时 Agent 看到 ok=True 就照常转述被篡改的旧结论，
+        # 等于把取证层唯一的警报亲手关掉。as_dict()/verify_result() 的
+        # ok（= 全部证据对得上）原样透出，调用失败才走 {"ok": False,
+        # "error": ...}。
         report["citations"] = citations
         return report
     except S.ServiceError as exc:
