@@ -84,7 +84,9 @@ class TestMeta:
         assert "available" in body["ai"]
 
     @pytest.mark.parametrize("name,needle", [
-        ("index.html", "日志AI压缩器"),
+        # needle 只是"文件内容确实被送达"的探针，不是品牌断言 —— 产品名从
+        # 「日志AI压缩器」改为「本机日志取证层」时同步更新即可
+        ("index.html", "本机日志取证层"),
         ("app.js", "State"),
         ("style.css", "--accent"),
     ])
