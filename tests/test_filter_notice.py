@@ -68,12 +68,14 @@ class TestNoticeTrigger:
         assert "5.0%" in notice
 
     def test_silent_when_nothing_was_filtered(self):
-        stats = RunStats(entry_lines=200, level_counts={"INFO": 200})
+        stats = RunStats(entry_lines=200, level_counts={"INFO": 200},
+                         error_entries=200)
         assert _build_filter_notice(stats, _fake_clusters(200, 1)) is None
 
     def test_silent_when_only_half_filtered(self):
         """保留 50% 不算异常 —— 正常日志本来就有一半非错误。"""
-        stats = RunStats(entry_lines=100, level_counts={"INFO": 50, "ERROR": 50})
+        stats = RunStats(entry_lines=100, level_counts={"INFO": 50, "ERROR": 50},
+                         error_entries=50)
         assert _build_filter_notice(stats, _fake_clusters(50, 1)) is None
 
     def test_silent_on_tiny_logs(self):
@@ -81,9 +83,25 @@ class TestNoticeTrigger:
         stats = RunStats(entry_lines=5, level_counts={"INFO": 5})
         assert _build_filter_notice(stats, _fake_clusters(1, 1)) is None
 
-    def test_silent_when_no_clusters(self):
+    def test_notice_even_when_report_is_empty(self):
+        """修复缺陷#6：报告全空（0 簇）恰恰最需要解释，不得静默。
+
+        此前这里返回 None —— 用户 500 行日志拿到空报告，连一句
+        「级别过滤只剩 0 条」都没有，无法区分「没错误」和「工具坏了」。
+        """
         stats = RunStats(entry_lines=500, level_counts={"INFO": 500})
-        assert _build_filter_notice(stats, []) is None
+        notice = _build_filter_notice(stats, [])
+        assert notice is not None
+        assert "0 / 500" in notice
+
+    def test_fires_on_openstack_like_keep_ratio(self):
+        """修复缺陷#6：实测 OpenStack 默认级别保留率 10.4% —— 旧阈值 10%
+        恰好把它放行。10%~15% 之间的近空报告必须有解释。"""
+        stats = RunStats(entry_lines=200, level_counts={"INFO": 179, "ERROR": 21},
+                         error_entries=21)
+        notice = _build_filter_notice(stats, _fake_clusters(21, 1))
+        assert notice is not None, "10.5% 保留率必须触发提示"
+        assert "10.5%" in notice
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +113,16 @@ class TestNoticeEndToEnd:
         r = analyze_text(MOSTLY_INFO)
         assert r.notice, "默认过滤几乎全灭时不得静默"
         assert "当前级别过滤只保留了" in r.notice
+
+    def test_empty_report_still_explains(self):
+        """修复缺陷#6：全部条目被过滤掉（空报告）也不能静默。"""
+        only_info = "\n".join(
+            f"2024-01-01 10:00:{i % 60:02d} INFO heartbeat tick {i}"
+            for i in range(200)) + "\n"
+        r = analyze_text(only_info)
+        assert not r.clusters, "纯 INFO 日志在默认级别下应为空报告"
+        assert r.notice, "空报告必须解释为什么空"
+        assert "0 / 200" in r.notice
 
     def test_all_levels_gives_no_notice(self):
         """放开门槛后不再提示 —— 提示必须是条件性的，不能变成噪音。"""
