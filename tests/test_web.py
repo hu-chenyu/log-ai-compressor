@@ -397,3 +397,24 @@ class TestAiEndpoints:
     def test_explain_unknown_job(self, client):
         r = client.post("/api/ai/explain", json={"job_id": "deadbeef"})
         assert r.status_code == 400
+
+
+class TestPasteLimit:
+    def test_oversized_paste_rejected(self, client, monkeypatch):
+        """修复缺陷#5：粘贴文本超上限必须 400 拒绝并指路文件导入。
+
+        粘贴模式整段文本随请求体一次性进内存，不限长等于把本机服务
+        白送给一个失控的请求体。
+        """
+        from log_ai_compressor.web import server as webserver
+        monkeypatch.setattr(webserver, "MAX_PASTE_CHARS", 100)
+        r = client.post("/api/analyze", json={"mode": "text", "text": "x" * 101})
+        assert r.status_code == 400
+        assert "文件导入" in r.json()["detail"]
+
+    def test_paste_within_limit_ok(self, client, monkeypatch):
+        from log_ai_compressor.web import server as webserver
+        monkeypatch.setattr(webserver, "MAX_PASTE_CHARS", 100)
+        job_id = _run(client, mode="text",
+                      text="2026-10-14 10:00:00 ERROR [db] boom")
+        assert job_id

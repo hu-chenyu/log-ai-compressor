@@ -94,3 +94,18 @@ class TestCliDefaults:
         from log_ai_compressor.constants import DEFAULT_CONTEXT_LINES
         args = build_parser().parse_args(["run", "app.log"])
         assert args.context == DEFAULT_CONTEXT_LINES
+
+    def test_web_remote_binding_requires_allow_flag(self, capsys):
+        """修复缺陷#5：非本机绑定必须显式 --allow-remote，只打警告不算数。
+
+        服务无鉴权、任意路径可读；脚本化启动时一行警告会被滚屏吞掉。
+        """
+        from log_ai_compressor.cli import main
+        assert main(["web", "--host", "0.0.0.0", "--no-browser"]) == 1
+        assert "--allow-remote" in capsys.readouterr().err
+
+    def test_web_localhost_needs_no_flag(self):
+        """本机绑定不受新门槛影响（不真起服务，只验证参数通过门槛）。"""
+        from log_ai_compressor.cli import build_parser
+        args = build_parser().parse_args(["web", "--host", "127.0.0.1"])
+        assert not args.allow_remote

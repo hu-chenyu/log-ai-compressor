@@ -197,7 +197,16 @@ class TimestampParser:
         ]
         for i in order:
             try:
-                dt = datetime.strptime(key, _TS_FORMATS[i])
+                fmt = _TS_FORMATS[i]
+                # 修复缺陷#5：无年份格式显式注入 1900 —— Python 3.15 将改变
+                # strptime 无年份时的默认年（3.13 起已发 DeprecationWarning）。
+                # 默认年一变就不再 <1970，_to_epoch 的基准年归一化不再触发，
+                # syslog / 纯时间戳的 epoch 会整体漂移，且与快速路径（固定
+                # 1900）不再等价 —— 注入固定年把行为钉死在现状。
+                if "%Y" not in fmt and "%y" not in fmt:
+                    dt = datetime.strptime(f"1900 {key}", f"%Y {fmt}")
+                else:
+                    dt = datetime.strptime(key, fmt)
                 self._fmt_index = i
                 return _to_epoch(dt)
             except ValueError:
