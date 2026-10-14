@@ -240,7 +240,7 @@ class ErrorClusterer:
     def _find_similar(self, msg_tp: str, level: str) -> Optional[ErrorCluster]:
         """在级别桶内对消息模板做编辑距离相似度匹配。"""
         bucket = self._by_level.get(level)
-        if not bucket:
+        if not bucket or self._max_compare <= 0:
             return None
         best: Optional[ErrorCluster] = None
         best_score = self._threshold
@@ -285,8 +285,12 @@ class ErrorClusterer:
         """更新簇计数/时间/样例；返回 (是否更换了样例, 本次记录的实例)。"""
         cluster.count += 1
         cluster.last_line = entry.last_line_no or entry.line_no
-        cluster.last_seen = entry.timestamp
+        # 修复：无时间戳的条目**不得**抹掉簇已有的时间信息。此前无条件
+        # 赋值 last_seen = entry.timestamp，混合日志（部分行带戳、部分行
+        # 不带）里只要最后一条不带戳，整个簇的 last_seen 就变 None ——
+        # 报告的「首末时间」变空、优先级里的「持续发生」判定随之失效。
         if entry.timestamp is not None:
+            cluster.last_seen = entry.timestamp
             cluster.hist.add(entry.timestamp)
         # 修复缺陷R4：记录实例（前 N 个含完整条目+上下文，其余仅元数据）
         inst = self._record_instance(cluster, entry, before_lines)

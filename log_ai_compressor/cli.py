@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -30,10 +31,11 @@ from log_ai_compressor import __version__
 from log_ai_compressor.constants import (
     DEFAULT_CONTEXT_LINES,
     DEFAULT_TOP_N,
-    LEVEL_ORDER,
+    canonical_level,
 )
 from log_ai_compressor.core.comparator import compare_files
-from log_ai_compressor.core.pipeline import analyze_file
+from log_ai_compressor.core.pipeline import analyze_file, analyze_files
+from log_ai_compressor.rules.engine import RuleSetError
 from log_ai_compressor.export.reporters import (
     brief_summary,
     compare_to_markdown,
@@ -114,6 +116,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_rules.add_argument("name", nargs="?", default=None, help="模板名")
     p_rules.set_defaults(func=cmd_rules)
 
+    # verify 子命令（取证层自校验入口）
+    p_verify = sub.add_parser(
+        "verify",
+        help="证据自校验：核对结论出处是否仍与原始日志一致")
+    p_verify.add_argument("files", nargs="*", default=[],
+                          help="日志文件路径（与 --report 二选一或同时给出）")
+    _add_filter_options(p_verify)
+    p_verify.add_argument(
+        "--report", default=None, metavar="REPORT.json",
+        help="复核一份已导出的 JSON 报告（推荐：报告发出后日志可能已变）")
+    p_verify.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    p_verify.set_defaults(func=cmd_verify)
+
     # web 子命令（主界面）
     p_web = sub.add_parser("web", help="启动本地 Web 界面（默认，双击启动器用的就是它）")
     p_web.add_argument("--host", default="127.0.0.1",
@@ -189,9 +204,26 @@ def _parse_keywords(raw: str) -> List[str]:
 
 
 def _parse_levels(raw: str) -> List[str]:
-    levels = [lv.strip().upper() for lv in raw.split(",") if lv.strip()]
-    valid = [lv for lv in levels if lv in LEVEL_ORDER]
-    return valid if valid else ["ERROR", "FAIL"]
+    """级别列表解析：先经别名归一，再校验有效性。
+
+    修复：此前只认 LEVEL_ORDER 里的规范名，其余一律丢弃。于是
+    `--level WARNING`（用户明确只要警告）会因为 WARNING 不在
+    LEVEL_ORDER 里而被整条丢弃、退回默认的 ERROR,FAIL —— 报告里全是
+    错误、用户要的警告一条没有，且没有任何提示；
+    `--level FATAL,INFO` 更荒唐：FATAL 被丢，只剩 INFO。
+    现在按 constants.canonical_level 归一（FATAL/WARNING/ERR → ERROR/
+    WARN/ERROR 等），保持用户书写顺序去重，全非法才回退默认。
+
+    注意用 canonical_level 而不是 normalize_level：后者对不认识的写法
+    保守返回 INFO，那样 `--level EROR`（拼错）会变成「只看 INFO」，
+    报告里全是信息级条目 —— 静默给出用户没要的东西比报错更糟。
+    """
+    levels: List[str] = []
+    for lv in (raw or "").split(","):
+        canon = canonical_level(lv)
+        if canon and canon not in levels:
+            levels.append(canon)
+    return levels or ["ERROR", "FAIL"]
 
 
 def _resolve_format(args) -> str:
@@ -226,6 +258,10 @@ def cmd_run(args) -> int:
         )
     except FileNotFoundError as exc:
         print(f"错误：{exc}", file=sys.stderr)
+        return EXIT_ERROR
+    except RuleSetError as exc:
+        # 自定义规则 YAML 写错是用户输入问题，给一句话而不是 traceback
+        print(f"错误：解析规则有问题 —— {exc}", file=sys.stderr)
         return EXIT_ERROR
 
     # 摘要输出到 stdout（可直接管道组合）
@@ -307,6 +343,117 @@ def cmd_rules(args) -> int:
         print(f"堆栈特征（{len(rs.stack_indicators)} 条）、"
               f"级别提示（{len(rs.level_hints)} 级）")
     return EXIT_OK
+
+
+def cmd_verify(args) -> int:
+    """证据自校验：把结论的出处拉回原始日志逐条核对。
+
+    两种模式，含义完全不同，别混用：
+
+    `--report report.json`（**有意义的那个**）
+        复核一份**之前导出**的报告。报告发出去之后日志可能已经变了
+        （轮转清理、有人手改、归档重写）—— 这时才发现「当初那条结论
+        其实对不上原文」，比从来没给过结论更糟。
+
+    `verify app.log`（自检）
+        当场分析当场校验。它证明的是「当前这一刻的结论与当前日志
+        一致」，是个健康检查，不是取证。**不要**拿它当「这份报告还
+        成立吗」的答案 —— 那必然成立，因为它就是拿这份日志算的。
+    """
+    from log_ai_compressor import service as S
+    from log_ai_compressor.core.evidence import EvidenceRef
+
+    refs: List = []
+    fingerprint = ""
+    source_label = ""
+
+    if args.report:
+        report_path = Path(args.report)
+        if not report_path.is_file():
+            print(f"错误：报告文件不存在 {report_path}", file=sys.stderr)
+            return EXIT_ERROR
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            print(f"错误：报告不是合法 JSON —— {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        for c in payload.get("clusters") or []:
+            for e in c.get("evidence") or []:
+                refs.append(EvidenceRef(
+                    evidence_id=e.get("evidence_id", ""),
+                    source=e.get("source", ""),
+                    line_start=int(e.get("line_start", 0)),
+                    line_end=int(e.get("line_end", 0)),
+                    kind=e.get("kind", "sample"),
+                    digest=e.get("digest_full") or e.get("digest", ""),
+                    note=e.get("note", "")))
+        source_label = f"报告 {report_path.name}"
+        if not refs:
+            print(f"错误：{report_path} 里没有任何证据引用"
+                  f"（可能是旧版本导出的报告，或不是本工具导出的 JSON）",
+                  file=sys.stderr)
+            return EXIT_ERROR
+    else:
+        if not args.files:
+            print("用法：verify <日志文件…> 或 verify --report <report.json>",
+                  file=sys.stderr)
+            return EXIT_ERROR
+        paths = [Path(f) for f in args.files]
+        missing = [str(p) for p in paths if not p.is_file()]
+        if missing:
+            print(f"错误：文件不存在 {' '.join(missing)}", file=sys.stderr)
+            return EXIT_ERROR
+        try:
+            result = analyze_files(paths, levels=_parse_levels(args.level),
+                                   include=_parse_keywords(args.include),
+                                   exclude=_parse_keywords(args.exclude),
+                                   top_n=args.top, context_lines=args.context,
+                                   rule=args.rule)
+        except RuleSetError as exc:
+            print(f"错误：解析规则有问题 —— {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        except FileNotFoundError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            return EXIT_ERROR
+        refs = [ref for c in result.clusters for ref in c.evidence]
+        fingerprint = S.result_fingerprint(result)
+        source_label = result.stats.source
+
+    from log_ai_compressor.core.evidence import verify_refs
+    report = verify_refs(refs).as_dict()
+    report["fingerprint"] = fingerprint
+    report["source"] = source_label
+    report["mode"] = "report" if args.report else "self-check"
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return EXIT_OK if report["ok"] else EXIT_ERROR
+
+    mode_label = ("复核已导出报告" if args.report else "当场自检（仅证明此刻自洽）")
+    print(f"模式：{mode_label}")
+    print(f"对象：{source_label}")
+    print(f"证据：共 {report['checked']} 条引用，"
+          f"匹配 {report['matched']} 条，失配 {report['mismatched']} 条，"
+          f"源不可读 {report['missing_source']} 条")
+    if fingerprint:
+        print(f"确定性指纹：{fingerprint}")
+    for d in report["details"]:
+        if d["status"] in ("MISMATCH", "OUT_OF_RANGE", "MISSING_SOURCE",
+                           "NO_SOURCE"):
+            print(f"  ✗ {d['status']} {d.get('evidence_id')} {d.get('source')}"
+                  f" 期望 {d.get('expected', '-')} 实际 {d.get('actual', '-')}",
+                  file=sys.stderr)
+    print()
+    print(f"自校验结论：{report['verdict']}")
+    if report["verdict"] == "VERIFIED":
+        print("每条结论都能在原始日志里逐行复核。")
+        return EXIT_OK
+    if report["verdict"] == "NO_EVIDENCE":
+        print("没有可回读的证据引用（粘贴文本，或条目超出摄入窗口）。")
+        return EXIT_OK
+    print("存在对不上的引用 —— 结论可能来自已被修改的日志，请勿直接采信。",
+          file=sys.stderr)
+    return EXIT_ERROR
 
 
 def cmd_web(args) -> int:

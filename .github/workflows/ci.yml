@@ -49,6 +49,46 @@ jobs:
       - name: Lint (ruff)
         run: ruff check log_ai_compressor tests scripts
 
+      - name: Adversarial evaluation (scorecard)
+        # 这个项目的核心主张是「拿不出因果链就说证据不足」。主张不需要
+        # 证明，但**必须被检验**：这里跑的是专门设计来误导本工具的场景
+        # 集，按四条硬规则打分。「本来该弃权却给了 CONFIRMED 根因」会
+        # 直接让 CI 变红 —— 那类回归等到值班时才发现就太晚了。
+        # 弃权算通过：只算命中率的评测会偏好猜得最自信的系统。
+        run: python scripts/adversarial_eval.py
+
+      - name: Determinism check (same input -> same fingerprint)
+        # 确定性是本工具被公开宣传的数字之一，必须由 CI 守住而不是口头
+        # 承诺：同一份日志连跑三次，结论指纹必须逐字节相同。
+        shell: python
+        run: |
+          import subprocess
+          import sys
+
+          code = (
+              "import sys;"
+              "sys.path.insert(0, '.');"
+              "from log_ai_compressor import service as S;"
+              "fps = {S.result_to_dict("
+              "    S.analyze(paths=['examples/sample_system.log'],"
+              "              params={'context_lines': 2}),"
+              "    with_samples=False)['determinism_fingerprint']"
+              "    for _ in range(3)};"
+              "print('fingerprints =', len(fps));"
+              "sys.exit(0 if len(fps) == 1 else 1)"
+          )
+          rc = subprocess.call([sys.executable, "-c", code])
+          if rc != 0:
+              print("确定性校验失败：同一份输入产生了不同的结论指纹")
+          sys.exit(rc)
+
+      - name: Self-proof (every README claim must hold)
+        # README 里写的每一个数字都在这里被重新验一遍。理由很直接：
+        # 一份没人复现过的数字等于营销，而这个脚本失败时 CI 会红 ——
+        # 文档和产品不允许各自漂移。它同时把**尚无数据的主张**打印出来，
+        # 缺口必须留在明面上，不能靠沉默掩盖。
+        run: python scripts/prove.py
+
       - name: Unit & integration tests with coverage
         # 用 python 承载这段逻辑，而不是 shell：
         # Windows runner 的默认 shell 是 pwsh，`if !` / `2>/dev/null` 这类

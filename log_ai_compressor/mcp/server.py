@@ -15,6 +15,7 @@ Grafana、OpenObserve、IBM Instana、OneUptime…），MCP 把每个平台从
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Dict, List, Optional
 
@@ -22,20 +23,51 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from log_ai_compressor import __app_name__, __version__, service as S
+from log_ai_compressor.core.evidence import EvidenceRef, verify_refs
 
 INSTRUCTIONS = f"""\
-{__app_name__} {__version__} —— 本机日志分析取证台（数据不出网）。
+{__app_name__} {__version__} —— 本机日志取证层（数据不出网）。
 
-典型用法：
-1. 用户给你一个日志文件路径 → 调 analyze_log_file，拿聚类后的错误清单与根因排序。
-2. 已经有大段日志文本 → 调 analyze_log_text。
-3. 想知道某类错误到底怎么回事 → 调 get_cluster_detail 拿典型样例与降噪堆栈。
-4. 要把结论整份交给用户/LLM → 调 export_report（Markdown 格式最省 token）。
+## 什么时候用它
 
-关键点：分析结果**已经是压缩过的证据摘要**。几十万行的日志经聚类去重后
-通常只剩几百到几千 token，直接作为上下文使用即可，不要再去读原始文件。
+  「日志太大读不完 / 塞不进上下文」
+      → analyze_log_file。返回已聚类去重的错误清单 + 根因排序 + 优先级。
+        优先用它，**不要**自己 grep 整个文件再读 500 行。
 
-所有工具只读，不会修改或上传任何日志。
+  「用户报了个错，我要找原因」
+      → analyze_log_file 拿排序 → get_cluster_detail 取 Top 簇的
+        典型样例、降噪堆栈与变量分布。
+
+  「这个结论靠谱吗 / 日志是不是被人改过」
+      → verify_evidence。它重读原始日志逐行核对每条结论的出处摘要，
+        返回 VERIFIED / TAMPERED。**这个工具不需要你相信它**，
+        你可以自己跑这一步。
+
+## 怎么读它的输出（这条比工具本身更重要）
+
+  root_cause_confidence 三档，含义完全不同，不要混用：
+    CONFIRMED   —— 日志里有 Caused-by 因果链直连。这是唯一的确定性证据。
+    LIKELY      —— 统计推断（时间先后 / 关键词），**不是因果证明**。
+                  报告里 can_conclude=false，不要当根因转述给用户。
+    INSUFFICIENT —— 证据不足。正确用法是读它列出的 gaps（缺什么证据），
+                  而不是自己猜一个。
+
+  每条结论都带 evidence：文件、行号区间、内容摘要。
+  要引用给用户时把行号一起带上，不要只转述结论。
+
+  相关性 ≠ 因果：cooccurring / related_clusters 只是"经常一起出现"，
+  **永远不能表述成"导致了"**。唯一能这么说的只有 CONFIRMED。
+
+## 不要做的事
+
+  - 不要自己 grep 整个日志文件：本工具 0.4 秒就能给你排好序的结论，
+    10 万行的原文会吃掉你几乎全部上下文。
+  - 不要把 LIKELY 说成"根因是"。一个自信的错误根因比没有答案更糟 ——
+    用户会照着它去排查。
+  - 不要在没跑 verify_evidence 的情况下断言"日志内容是什么"。
+
+所有工具只读，不会修改或上传任何日志；除非用户显式配置了 AI 服务商，
+否则没有任何日志内容离开本机。
 """
 
 server = MCPServer(
@@ -51,6 +83,23 @@ READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False,
 
 def _err(exc: Exception) -> str:
     return f"分析失败：{type(exc).__name__}: {exc}"
+
+
+def _sorted_oldest_first(paths: List[str]) -> List[str]:
+    """按 mtime 从旧到新排序（轮转日志合并的前提）。
+
+    这个工具的描述里承诺了「按 mtime 从旧到新合并」，但真正排序的责任
+    写在 core 层注释里（「调用方负责排序」）—— 结果就是没有任何一个
+    接入层去排。Agent 传进来的路径顺序是任意的，轮转日志（app.log.3 /
+    app.log.2 / app.log.1）一旦乱序，时间范围、时序连锁判定与时间线
+    全错，而报告里看不出任何异常。取不到 mtime 的文件保持原相对次序。
+    """
+    def _mtime(p: str) -> float:
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return float("inf")            # 取不到排最后，不丢文件
+    return sorted(paths or [], key=_mtime)
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +150,7 @@ def analyze_log_file(
         "encoding": encoding, "max_lines": max_lines,
     }
     try:
-        result = S.analyze(paths=paths, params=params)
+        result = S.analyze(paths=_sorted_oldest_first(paths), params=params)
     except S.ServiceError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:                          # noqa: BLE001
@@ -287,6 +336,100 @@ def get_cluster_detail(
         return {"ok": True, "cluster": detail}
     except S.ServiceError as exc:
         return {"ok": False, "error": str(exc)}
+    except Exception as exc:                          # noqa: BLE001
+        return {"ok": False, "error": _err(exc)}
+
+
+@server.tool(
+    name="verify_evidence",
+    title="复核结论的出处（日志是否被改过）",
+    description=(
+        "取证自校验：核对结论的出处是否仍与原始日志一致。"
+        "传 report_path 复核一份已导出的 JSON 报告（推荐：报告发出后"
+        "日志可能已被修改或轮转清理）；只传 path 是当场自检。"
+        "返回 VERIFIED / TAMPERED / NO_EVIDENCE。"
+        "本工具的立场是「你不必相信我，自己复核」—— "
+        "在把结论当成事实转述给用户之前跑这一步。"
+    ),
+    annotations=READONLY,
+)
+def verify_evidence(
+    path: Optional[str] = None,
+    report_path: Optional[str] = None,
+    levels: Optional[List[str]] = None,
+    context_lines: int = 50,
+    similarity: str = "standard",
+    analysis_mode: str = "full",
+    rule: str = "auto",
+) -> Dict[str, Any]:
+    """取证自校验：结论能不能在原始日志里逐行复核。
+
+    Args:
+        path: 日志文件绝对路径
+        report_path: 已导出的 JSON 报告路径。**传它才是有意义的取证** ——
+            复核一份之前拿到的报告，确认它现在还对得上原文。
+            只传 path 是当场分析当场校验（同义反复，必然通过），
+            证明不了「三天前那份报告还成不成立」。
+        levels: 只统计这些级别
+        context_lines: 上下文行数（影响证据行区间）
+        similarity: 聚类并簇激进度
+        analysis_mode: 完整 / 深度 / 快速
+        rule: 解析规则
+
+    Returns:
+        {"ok": True, "verdict": "VERIFIED"|"TAMPERED"|"NO_EVIDENCE",
+         "mode": "report"|"self-check", "checked": n, "matched": n,
+         "mismatched": n, "fingerprint": sha256, "citations": [...]}
+        ok=False 时**不要**照常转述结论 —— 日志与结论已对不上。
+    """
+    if not path and not report_path:
+        return {"ok": False, "error": "需要 path（当场自检）或 report_path（复核报告）"}
+    params = {"levels": levels, "context_lines": context_lines,
+              "similarity": similarity, "analysis_mode": analysis_mode,
+              "rule": rule}
+    try:
+        if report_path:
+            rp = os.path.abspath(report_path)
+            if not os.path.isfile(rp):
+                return {"ok": False, "error": f"报告文件不存在：{report_path}"}
+            with open(rp, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            refs = [EvidenceRef(
+                evidence_id=e.get("evidence_id", ""),
+                source=e.get("source", ""),
+                line_start=int(e.get("line_start", 0)),
+                line_end=int(e.get("line_end", 0)),
+                kind=e.get("kind", "sample"),
+                digest=e.get("digest_full") or e.get("digest", ""),
+                note=e.get("note", ""))
+                for c in payload.get("clusters") or []
+                for e in c.get("evidence") or []]
+            if not refs:
+                return {"ok": False,
+                        "error": "该报告里没有证据引用（旧版本导出或非本工具 JSON）"}
+            report = verify_refs(refs).as_dict()
+            report["source"] = os.path.basename(rp)
+            report["mode"] = "report"
+            citations = [{"evidence_id": e.evidence_id,
+                          "citation": e.citation(), "kind": e.kind}
+                         for e in refs[:20]]
+        else:
+            result = S.analyze(paths=[path], params=params)
+            report = S.verify_result(result)
+            report["mode"] = "self-check"
+            citations = [
+                {"evidence_id": e.evidence_id, "citation": e.citation(),
+                 "kind": e.kind, "summary": c.summary[:80],
+                 "confidence": c.root_cause_confidence}
+                for c in result.clusters[:20] for e in c.evidence[:1]
+            ]
+        report["ok"] = True
+        report["citations"] = citations
+        return report
+    except S.ServiceError as exc:
+        return {"ok": False, "error": str(exc)}
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "error": f"报告读取失败：{exc}"}
     except Exception as exc:                          # noqa: BLE001
         return {"ok": False, "error": _err(exc)}
 

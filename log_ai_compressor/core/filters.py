@@ -50,6 +50,10 @@ class FilterConfig:
             "exclude": list(self.exclude),
             "top_n": self.top_n,
             "context_lines": self.context_lines,
+            # use_regex 必须带上：漏了它，「正则模式」开关在配置往返
+            # （存盘 / 恢复 / Web 会话）后会静默变回子串匹配，用户配的
+            # 正则在重新打开后不起作用，且没有任何提示。
+            "use_regex": self.use_regex,
         }
 
     @classmethod
@@ -59,6 +63,11 @@ class FilterConfig:
             return cfg
         if isinstance(data.get("levels"), (list, tuple)):
             cfg.levels = [str(x) for x in data["levels"]]
+        for key in ("include", "exclude"):
+            if isinstance(data.get(key), (list, tuple)):
+                setattr(cfg, key, [str(x) for x in data[key]])
+        if isinstance(data.get("use_regex"), bool):
+            cfg.use_regex = data["use_regex"]
         for key in ("include", "exclude"):
             if isinstance(data.get(key), (list, tuple)):
                 setattr(cfg, key, [str(x) for x in data[key]])
