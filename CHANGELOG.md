@@ -8,6 +8,79 @@
 
 ---
 
+## [2.1.0] - 2026-10-14
+
+取证层能力的补完与两处一致性修复。新增能力 + 修复，无破坏性变更。
+
+### 新增 · 证据自校验进入浏览器
+
+- `POST /api/verify`：取内存中的 job.result，复用 service 层同一套
+  `verify_refs`（**不另写一份校验逻辑** —— 两份实现迟早漂移）
+- Web 界面判定卡片下方新增「复核证据出处」按钮与三态结果框。
+  取证层的主张「每条结论都能被独立复核」此前**只在命令行成立** ——
+  在浏览器里看到证据出处却无法当场验证，那它就只是一句 README 的话
+- 6 条接口测试：未改动通过 / **改动后报 TAMPERED** / 粘贴文本如实报
+  无源可读 / 未知 job 404 / 缺字段 404 / 部分失配时 ok=False
+
+### 新增 · 结构化字段别名扩到六个生态
+
+原表约 20 个键，实测中大量真实形态落在表外。现按实测形态扩表（保留
+大小写折叠，`TraceId` → `traceid` 命中）：
+
+| 生态 | 覆盖字段 |
+| --- | --- |
+| OpenTelemetry Logs | severity_text / body / time_unix_nano / trace_id |
+| Elastic ECS | log.level / service.name / trace.id / event.original |
+| Grafana Loki | level / msg / traceID |
+| Serilog / zap | Timestamp / Level / Message / TraceId / CorrelationId |
+| winston / pino | level / msg / service / req_id |
+| structlog | event / logger / level |
+| B3 传播头 | X-B3-TraceId / X-B3-SpanId |
+
+加别名有反向风险（泛键可能顶掉真正的 message），故补边界测试：
+`{"message":"...","name":"some-container"}` 的 message 必须仍是真消息。
+
+### 修复 · 证据摘要精度两条出口不一致
+
+同一份 `EvidenceRef` 走两条出口精度不同：Web API 给 16 位短摘要、
+JSON 导出给完整 64 位，字段名还都叫 `digest`。后果是第三方拿 Web API
+的数据跑 `verify` **必然失配**，而症状是「哈希对不上」，极难反推到
+根因是序列化层截断 —— 取证工具的证据摘要不一致，等于证据不可信。
+
+- `EvidenceRef.as_dict()` 一律给完整 sha256，截断只留在人读展示路径
+- 新增 4 条测试钉死「所有出口摘要精度一致」这条契约
+
+### 修复 · CI 门禁在非 UTF-8 控制台下崩溃
+
+Windows runner 控制台是 cp1252，`adversarial_eval.py` **评分 35/35
+全通过**却在 print() 中文表格时抛 UnicodeEncodeError，整个 step 变红。
+
+这条比 bug 本身更值得修：症状是「CI 红了」而真相是「功能是好的」。
+一个会因为控制台编码变红、无需改动就自己变绿的门禁，会**训练所有人
+忽略红色** —— 比没有门禁更糟。
+
+- 两个门禁脚本启动时把 stdout/stderr 切 UTF-8 + errors=replace
+- 新增不变量组 I7（4 条），其中两条**真的用 cp1252 子进程跑一遍门禁**
+  （断言源码里有某行字只是在检查拼写，只有真跑才算数）
+
+### 顺带
+
+- 补 `py.typed`（PEP 561）：全项目写了完整类型注解，但没有标记文件时
+  下游 mypy / IDE 拿不到任何类型信息，注解只是给人看的注释
+- PyPI 包描述改为与仓库口径一致（旧的仍以「日志压缩」打头）
+
+### 版本号说明
+
+2.0.1 于 2026-10-14 05:40 发布到 PyPI。其后 main 又积累了本节内容，
+因此本版升为 **2.1.0** 而非复用 2.0.1 —— 同一版本号对应两套代码，
+恰恰是本项目最不能犯的错（自称可复核，版本号却在撒谎）。
+
+### 测试
+
+825 → **840**（+6 接口测试、+8 别名测试、+4 编码不变量），覆盖率 94%。
+
+---
+
 ## [2.0.1] - 2026-10-14
 
 ### 新增 · 取证闭环
