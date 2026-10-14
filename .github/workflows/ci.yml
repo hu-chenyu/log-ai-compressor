@@ -89,6 +89,14 @@ jobs:
         # 缺口必须留在明面上，不能靠沉默掩盖。
         run: python scripts/prove.py
 
+      - name: Build sdist and wheel
+        # 交付物完整性门禁（tests/test_sdist_contents.py 的产物层）只在
+        # dist/ 下存在包时才执行，否则 5 条全 skip —— 也就是说"README 引用的
+        # 每个文件都得在包里"这条承诺**在 CI 上从来没被验证过**。
+        # 2.1.0 就是在这里漏掉 start.bat / 首图 / SKILL.md 的。
+        # 先构建，再跑测试，那 5 条才会真正执行。
+        run: python -m build --sdist --wheel
+
       - name: Unit & integration tests with coverage
         # 用 python 承载这段逻辑，而不是 shell：
         # Windows runner 的默认 shell 是 pwsh，`if !` / `2>/dev/null` 这类
