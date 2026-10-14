@@ -132,7 +132,10 @@ def build_parser() -> argparse.ArgumentParser:
     # web 子命令（主界面）
     p_web = sub.add_parser("web", help="启动本地 Web 界面（默认，双击启动器用的就是它）")
     p_web.add_argument("--host", default="127.0.0.1",
-                       help="绑定地址（默认仅本机；改 0.0.0.0 会把日志分析能力暴露到局域网，不建议）")
+                       help="绑定地址（默认仅本机；绑定非本机地址需加 --allow-remote）")
+    p_web.add_argument("--allow-remote", action="store_true",
+                       help="确认要绑定非本机地址（如 0.0.0.0）。服务无鉴权，"
+                            "网络内任何人都能读本机文件、提交分析，仅限可信内网使用")
     p_web.add_argument("--port", type=int, default=8765, help="端口（默认 8765）")
     p_web.add_argument("--no-browser", action="store_true",
                        help="启动后不自动打开浏览器")
@@ -467,9 +470,17 @@ def cmd_web(args) -> int:
         print(f"错误：Web 组件不可用（{exc}）。"
               f"请执行：pip install fastapi \"uvicorn[standard]\"", file=sys.stderr)
         return EXIT_ERROR
-    if args.host not in ("127.0.0.1", "localhost"):
-        print(f"警告：绑定 {args.host} 会让局域网内其他设备访问本机日志分析能力，"
-              f"服务没有鉴权。确认这是你要的吗？", file=sys.stderr)
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        # 修复缺陷#5：远端绑定必须显式确认 —— 此前只打一行警告照样启动，
+        # 而服务无鉴权、/api/fs/file 可读任意路径，脚本化启动时警告会被
+        # 滚屏吞掉，等于把本机文件系统挂到网络上。
+        if not args.allow_remote:
+            print(f"错误：拒绝绑定 {args.host} —— 服务没有鉴权，网络内任何设备"
+                  f"都能读本机文件、提交分析。仅限可信内网时，请明确加"
+                  f" --allow-remote 再启动。", file=sys.stderr)
+            return EXIT_ERROR
+        print(f"警告：已按 --allow-remote 绑定 {args.host}，局域网内其他设备"
+              f"可访问本机日志分析能力且服务没有鉴权。", file=sys.stderr)
     try:
         serve(host=args.host, port=args.port,
               open_browser=not args.no_browser, log_level=args.log_level)

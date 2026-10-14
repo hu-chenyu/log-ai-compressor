@@ -15,6 +15,18 @@ from log_ai_compressor.core.parser import (
 from log_ai_compressor.rules.engine import load_ruleset
 
 
+def _strptime_pinned(ts: str, fmt: str) -> datetime:
+    """strptime 参照实现：无年份格式钉死 1900 年（与生产兜底一致）。
+
+    修复缺陷#5：Python 3.15 将改变 strptime 无年份时的默认年，参照实现
+    必须和生产兜底一样显式注入年份，否则对照组自己先漂移，等价性测试
+    就守不住「快速路径 == strptime」这条契约。
+    """
+    if "%Y" not in fmt and "%y" not in fmt:
+        return datetime.strptime(f"1900 {ts}", f"%Y {fmt}")
+    return datetime.strptime(ts, fmt)
+
+
 @pytest.fixture()
 def parser():
     return LogParser(load_ruleset("generic"))
@@ -93,7 +105,7 @@ class TestFastDatetime:
         expected = None
         for fmt in _TS_FORMATS:
             try:
-                expected = datetime.strptime(ts, fmt)
+                expected = _strptime_pinned(ts, fmt)
                 break
             except ValueError:
                 continue
@@ -110,7 +122,7 @@ class TestFastDatetime:
         if fast is not None:
             for fmt in _TS_FORMATS:
                 with pytest.raises(ValueError):
-                    datetime.strptime(bad, fmt)
+                    _strptime_pinned(bad, fmt)
 
     def test_month_abbreviation_case_insensitive(self):
         assert _fast_datetime("15/MAR/2024 10:00:00") is not None
@@ -359,4 +371,26 @@ class TestEmbeddedRuleset:
         e = emb_parser.flush()
         assert e.timestamp is not None
         assert e.message.startswith("* [new tag]")
+
+
+class TestYearlessTimestampPinning:
+    """无年份时间戳的基准年必须钉死（修复缺陷#5）。
+
+    Python 3.15 将改变 strptime 无年份默认年：默认年一变就不再 <1970，
+    _to_epoch 的基准年归一化（→2000）不再触发，syslog/纯时间戳的 epoch
+    会整体漂移。快速路径与 strptime 兜底必须给出同一个结果。
+    """
+
+    def test_fast_path_yearless_normalized(self):
+        tp = TimestampParser()
+        v = tp.parse("05:04:03")
+        assert v == pytest.approx(datetime(2000, 1, 1, 5, 4, 3).timestamp())
+
+    def test_strptime_fallback_yearless_normalized(self, monkeypatch):
+        """屏蔽快速路径，强制走 strptime 兜底 —— 同样必须钉在 2000 基准年。"""
+        from log_ai_compressor.core import parser as parser_mod
+        monkeypatch.setattr(parser_mod, "_fast_datetime", lambda key: None)
+        tp = TimestampParser()
+        v = tp.parse("Jan 2 05:04:03")
+        assert v == pytest.approx(datetime(2000, 1, 2, 5, 4, 3).timestamp())
 
