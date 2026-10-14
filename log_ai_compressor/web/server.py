@@ -26,10 +26,15 @@ from log_ai_compressor import __app_name__, __version__, service as S
 from log_ai_compressor.web import jobs as J
 
 STATIC_DIR = Path(__file__).parent / "static"
-# 文件浏览器只允许在用户主目录内活动
+# 文件浏览器的默认起点是用户主目录（范围限制见下方 FS_ROOT 说明）
 HOME = Path(os.path.expanduser("~"))
 # 大文件自动提示阈值
 BIG_FILE_MB = 64
+
+# 修复缺陷#5：粘贴文本上限（字符数）。文件模式是流式处理、没有上限的
+# 必要；粘贴模式整段文本随 HTTP 请求体一次性进内存，不限长等于把本机
+# 服务白送给一个恶意/失控的请求体 —— 超限直接 400 并指路「用文件导入」。
+MAX_PASTE_CHARS = 20 * 1024 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -187,6 +192,11 @@ def create_app() -> FastAPI:
             if mode == "text":
                 if not (req.text or "").strip():
                     raise HTTPException(400, "请先粘贴日志文本")
+                # 修复缺陷#5：粘贴体大小上限（文件导入无此限制）
+                if len(req.text) > MAX_PASTE_CHARS:
+                    raise HTTPException(
+                        400, f"粘贴文本超过 {MAX_PASTE_CHARS // (1024 * 1024)} MB 上限，"
+                             f"请改用「文件导入」模式（超大文件是流式处理的）")
             else:
                 paths = [p.strip() for p in req.paths if p.strip()]
                 if mode == "compare":
