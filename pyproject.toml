@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "log-ai-compressor"
-version = "2.1.1"
+version = "2.2.0"
 description = "本机日志取证层：结论带行号出处、可重读原文自校验；拿不出因果链就说证据不足。零出网，附 MCP Server / Agent Skill。"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -53,7 +53,9 @@ ai = [
 all = [
     "log-ai-compressor[web,mcp,ai]",
 ]
-dev = ["pytest>=7.0", "pytest-cov>=4.0", "pytest-timeout>=2.1", "ruff>=0.4"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "pytest-timeout>=2.1", "ruff>=0.4",
+       # 交付物完整性门禁要真的跑，就必须在跑测试前先构建产物
+       "build>=1.0"]
 
 [project.scripts]
 log-ai-compressor = "log_ai_compressor.cli:main"

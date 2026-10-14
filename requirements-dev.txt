@@ -11,3 +11,6 @@ pytest>=7.0
 pytest-cov>=4.0
 pytest-timeout>=2.1
 ruff>=0.4
+# 交付物完整性门禁要真的跑，就必须在跑测试前先构建产物。
+# 没有它，tests/test_sdist_contents.py 的产物层在 CI 上恒 skip。
+build>=1.0
