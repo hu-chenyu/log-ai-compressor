@@ -25,9 +25,11 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from log_ai_compressor.constants import (
     CANCEL_CHECK_EVERY_LINES,
+    CHANGE_EVENT_RE,
     CLUSTER_SIMILARITY_THRESHOLD,
     DEFAULT_SELECTED_LEVELS,
     ERROR_LEVELS,
+    MAX_CHANGE_EVENTS,
     PROGRESS_EVERY_LINES,
     SIMILARITY_PRESETS,
 )
@@ -40,7 +42,7 @@ from log_ai_compressor.core.encoding import (
 )
 from log_ai_compressor.core.evidence import KIND_SAMPLE, make_ref
 from log_ai_compressor.core.filters import EntryFilter, FilterConfig
-from log_ai_compressor.core.models import AnalysisResult, RunStats
+from log_ai_compressor.core.models import AnalysisResult, ChangeEvent, RunStats
 from log_ai_compressor.core.parser import LogParser
 from log_ai_compressor.rules.engine import (
     AUTO_RULE,
@@ -383,6 +385,8 @@ class LogPipeline:
         cancelled = False
         limit_hit = False     # 优化缺陷R85：行数上限采样命中标记
         cur_source = str(stats.source)
+        # 部署/变更事件收集（级别过滤前捕获，见 _handle_entry）
+        change_events: List[ChangeEvent] = []
         # 修复缺陷#2：每个来源文件独立计行号（证据引用要指向文件内行号；
         # 全局 line_no 只服务窗口/待补/进度等内部逻辑）。按来源名计数而非
         # 切换即清零，是为了同一文件在合并序列里出现多次/交错时也不串号。
@@ -418,7 +422,8 @@ class LogPipeline:
                 if completed is not None:
                     completed.source_file = cur_source
                     self._handle_entry(completed, stats, clusterer,
-                                       global_hist, recent, pending)
+                                       global_hist, recent, pending,
+                                       change_events)
 
                 # 2) 后上下文补录（仅对开启待补的样例）
                 if pending:
@@ -460,7 +465,7 @@ class LogPipeline:
             if last is not None:
                 last.source_file = cur_source
                 self._handle_entry(last, stats, clusterer, global_hist,
-                                   recent, pending)
+                                   recent, pending, change_events)
         except ProcessingCancelled:
             cancelled = True
 
@@ -481,6 +486,7 @@ class LogPipeline:
             global_hist=global_hist,
             keywords=self._config.filter_config.normalized_include(),
             notice=_build_filter_notice(stats, clusterer.clusters),
+            change_events=change_events,
         )
         if self._config.analyze and result.clusters:
             # 优化缺陷R79：深度扫描模式降阈执行（完整模式默认阈值）
@@ -495,7 +501,8 @@ class LogPipeline:
     # 条目处理
     # ------------------------------------------------------------------
     def _handle_entry(self, entry, stats: RunStats, clusterer: ErrorClusterer,
-                      global_hist, recent: deque, pending: Dict[int, dict]) -> None:
+                      global_hist, recent: deque, pending: Dict[int, dict],
+                      change_events: Optional[List[ChangeEvent]] = None) -> None:
         """统计 + 过滤 + 聚类；必要时开启样例后上下文待补。"""
         # 优化缺陷R85：时间范围过滤（第一前置项，先于一切统计）——
         # epoch 精确区间 / 每日时段区间；无时间戳条目无法定位，
@@ -528,6 +535,21 @@ class LogPipeline:
 
         if entry.level in ERROR_LEVELS:
             stats.error_lines += 1
+
+        # 跨服务/时间窗/部署事件关联：变更事件捕获**必须在级别过滤
+        # 之前** —— 发版/重启行多为 INFO 级，默认「只看 ERROR/FAIL」
+        # 会把它们整条丢掉，"上线后开始报错"这类时间窗关联线索将不可
+        # 见。此处只捕获、不改过滤行为（用户要的是错误，不混入报告）。
+        if change_events is not None and len(change_events) < MAX_CHANGE_EVENTS:
+            msg = entry.message or entry.raw or ""
+            if CHANGE_EVENT_RE.search(msg):
+                change_events.append(ChangeEvent(
+                    ts=entry.timestamp,
+                    module=entry.module or "",
+                    text=msg[:200],
+                    line_no=entry.line_no,
+                    source=entry.source_file or "",
+                ))
 
         # 修复缺陷R40：聚类准入由过滤器决定 —— 级别复选框选中
         # WARN/INFO/DEBUG 时同样聚类展示（五级别五色五档）；
