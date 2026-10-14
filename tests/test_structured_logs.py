@@ -231,6 +231,83 @@ class TestTraceBuilding:
         assert "首个失败点 L2" in chains[0].narrative()
 
 
+class TestEcosystemFieldNames:
+    """各生态实际使用的字段名（键统一小写，原键由 _flatten 折叠）。
+
+    这些不是凭记忆写的别名，是实测形态：Serilog/ECS 的 PascalCase
+    （`TraceId`/`CorrelationId`）、OTel 的点号命名空间与 body、
+    Grafana 的 `traceID`、structlog 的 `event`。任一条回归都意味着
+    「真实项目的结构化日志认不出来字段」—— 结构化支持的全部价值就在
+    这里。
+    """
+
+    @pytest.mark.parametrize("raw,expect", [
+        # OTel Logs 数据模型
+        ('{"body":"boom","severity_text":"ERROR","trace_id":"aaaa1111bbbb",'
+         '"span_id":"cccc","time_unix_nano":"1750000000000000000"}',
+         dict(message="boom", level="ERROR", trace="aaaa1111bbbb")),
+        # ECS 点号命名空间 + @timestamp
+        ('{"@timestamp":"2026-10-14T09:00:00Z","log.level":"ERROR",'
+         '"service.name":"api","trace.id":"tdddeeee1111","event.original":"x"}',
+         dict(message="x", level="ERROR", service="api", trace="tdddeeee1111")),
+        # Serilog / zap 的 PascalCase（折叠为小写后命中）
+        ('{"Timestamp":"2026-10-14T09:00:00Z","Level":"Error",'
+         '"Message":"kaputt","TraceId":"9999aaaa8888",'
+         '"CorrelationId":"req-1234"}',
+         dict(message="kaputt", level="ERROR", trace="9999aaaa8888",
+              request="req-1234")),
+        # Grafana Loki JSON line
+        ('{"level":"error","msg":"loki line","traceID":"loki1234id"}',
+         dict(message="loki line", level="ERROR", trace="loki1234id")),
+        # Python structlog
+        ('{"event":"structlog event","level":"warning","logger":"app.mod"}',
+         dict(message="structlog event", level="WARN", service="app.mod")),
+        # winston / pino 常见形态
+        ('{"level":"info","msg":"started","service":"api","req_id":"r-99"}',
+         dict(message="started", level="INFO", service="api", request="r-99")),
+    ])
+    def test_recognises_ecosystem_field_names(self, raw, expect):
+        """在 LogEntry 层断言（级别归一发生在解析层，不在字段映射层）。
+
+        ParsedFields.level 保留原始串（"info"），normalize_level 之后才是
+        "INFO" —— 在错误的层断言会得到一个测试全红但功能正确的假象。
+        """
+        parser = LogParser(load_ruleset("generic"))
+        parser.feed(raw, 1)
+        # feed 返回的是**上一个**条目（流式接口的语义）；当前条目要 flush 取
+        entry = parser.flush()
+        assert entry is not None, raw
+        if "message" in expect:
+            assert expect["message"] in entry.message, entry.message
+        if "level" in expect:
+            assert entry.level == expect["level"], entry.level
+        if "service" in expect:
+            assert entry.module == expect["service"], entry.module
+        if "trace" in expect:
+            assert entry.trace_id == expect["trace"], entry.trace_id
+        if "request" in expect:
+            assert entry.request_id == expect["request"], entry.request_id
+
+    def test_dot_namespace_ecs_survives_nested_form(self):
+        """真嵌套与点号扁平两种写法必须产出同一结果。"""
+        flat = parse_line('{"log.level":"ERROR","service.name":"api"}')
+        nest = parse_line('{"log":{"level":"ERROR"},"service":{"name":"api"}}')
+        assert (flat.level, flat.service) == ("ERROR", "api")
+        assert (nest.level, nest.service) == ("ERROR", "api")
+
+    def test_b3_headers_recognised(self):
+        """B3 传播头（Zipkin 系）也是关联键。"""
+        p = parse_line('{"level":"ERROR","message":"x","X-B3-TraceId":"b3aaaabbb",'
+                       '"X-B3-SpanId":"b3ccc"}')
+        assert p.trace_id == "b3aaaabbb" and p.span_id == "b3ccc"
+
+    def test_wrong_service_key_does_not_leak_into_message(self):
+        """扩表不能反过来伤害消息：`name` 这类泛键不许顶掉真正的 message。"""
+        p = parse_line('{"level":"ERROR","message":"the real message",'
+                       '"name":"some-container","host":"pod-1"}')
+        assert p.message == "the real message"
+
+
 class TestTraceInAnalysis:
     LOG = (
         '{"@timestamp":"2026-10-14T09:00:00.100Z","level":"INFO",'

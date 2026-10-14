@@ -153,6 +153,13 @@
     <!-- 调用链（结构化日志里有 trace_id / request_id 时出现） -->
     <div id="traces-card" class="traces-card" hidden></div>
 
+    <!-- 证据自校验：把「可复核」从命令行口号变成浏览器里当场可验 -->
+    <div id="verify-bar" class="verify-bar" hidden>
+      <button id="btn-verify-evidence" class="btn btn-sm">复核证据出处</button>
+      <span class="dim">重读原始日志，逐条核对结论的来源摘要</span>
+      <div id="verify-result" hidden></div>
+    </div>
+
     <!-- 概览 -->
     <div id="overview" class="overview"></div>
 

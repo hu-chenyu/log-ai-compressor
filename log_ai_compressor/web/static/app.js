@@ -450,6 +450,51 @@ function renderVerdict(data) {
   card.hidden = false;
 }
 
+/** 证据自校验：重读原始日志逐条核对结论出处。
+ *
+ * 存在理由：取证层的核心主张「每条结论都能被独立复核」必须在浏览器里
+ * 也当场可验 —— 用户不能只能在命令行跑 verify 才知道自己的日志有没有
+ * 被改过，否则「可复核」只是一句 README 里的漂亮话。
+ * 结果只有 VERIFIED / TAMPERED / NO_EVIDENCE 三档，没有「大部分通过」。
+ */
+async function verifyEvidence() {
+  if (!State.jobId) { toast('请先分析', 'err'); return; }
+  const btn = $('#btn-verify-evidence');
+  const out = $('#verify-result');
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '核对中…';
+  out.hidden = false;
+  out.innerHTML = '<div class="empty">正在重读原始日志核对摘要…</div>';
+  try {
+    const r = await api('/api/verify', {
+      method: 'POST', body: JSON.stringify({ job_id: State.jobId }),
+    });
+    const ok = r.verdict === 'VERIFIED';
+    const cls = ok ? 'ok' : (r.verdict === 'NO_EVIDENCE' ? 'warn' : 'bad');
+    const label = { VERIFIED: '全部核对通过', TAMPERED: '存在对不上的出处',
+                    NO_EVIDENCE: '无源文件可回读' }[r.verdict] || r.verdict;
+    const bad = (r.details || []).filter((d) => d.status !== 'MATCH');
+    out.innerHTML = `<div class="verify-box ${cls}">
+      <div class="verify-head">${esc(label)} <span class="dim">${esc(r.verdict)}</span></div>
+      <div class="dim">共 ${r.checked} 条引用 · 匹配 ${r.matched} ·
+        失配 ${r.mismatched} · 源不可读 ${r.missing_source}</div>
+      ${bad.length ? '<ul class="verify-list">' + bad.slice(0, 5).map((d) =>
+          `<li>${esc(d.status)} ${esc(d.evidence_id)} ${esc(d.source || '')}</li>`
+        ).join('') + '</ul>' : ''}
+      ${ok ? '<div class="dim">每条结论都能在原始日志里逐行复核。</div>'
+           : '<div class="dim">结论可能来自已被修改的日志，请勿直接采信。</div>'}
+    </div>`;
+    toast(label, ok ? 'ok' : 'err');
+  } catch (err) {
+    out.innerHTML = `<div class="verify-box bad">复核失败：${esc(err.message)}</div>`;
+    toast('复核失败：' + err.message, 'err');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
 /** 渲染调用链小节：结构化日志里有 trace_id/request_id 时出现 */
 function renderTraces(data) {
   const chains = data.traces || [];
@@ -478,6 +523,8 @@ function renderResult(data) {
   renderVerdict(data);
   renderNotice(data);
   renderTraces(data);
+  $('#verify-bar').hidden = false;
+  $('#verify-result').hidden = true;
 
   const s = data.stats;
   const roots = (data.root_causes || []).length;
@@ -812,6 +859,8 @@ async function download(fmt, redact) {
     toast('导出失败：' + err.message, 'err');
   }
 }
+
+$('#btn-verify-evidence').addEventListener('click', verifyEvidence);
 
 $('#btn-copy').addEventListener('click', async () => {
   if (!State.jobId) { toast('请先分析', 'err'); return; }
