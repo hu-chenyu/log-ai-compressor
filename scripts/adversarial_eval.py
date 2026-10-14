@@ -45,6 +45,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+# Windows 控制台默认 cp1252/cp936，打印中文会抛 UnicodeEncodeError ——
+# 而且症状极具误导性：评分卡本身全绿，却因为「打印表格时编码失败」让
+# 整个 step 变红，看起来像功能坏了。评测是门禁，门禁必须只在**评分**
+# 失败时失败，不能因为控制台编码。所以先把 stdout/stderr 切到 UTF-8
+# 并对无法编码的字符降级（errors="replace"），保证任何平台都能跑完。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")   # py3.7+
+    except (AttributeError, ValueError, OSError):                # pragma: no cover
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 

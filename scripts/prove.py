@@ -24,6 +24,15 @@ import json
 import sys
 from pathlib import Path
 
+# Windows 控制台默认非 UTF-8，打印中文会抛 UnicodeEncodeError，让 CI 门禁
+# 在「输出阶段」变红 —— 看起来像功能坏了，实际只是编码问题。门禁必须只在
+# 主张不成立时失败。先切到 UTF-8 并对无法编码字符降级。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")   # py3.7+
+    except (AttributeError, ValueError, OSError):                # pragma: no cover
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
