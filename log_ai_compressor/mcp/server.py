@@ -401,6 +401,9 @@ def verify_evidence(
                 line_end=int(e.get("line_end", 0)),
                 kind=e.get("kind", "sample"),
                 digest=e.get("digest_full") or e.get("digest", ""),
+                # 修复缺陷#1：复核要复现摄入时的解码路径（旧报告无此
+                # 字段则回退自动探测）
+                encoding=e.get("encoding", ""),
                 note=e.get("note", ""))
                 for c in payload.get("clusters") or []
                 for e in c.get("evidence") or []]

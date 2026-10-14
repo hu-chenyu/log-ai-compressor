@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import gzip
 import json
 import pathlib
 
@@ -225,6 +226,74 @@ class TestVerify:
 
 
 # ---------------------------------------------------------------------------
+# B2 自校验 × 编码/压缩容器（修复缺陷#1）
+# ---------------------------------------------------------------------------
+class TestVerifyEncoding:
+    """回读必须复现摄入时的解码路径。
+
+    修复缺陷#1：verify 曾硬编码 utf-8 回读 —— GBK/UTF-16/.gz 日志解析
+    正常（中文不乱码），一复核就整批误报 TAMPERED。自校验误报和漏报
+    一样致命：狼来了喊多了，真被篡改时没人再信。
+    """
+
+    CN_LOG = (
+        "2026-10-14 10:00:02 ERROR [db] 数据库连接失败：无法连接到主库\n"
+        "2026-10-14 10:00:03 ERROR [db] 数据库连接失败：无法连接到主库\n")
+
+    def _refs_of(self, result):
+        return [e for c in result.clusters for e in c.evidence]
+
+    def test_gb18030_file_verifies(self, tmp_path):
+        p = tmp_path / "app_gbk.log"
+        p.write_bytes(self.CN_LOG.encode("gb18030"))
+        result = analyze_files([p], levels=["ERROR"])
+        refs = self._refs_of(result)
+        assert refs, "GBK 日志应产生证据引用"
+        rep = verify_refs(refs)
+        assert rep.verdict == "VERIFIED", rep.details
+
+    def test_utf16_file_verifies(self, tmp_path):
+        p = tmp_path / "app_u16.log"
+        p.write_bytes(self.CN_LOG.encode("utf-16-le"))   # 无 BOM，走 NUL 探测
+        result = analyze_files([p], levels=["ERROR"])
+        refs = self._refs_of(result)
+        assert refs
+        assert verify_refs(refs).verdict == "VERIFIED"
+
+    def test_gzip_source_verifies(self, tmp_path):
+        """压缩日志摄入时透明解压，回读也必须解压 —— 直接 open 必失配。"""
+        p = tmp_path / "app.log.gz"
+        with gzip.open(p, "wt", encoding="utf-8", newline="") as fh:
+            fh.write(LOG)
+        result = analyze_files([p], context_lines=3)
+        refs = self._refs_of(result)
+        assert refs
+        assert verify_refs(refs).verdict == "VERIFIED"
+
+    def test_ref_records_ingest_encoding(self, tmp_path):
+        """证据要记录摄入解码方式，且序列化后不丢（verify --report 依赖它）。"""
+        p = tmp_path / "app_gbk.log"
+        p.write_bytes(self.CN_LOG.encode("gb18030"))
+        result = analyze_files([p], levels=["ERROR"])
+        ref = result.clusters[0].primary_evidence
+        assert ref.encoding
+        assert ref.as_dict()["encoding"] == ref.encoding
+
+    def test_verify_prefers_recorded_encoding_over_autodetect(self, tmp_path):
+        """用户强制编码时自动探测会猜错 —— 回读必须听证据记录的。
+
+        GBK 字节 + 强制 utf-8 摄入：原文带替换符；回读若自作主张改用
+        gb18030 解码，文本不同、摘要必然失配（误报篡改）。
+        """
+        p = tmp_path / "app_force.log"
+        p.write_bytes(self.CN_LOG.encode("gb18030"))
+        result = analyze_files([p], levels=["ERROR"], encoding="utf-8")
+        refs = self._refs_of(result)
+        assert refs and refs[0].encoding == "utf-8"
+        assert verify_refs(refs).verdict == "VERIFIED"
+
+
+# ---------------------------------------------------------------------------
 # C 确定性
 # ---------------------------------------------------------------------------
 class TestDeterminism:
@@ -299,7 +368,10 @@ class TestEvidenceSerialization:
         for c in json.loads(S.export_text(r, "json"))["clusters"]:
             for e in c["evidence"]:
                 assert set(e) == {"evidence_id", "source", "line_start",
-                                  "line_end", "kind", "digest", "note"}
+                                  "line_end", "kind", "digest", "encoding",
+                                  "note"}
+                # encoding 是修复缺陷#1 增补的回读提示字段：它必须随
+                # JSON 导出走，否则 verify --report 复现不了摄入解码路径
 
     def test_short_digest_only_for_display(self, tmp_path):
         """short_digest 仍可用于人读展示，但不得进入结构化输出。"""

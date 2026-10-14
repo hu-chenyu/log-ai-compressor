@@ -20,8 +20,11 @@
    结论部分的 sha256 必须逐字节相同。行业里几乎没人报这个数，
    而它恰恰是"结论可写进事后复盘"的前提。
 
-设计上刻意保持本模块零依赖（不 import models / service）：
-证据是比模型更底层的概念，模型层反过来引用它。
+设计上刻意保持本模块只依赖同层原语（不 import models / service）：
+证据是比模型更底层的概念，模型层反过来引用它。唯一引入的是
+core/encoding 的解码原语 —— 修复缺陷#1：自校验必须与摄入走**同一条**
+解码路径（编码探测 + .gz/.zip 透明解压），否则非 UTF-8 日志解析正常、
+一复核就误报 TAMPERED，直接击穿「可复核」这条核心主张。
 """
 from __future__ import annotations
 
@@ -29,6 +32,8 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from log_ai_compressor.core.encoding import detect_encoding, open_text_stream
 
 # 证据类型（决定报告与 UI 怎么呈现）
 KIND_SAMPLE = "sample"        # 簇的典型样例原文
@@ -59,6 +64,11 @@ class EvidenceRef:
     line_end: int
     kind: str = KIND_SAMPLE
     digest: str = ""            # 该行区间的 sha256（全文）
+    # 修复缺陷#1：摄入时使用的文本编码（含 .gz/.zip 透明解压约定）。
+    # verify 必须用**同一个**解码器回读才能重算出同样的摘要 —— 否则
+    # GBK/UTF-16 日志必然误报 TAMPERED。空串 = 回读时自动探测（兼容
+    # 旧版报告），非空 = 以此为准（用户强制编码时自动探测会猜错）。
+    encoding: str = ""
     note: str = ""              # 人话说明（例：驱动 CONFIRMED 的那一行）
 
     @property
@@ -82,6 +92,7 @@ class EvidenceRef:
             "line_end": self.line_end,
             "kind": self.kind,
             "digest": self.digest,
+            "encoding": self.encoding,
             "note": self.note,
         }
 
@@ -96,12 +107,16 @@ class EvidenceRef:
 
 def make_ref(source: str, line_start: int, line_end: int,
              lines: Sequence[str], kind: str = KIND_SAMPLE,
-             note: str = "") -> EvidenceRef:
+             note: str = "", encoding: str = "") -> EvidenceRef:
     """构造证据引用。
 
     evidence_id 是**确定性**的：同样的（文件, 起止行, 原文）永远得到同样
     的 ID。不含时间戳、不含随机数、不含对象 id —— 这样同一份日志两次
     分析的证据 ID 可直接 diff，也才能写进回归测试的断言。
+
+    encoding 记录摄入时的解码方式，verify 回读时原样复现（修复缺陷#1）。
+    它刻意**不进** evidence_id：ID 标识的是「哪一段原文」，解码方式是
+    回读提示，换了探测器也不该改变证据身份。
     """
     line_end = max(line_end, line_start)
     digest = digest_lines(lines)
@@ -109,7 +124,8 @@ def make_ref(source: str, line_start: int, line_end: int,
     eid = hashlib.sha256(raw).hexdigest()[:_ID_LEN]
     return EvidenceRef(evidence_id=eid, source=source,
                        line_start=line_start, line_end=line_end,
-                       kind=kind, digest=digest, note=note)
+                       kind=kind, digest=digest, encoding=encoding,
+                       note=note)
 
 
 def derive_ref(base: "EvidenceRef", kind: str, note: str = "") -> "EvidenceRef":
@@ -128,7 +144,8 @@ def derive_ref(base: "EvidenceRef", kind: str, note: str = "") -> "EvidenceRef":
     return EvidenceRef(evidence_id=hashlib.sha256(raw).hexdigest()[:_ID_LEN],
                        source=base.source, line_start=base.line_start,
                        line_end=base.line_end, kind=kind,
-                       digest=base.digest, note=note)
+                       digest=base.digest, encoding=base.encoding,
+                       note=note)
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +188,18 @@ class VerifyReport:
         }
 
 
-def _read_range(path: Path, line_start: int, line_end: int
-                ) -> Optional[List[str]]:
-    """按 1-based 行号读取区间；越界或读不到返回 None。"""
+def _read_range(path: Path, line_start: int, line_end: int,
+                encoding: str = "") -> Optional[List[str]]:
+    """按 1-based 行号读取区间；越界或读不到返回 None。
+
+    修复缺陷#1：回读必须与摄入同一条解码路径 —— 优先用证据记录的
+    encoding（用户强制编码时自动探测会猜错），未记录（旧版报告）则
+    自动探测；open_text_stream 同时覆盖 .gz/.zip 透明解压。此前硬编码
+    utf-8，GBK/UTF-16/压缩日志一复核就全军覆没式误报 TAMPERED。
+    """
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        enc = encoding or detect_encoding(path)
+        with open_text_stream(path, enc) as fh:
             out: List[str] = []
             for i, line in enumerate(fh, 1):
                 if i < line_start:
@@ -216,7 +240,7 @@ def verify_refs(refs: Iterable[EvidenceRef]) -> VerifyReport:
                                    "status": "MISSING_SOURCE",
                                    "source": ref.source})
             continue
-        lines = _read_range(real, ref.line_start, ref.line_end)
+        lines = _read_range(real, ref.line_start, ref.line_end, ref.encoding)
         if lines is None:
             report.mismatched += 1
             report.details.append({"evidence_id": ref.evidence_id,
