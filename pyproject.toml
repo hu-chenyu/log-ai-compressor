@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "log-ai-compressor"
-version = "2.0.1"
-description = "本地日志分析取证台：日志压缩投喂大模型 + 根因排查 + MCP 接入（数据不出网）"
+version = "2.1.0"
+description = "本机日志取证层：结论带行号出处、可重读原文自校验；拿不出因果链就说证据不足。零出网，附 MCP Server / Agent Skill。"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
