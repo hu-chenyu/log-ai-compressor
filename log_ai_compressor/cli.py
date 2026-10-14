@@ -386,6 +386,9 @@ def cmd_verify(args) -> int:
                     line_end=int(e.get("line_end", 0)),
                     kind=e.get("kind", "sample"),
                     digest=e.get("digest", ""),
+                    # 修复缺陷#1：复核要复现摄入时的解码路径（旧报告无此
+                    # 字段则回退自动探测）
+                    encoding=e.get("encoding", ""),
                     note=e.get("note", "")))
         source_label = f"报告 {report_path.name}"
         if not refs:
