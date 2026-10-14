@@ -9,18 +9,30 @@
 # 另一件事：data/ 下是 Loghub 2.0 原始数据集（实测 178 MB）。
 # 它被 .gitignore 排除，但显式 prune 一遍更稳 —— 万一以后有人
 # 改了打包方式或加了 MANIFEST 规则，178 MB 进 sdist 会直接卡死上传。
+#
+# 第三件事（v2.1.1 修）：上一版补了 tests/ scripts/ examples/，
+# 却漏了两样 README 明确承诺过的东西 ——
+#   · start.bat           §3「Windows：双击运行」指着它
+#   · docs/images/*.jpg   README 首图引用它
+# 通配符只写 *.md 时图片会被静默滤掉，解压出来是一张裂图；
+# start.bat 没显式 include 则是整条 Windows 入口消失。
+# 判据：**README 里出现的每个本仓库文件路径，都必须在 sdist 里能找到。**
+# 这条由 tests/test_packaging.py 钉死，不靠人记。
 
 include LICENSE
 include README.md
+include CHANGELOG.md
 include server.json
+include SKILL.md
 include requirements.txt
 include requirements-dev.txt
 include requirements-optional.txt
 include .gitattributes
+include start.bat
 
 recursive-include tests *.py
 recursive-include scripts *.py
-recursive-include docs *.md
+recursive-include docs *.md *.jpg *.png *.svg
 recursive-include examples *.log *.md *.json
 
 # 运行时资源（wheel 由 [tool.setuptools.package-data] 负责，

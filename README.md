@@ -478,7 +478,7 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 | 指标 | 实测值 |
 | --- | --- |
 | 生产代码 | 8,906 行（28 个模块） |
-| 测试 | **817 用例**，覆盖率 **94%**，`ruff` 全绿 |
+| 测试 | **853 用例**，覆盖率 **94%**，`ruff` 全绿 |
 | CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**五道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 |
 | 内存 | 与日志总行数无关，只与错误种类数相关 |
 | 硬依赖 | 仅 PyYAML（web / mcp / ai 全部为可选 extra） |
@@ -572,6 +572,8 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 | `test_forensics.py` | 证据引用确定性、篡改/删除检测、指纹稳定性、CLI/MCP 入口 | < 1s |
 | `test_structured_logs.py` | JSON/logfmt 字段别名、命名空间、误判防护、调用链与越界防线 | < 1s |
 | `test_correctness_fixes.py` | 18 个已复现缺陷的回归测试（每条断言写成"修好后必须成立"） | < 1s |
+| `test_sdist_contents.py` | 交付物完整性：README 引用的每个文件都得在 sdist 里 | < 1s |
+| `test_packaging.py` | 可选依赖契约、轻装可跑、降级不炸 | ~2s |
 | `test_*.py`（core） | 解析 / 聚类 / 分析 / 导出 / 编码 / 对比 | ~2s |
 
 另有一个**不在 pytest 里**的门禁：`scripts/adversarial_eval.py`。它测的不是
