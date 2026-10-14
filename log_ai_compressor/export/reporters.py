@@ -246,6 +246,24 @@ def token_report_line(result: AnalysisResult, compressed_text: str) -> str:
             f"≈{_fmt_tokens(comp)} tokens（压缩 {_ratio_text(comp, raw)}%）")
 
 
+def _status_note(s) -> Optional[str]:
+    """处理状态提示：**取消** 与 **行数上限采样** 都不是「分析完整」。
+
+    修复缺陷：此前只有 truncated（用户取消）会写进报告，max_lines 命中
+    的采样结果与完整分析长得一模一样 —— 用户拿着一份只覆盖前 10 万行
+    的报告去定位「日志里没有的问题」，而工具从头到尾没说过它只看了一
+    部分。报告的价值建立在「我看到的等于全部」上，这句话必须说出口。
+    """
+    if s.truncated and s.limit_hit:
+        return f"已取消，且已达行数上限（仅覆盖前 {s.total_lines:,} 行）"
+    if s.truncated:
+        return f"用户取消，已处理前 {s.total_lines:,} 行"
+    if s.limit_hit:
+        return (f"已达行数上限，仅分析前 {s.total_lines:,} 行"
+                f"（本报告不是全量结果）")
+    return None
+
+
 def _header_meta_lines(result: AnalysisResult, compressed_text: str,
                        prefix: str = "> ") -> str:
     """头部元信息：token 估算行 +（必要时）级别过滤几乎全灭的提示。
@@ -258,6 +276,11 @@ def _header_meta_lines(result: AnalysisResult, compressed_text: str,
     notice = getattr(result, "notice", None)
     if notice:
         parts.append(prefix + "⚠ " + notice)
+    status = _status_note(result.stats)
+    if status:
+        parts.append(prefix + "⚠ " + status)
+    parts.append(prefix + f"确定性指纹 `{_fingerprint_line(result)}`"
+                        f"（同一份日志跑两遍必须完全一致）")
     return "\n".join(parts)
 
 
@@ -300,8 +323,9 @@ def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
         lines.append(f"| 错误种类数（去重后） | {len(result.clusters)} |")
         lines.append(f"| 错误总次数（过滤后） | {s.error_entries} |")
         lines.append(f"| 日志时间范围 | {_ts_range(result)} |")
-        if s.truncated:
-            lines.append(f"| 处理状态 | 用户取消，已处理前 {s.total_lines} 行 |")
+        status = _status_note(s)
+        if status:
+            lines.append(f"| 处理状态 | {_md_escape(status)} |")
         lines.append("")
         level_parts = [f"{k}={v}" for k, v in sorted(s.level_counts.items())]
         lines.append(f"级别分布：{', '.join(level_parts) if level_parts else '-'}")
@@ -335,11 +359,56 @@ def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
         for i, c in enumerate(clusters, 1):
             lines.extend(_cluster_detail_md(
                 i, c, include_instances="instances" in secs))
+        lines.extend(_traces_section(result))
     # 优化缺陷R99：回填 token 估算行（按最终全文长度估算压缩侧）
     text = "\n".join(lines)
     text = text.replace("__TOKEN_LINE_R99__",
                         _header_meta_lines(result, text))
     return text + "\n"
+
+
+def _evidence_line(c: ErrorCluster) -> str:
+    """证据引用行：结论 + 出处（文件:行区间 + evidence_id）。
+
+    取证层的产品化落点：报告里每一条结论都带着「这是在哪几行看到的」，
+    拿到报告的人不必相信本工具，自己打开日志核对即可。
+    """
+    refs = list(getattr(c, "evidence", ()) or ())
+    if not refs:
+        return "-"
+    parts = [r.citation() for r in refs[:2]]
+    extra = f"（另 {len(refs) - 2} 条）" if len(refs) > 2 else ""
+    return "；".join(parts) + extra
+
+
+def _fingerprint_line(result: AnalysisResult) -> str:
+    """确定性指纹：同一份日志跑两遍，这个数必须一字不差。"""
+    try:
+        from log_ai_compressor.core.evidence import result_fingerprint
+        return result_fingerprint(result)
+    except Exception:                                  # 指纹失败不拖垮报告
+        return "-"
+
+
+def _traces_section(result: AnalysisResult) -> List[str]:
+    """调用链小节（仅结构化日志里有 trace_id / request_id 时出现）。
+
+    展示顺序即真实请求经过服务的顺序 —— 这段叙事是**顺序证据**，不是
+    因果结论，措辞上刻意保持一致（"链路"而不是"因果链"）。
+    """
+    chains = list(getattr(result, "traces", None) or [])
+    if not chains:
+        return []
+    out = ["## 四、调用链（按 trace_id / request_id 重建）", ""]
+    out.append("以下链路证明的是**同一次请求在各服务里的先后顺序**，"
+               "不是因果关系。真正的因果结论仍以 Caused-by 链为准。")
+    out.append("")
+    for t in chains[:8]:
+        flag = "（跨服务）" if t.cross_service else ""
+        out.append(f"- `{t.correlation_id}`{flag}"
+                   f" · {t.service_count} 个服务 · {len(t.steps)} 步")
+        out.append(f"  {t.narrative()}")
+    return out
 
 
 def _cluster_detail_md(index: int, c: ErrorCluster,
@@ -356,6 +425,7 @@ def _cluster_detail_md(index: int, c: ErrorCluster,
     if c.module:
         meta.append(f"模块 {c.module}")
     out.append(f"- {' | '.join(meta)}")
+    out.append(f"- 证据出处：{_evidence_line(c)}")
     notes = []
     if c.is_root_cause:
         notes.append(f"根因：{c.root_cause_reason}")
@@ -470,6 +540,17 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
         "first_seen": _iso_ts(c.first_seen),
         "last_seen": _iso_ts(c.last_seen),
     }
+    # 证据引用随 JSON 一起落盘：报告发出之后、日志可能已经变了，
+    # 拿着这份 JSON 就能回头复核每条结论的出处（log-ai-compressor
+    # verify --report）。**摘要必须存在 JSON 里** —— 只存行号的话，
+    # 日志被改后无从判断对错。
+    #
+    # 放在精简模式的提前 return **之前**：证据是这个工具的存在理由，
+    # 精简的是上下文与堆栈原文（几十 KB 级），证据是几十字节。让人
+    # 为了省几十字节而丢掉可复核性，等于把产品价值砍掉。
+    d["evidence"] = [e.as_dict() | {"digest_full": e.digest}
+                     for e in getattr(c, "evidence", ())]
+
     # 修复缺陷R61：精简模式 —— 仅核心字段 + 实例行号列表（不含
     # 上下文/堆栈/样例原文），人可通读；full 模式供脚本二次处理
     if not full:
@@ -568,8 +649,9 @@ def to_text(result: AnalysisResult, top_n: Optional[int] = None,
         out.append(f"  时间范围: {_ts_range(result)}")
         level_parts = [f"{k}={v}" for k, v in sorted(s.level_counts.items())]
         out.append(f"  级别分布: {', '.join(level_parts) if level_parts else '-'}")
-        if s.truncated:
-            out.append(f"  处理状态: 用户取消，已处理前 {s.total_lines} 行")
+        status = _status_note(s)
+        if status:
+            out.append(f"  处理状态: {status}")
 
     if "list" in secs:
         out.append("")
@@ -598,6 +680,14 @@ def to_text(result: AnalysisResult, top_n: Optional[int] = None,
             inst_line = _instances_line(c)
             if inst_line:
                 out.append(f"       {inst_line}")
+    chains = list(getattr(result, "traces", None) or [])
+    if chains:
+        out.append("")
+        out.append("[调用链]（按 trace_id / request_id 重建，证明顺序非因果）")
+        for t in chains[:8]:
+            flag = "（跨服务）" if t.cross_service else ""
+            out.append(f"  {t.correlation_id}{flag} · {t.service_count} 个服务")
+            out.append(f"       {t.narrative()}")
     return "\n".join(out) + "\n"
 
 
@@ -614,6 +704,7 @@ def _cluster_detail_txt(index: int, c: ErrorCluster,
     if c.module:
         meta.append(f"模块 {c.module}")
     out.append(f"    {' | '.join(meta)}")
+    out.append(f"    证据出处：{_evidence_line(c)}")
     notes = []
     if c.is_root_cause:
         notes.append(f"根因：{c.root_cause_reason}")
@@ -670,6 +761,10 @@ header.band h1{margin:0 0 6px;font-size:22px}
 header.band .meta{opacity:.85;font-size:13px}
 .root{margin:16px 0;background:#fff7ed;border:1px solid #fdba74;
 border-left:6px solid #f97316;border-radius:10px;padding:12px 16px;font-size:14px}
+.warn{margin:16px 0;background:#fef2f2;border:1px solid #fecaca;
+border-left:6px solid #dc2626;border-radius:10px;padding:12px 16px;font-size:14px}
+.warn ul{margin:8px 0 0;padding-left:20px}
+.warn-cell{color:#b91c1c;font-weight:600}
 .notice{margin:16px 0;background:#eff6ff;border:1px solid #bfdbfe;
 border-left:6px solid #3b82f6;border-radius:10px;padding:12px 16px;font-size:14px}
 .card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;
@@ -743,6 +838,9 @@ def to_html(result: AnalysisResult, top_n: Optional[int] = None,
     out.append("</header>")
     if result.notice:
         out.append(f'<div class="notice"><b>提示：</b>{esc(result.notice)}</div>')
+    status = _status_note(s)
+    if status:
+        out.append(f'<div class="warn"><b>处理状态：</b>{esc(status)}</div>')
     ev = result.evidence or {}
     out.append(f'<div class="root"><b>'
                f'{esc(_VERDICT_LABEL.get(ev.get("verdict"), "初步定位根因"))}：</b>'
@@ -777,9 +875,10 @@ def to_html(result: AnalysisResult, top_n: Optional[int] = None,
                 ("级别分布", level_parts or "-"))
         for k, v in rows:
             out.append(f"<tr><td>{esc(k)}</td><td>{esc(v)}</td></tr>")
-        if s.truncated:
-            out.append(f"<tr><td>处理状态</td><td>用户取消，已处理前 "
-                       f"{s.total_lines} 行</td></tr>")
+        status = _status_note(s)
+        if status:
+            out.append(f'<tr><td>处理状态</td><td class="warn-cell">'
+                       f"{esc(status)}</td></tr>")
         out.append("</table></div>")
 
     # 二、错误清单
@@ -817,6 +916,8 @@ def to_html(result: AnalysisResult, top_n: Optional[int] = None,
             if c.module:
                 meta.append(f"模块 {c.module}")
             out.append(f'<p class="cmeta">{esc(" | ".join(meta))}</p>')
+            out.append(f'<p class="cmeta"><b>证据出处：</b>'
+                       f'{esc(_evidence_line(c))}</p>')
             notes = []
             if c.is_root_cause:
                 notes.append(f"根因：{c.root_cause_reason}")

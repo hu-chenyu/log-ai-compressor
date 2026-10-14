@@ -37,6 +37,7 @@ from log_ai_compressor.constants import (
     ROOT_CAUSE_KEYWORDS,
     is_noise_stack_frame,
 )
+from log_ai_compressor.core.evidence import KIND_CAUSED_BY, derive_ref
 from log_ai_compressor.core.models import (
     AnalysisResult,
     ErrorCluster,
@@ -179,12 +180,15 @@ def analyze_clusters(result: AnalysisResult, *,
         # 优化缺陷R78：关联叙事（依赖因果图与异常标注，须在优先级前）
         _link_related_clusters(clusters)
         _build_timelines(clusters, out_edges, by_id)
+        # 优化缺陷R78：关联叙事（依赖因果图与异常标注，须在优先级前）
+        _attach_traces(clusters, result)
         _compute_priorities(clusters, result.stats)
         _sort_clusters(clusters)
         # v2：证据充分性评估。必须放在 _mark_root_causes 之后（它读
         # root_cause_confidence）、_compute_priorities 之后（它按
         # priority 排候选），否则拿到的是未排序或未标档的中间态。
-        result.evidence = assess_evidence(clusters, result.stats).to_dict()
+        result.evidence = assess_evidence(clusters, result.stats,
+                                          result).to_dict()
     result.stats.analysis_cost = time.perf_counter() - t0
     return result.stats.analysis_cost
 
@@ -353,6 +357,76 @@ def _cluster_sort_key(c: ErrorCluster) -> Tuple[int, float]:
     return (1, float(c.first_line))
 
 
+def _attach_traces(clusters: List[ErrorCluster],
+                   result: AnalysisResult) -> List:
+    """重建跨服务调用链，挂到参与的错误簇上。
+
+    为什么放在分析层而不是管线：链路需要**跨簇**的全局视野（一个
+    trace_id 可能横跨多个服务的多个簇），而聚类阶段一个簇都还没成形。
+
+    **绝不因此提升置信档位**：链路只证明顺序，不证明因果。CONFIRMED 的
+    唯一来源仍然是条目内 Caused-by 链。跨服务链路能做的是：
+      1. 给簇补上「它在这条调用链上」的证据（与时间共现区别在于：共服务
+         链是**同一个请求**在多个服务里的真实轨迹，不是"恰好同时出现"）；
+      2. 在证据缺口评估里把「没有调用链关联」这一项关掉。
+    """
+    from log_ai_compressor.core.traces import build_traces
+
+    entries = []
+    seen_lines = set()
+    cluster_of: Dict[int, int] = {}
+    for c in clusters:
+        for e in c.evidence:
+            cluster_of[e.line_start] = c.cluster_id
+        # 样例条目同时出现在 instances[0] 和 sample.entry 里，不去重的话
+        # 链路叙事里同一个步骤会出现两遍 —— 而"看起来重复"恰恰会让人
+        # 怀疑整条链路是不是拼错了。
+        pool = [i.entry for i in c.instances if i.entry is not None]
+        if c.sample is not None and c.sample.entry is not None:
+            pool.append(c.sample.entry)
+        for entry in pool:
+            key = (entry.line_no, entry.correlation_id)
+            if key in seen_lines:
+                continue
+            seen_lines.add(key)
+            entries.append(entry)
+            cluster_of[entry.line_no] = c.cluster_id
+    chains = build_traces(entries, cluster_of)
+    if not chains:
+        return []
+    by_cluster: Dict[int, List[str]] = {}
+    for chain in chains:
+        for step in chain.steps:
+            if step.cluster_id is not None:
+                by_cluster.setdefault(step.cluster_id, []).append(
+                    chain.correlation_id)
+    for c in clusters:
+        ids = sorted(set(by_cluster.get(c.cluster_id, ())))
+        if ids:
+            c.traces = ids[:8]
+    result.traces = chains[:20]
+    return chains
+
+
+def _mark_causal_evidence(c: ErrorCluster, deepest: str) -> None:
+    """给 CONFIRMED 判定补一条因果证据引用。
+
+    CONFIRMED 是本工具唯一敢说「就是它」的档位，所以举证要求也最高：
+    必须能指回**原文行**，而不只是给个理由字符串。Caused by 链就在条目
+    自己的堆栈里，所以复用样例引用覆盖的同一段行（派生引用，摘要相同、
+    kind 不同），note 写清是哪条链的最内层异常。
+
+    拿不到样例引用时（超长堆栈超出摄入窗口）不补 —— 没有原文可核对的
+    CONFIRMED 应当让调用方通过置信档位本身去打折，而不是补一条指向
+    别处的假引用。
+    """
+    base = c.primary_evidence
+    if base is None:
+        return
+    c.evidence.append(derive_ref(
+        base, KIND_CAUSED_BY, note=f"Caused-by 链最内层：{deepest[:60]}"))
+
+
 def _add_cross_reference_edges(ordered: List[ErrorCluster],
                                add_edge) -> None:
     """消息互引用边：A 的模板词 60% 出现在后发的 B 中且含稀有词 → A→B。
@@ -430,6 +504,7 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
         c.is_root_cause = True
         c.root_cause_confidence = CONF_CONFIRMED
         c.root_cause_reason = f"Caused-by 因果链直连，根因：{deepest[:60]}"
+        _mark_causal_evidence(c, deepest)
 
     # b) 跨簇时间相邻：保留为边（用于「谁衍生自谁」的展示），但**绝不升级
     #    成 CONFIRMED** —— 前一个错紧接着出现，只是统计线索。
@@ -550,7 +625,9 @@ class EvidenceAssessment:
         }
 
 
-def assess_evidence(clusters: List[ErrorCluster], stats: RunStats) -> EvidenceAssessment:
+def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
+                    result: Optional[AnalysisResult] = None
+                    ) -> EvidenceAssessment:
     """评估「凭这份日志能不能定论」，并列出证据缺口。
 
     设计立场：**不猜**。拿不出因果链就说证据不足，并精确说明补什么才
@@ -589,6 +666,17 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats) -> EvidenceAs
     if multi_module:
         inputs_used.append(f"多模块覆盖（{len(modules)} 个模块）")
 
+    # 优化缺陷：调用链是本工具能**自己补上**的证据缺口。结构化日志里
+    # 带 trace_id / request_id 时，链路重建成功 -> 记入实际用到的证据，
+    # 并让下面「没有调用链关联」的缺口不再申报。有与没有，全看日志里
+    # 到底有没有关联键，不是一句固定的话术。
+    chains = list(getattr(result, "traces", ()) or ())
+    cross = [c for c in chains if c.cross_service]
+    if chains:
+        inputs_used.append(
+            f"调用链（{len(chains)} 条，跨服务 {len(cross)} 条，"
+            f"trace_id/request_id 关联）")
+
     levels = {c.level for c in clusters}
     multi_level = len(levels) > 1
     if multi_level:
@@ -608,13 +696,37 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats) -> EvidenceAs
 
     # --- 缺口 2：单一模块，无法跨服务定因 ---
     if not multi_module and clusters:
+        # 有跨服务调用链时，"看不到调用关系"这条已经不成立了 —— 缺的是
+        # 更上游的日志，而不是关联本身。申报一个已经被自己填掉的缺口，
+        # 等于让用户去补一份他其实已经有的证据。
         gaps.append(EvidenceGap(
-            code="single_module",
-            title="只覆盖单一模块",
-            why="根因常在下游（数据库/缓存/中间件），只看一个服务的日志，"
-                "分不清是它自己坏了，还是上游把压力传导下来了。",
-            missing="上下游服务的日志（同一时间窗），或带 request_id 的调用链",
-            weight=80,
+            code="single_module" if not cross else "single_module_no_chain",
+            title="只覆盖单一模块" if not cross else "只有部分服务的日志",
+            why=("根因常在下游（数据库/缓存/中间件），只看一个服务的日志，"
+                 "分不清是它自己坏了，还是上游把压力传导下来了。"
+                 if not cross else
+                 "已经按 request_id/trace_id 重建出调用链，但链上只有部分"
+                 "服务 —— 链的起点或终点之外仍可能有根因。"),
+            missing=("上下游服务的日志（同一时间窗），或带 request_id 的调用链"
+                     if not cross else
+                     "链首/链尾之外服务的日志，以及链上每一步的耗时与指标"),
+            weight=80 if not cross else 45,
+        ))
+
+    # --- 缺口 2b：完全没有关联键，连顺序都拼不起来 ---
+    # 已经拿到确定性因果链时不报这条：结论已经定了，再要求补关联键是
+    # 噪音（和 no_causal_chain 在 CONFIRMED 时不报是同一个道理 ——
+    # 缺口清单是"还缺什么才能定论"，不是"还缺什么锦上添花"）。
+    if clusters and not chains and not confirmed:
+        gaps.append(EvidenceGap(
+            code="no_correlation_id",
+            title="日志里没有任何关联键",
+            why="一条 trace_id / request_id 就能把同一次请求在各服务里的"
+                "日志串起来，从而分清「谁先坏、谁只是被拖累」。没有它，"
+                "多服务日志只能按时间猜先后。",
+            missing=("带 trace_id / request_id 的结构化日志"
+                     "（JSON / logfmt 均可，本工具能直接读）"),
+            weight=75,
         ))
 
     # --- 缺口 3：无时间戳，无法定先后 ---
@@ -842,13 +954,18 @@ def significant_in_window(
     win = max(0.0, min(win_end, span_end) - max(win_start, span_start))
     if win <= 0:
         return []
+    # 修复：分子必须与 expected 用**同一个**窗口。expected 用的是与全量
+    # 时间轴求交后的裁剪窗口，而 w 此前按未裁剪的 [win_start, win_end]
+    # 统计 —— 用户把窗口拖到日志时间范围之外时，范围外的实例被算进分子、
+    # 分母却只按交集算，z-score 虚高，把「一直都有」的错误报成突发。
+    lo, hi = max(win_start, span_start), min(win_end, span_end)
     frac = win / span
     out: List[Tuple[ErrorCluster, int, float]] = []
     for c in clusters:
         ts = [i.timestamp for i in c.instances if i.timestamp is not None]
         if not ts:
             continue
-        w = sum(1 for t in ts if win_start <= t <= win_end)
+        w = sum(1 for t in ts if lo <= t <= hi)
         expected = len(ts) * frac
         if w < min_count or expected <= 0:
             continue

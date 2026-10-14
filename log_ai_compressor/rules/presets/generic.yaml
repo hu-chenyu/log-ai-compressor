@@ -79,10 +79,13 @@ stack_indicators:
 # 选项 -Wfatal-errors（fatal 前后为连字符，\b 边界成立），构建日志
 # 的编译命令行被批量误判为致命错误（实测用户日志 84 处、43 个
 # FATAL 簇 100% 为误报，真实 fatal error 0 处）。真实致命错误不受影响：
-# - 显式级别字段（[FATAL]/CRITICAL/PANIC）经 normalize_level 仍 FATAL；
+# - 显式级别字段（[FATAL]/CRITICAL/PANIC）经 normalize_level 归一为
+#   ERROR（修复缺陷R40 已删除 FATAL 级别，下游不再出现 FATAL）；
 # - gcc 风格 "foo.c:123: fatal error: ..." 经 gcc_style 的级别组
-#   （fatal error 别名 FATAL）仍 FATAL；
+#   （fatal error）同样归一为 ERROR；
 # - 无结构行含 "fatal error" 凭 \berror\b 判 ERROR（推断最高 ERROR）。
+# 引擎会把 level_hints 的键经 normalize_level 归一，因此这里写 FATAL
+# 的条目会自动并入 ERROR 组，仍按最高级别判定。
 level_hints:
   ERROR:
     - '\bERROR\b'

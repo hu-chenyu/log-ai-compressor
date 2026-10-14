@@ -14,6 +14,12 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+/** localStorage 读写包一层：隐私模式 / 禁用存储时 getItem 会直接抛，
+ *  而 app.js 是单文件顺序执行，一次未捕获异常会让后面所有监听器都注册
+ *  不上（导出、复制、AI 对话全哑）。此前 setItem 有保护、getItem 没有。 */
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+
 let toastTimer = null;
 function toast(msg, kind = '') {
   const el = $('#toast');
@@ -366,12 +372,13 @@ function listenJob(jobId, mode) {
 
   es.addEventListener('progress', (ev) => {
     const d = JSON.parse(ev.data);
-    const pct = Math.round((d.progress ?? 0) * 100);
-    const bar = $('#progress-bar');
-    bar.classList.remove('indeterminate');
-    bar.style.width = Math.min(100, pct) + '%';
+    // 后端只发 lines / lps / clusters / elapsed / phase —— 没有百分比，
+    // 也没有错误行数（core 层不提供总量，算不出百分比）。此前这里读
+    // d.progress 与 d.errors，两个键都不存在，进度条永远停在 0%、错误
+    // 数永远显示 0。改为只展示能如实给出的量，不编造分母。
     $('#progress-text').textContent =
-      `已处理 ${fmtInt(d.lines)} 行 · ${fmtInt(d.errors)} 错误 · ${pct}%`;
+      `已处理 ${fmtInt(d.lines)} 行 · ${fmtInt(d.clusters)} 种错误 · `
+      + `${fmtInt(d.lps)} 行/秒`;
   });
 
   es.addEventListener('done', (ev) => {
@@ -443,6 +450,25 @@ function renderVerdict(data) {
   card.hidden = false;
 }
 
+/** 渲染调用链小节：结构化日志里有 trace_id/request_id 时出现 */
+function renderTraces(data) {
+  const chains = data.traces || [];
+  const card = $('#traces-card');
+  if (!chains.length) { card.hidden = true; card.innerHTML = ''; return; }
+  const cross = chains.filter((t) => t.cross_service).length;
+  card.hidden = false;
+  card.innerHTML = `<div class="traces-head">调用链 `
+    + `<span class="dim">${chains.length} 条 · 跨服务 ${cross} 条 · `
+    + `证明请求先后顺序，不证明因果</span></div>`
+    + chains.slice(0, 6).map((t) => `
+      <div class="trace-row">
+        <code>${esc(t.correlation_id)}</code>
+        <span class="dim">${esc((t.services || []).join(' → ') || '-')}</span>
+        <span class="dim">${t.steps} 步</span>
+      </div>
+      <div class="trace-narr">${esc(t.narrative)}</div>`).join('');
+}
+
 function renderResult(data) {
   State.result = data;
   State.clusters = data.clusters || [];
@@ -451,6 +477,7 @@ function renderResult(data) {
   $('#result-panel').hidden = false;
   renderVerdict(data);
   renderNotice(data);
+  renderTraces(data);
 
   const s = data.stats;
   const roots = (data.root_causes || []).length;
@@ -462,8 +489,14 @@ function renderResult(data) {
     ['耗时', s.duration + 's', ''],
     ['速度', fmtInt(s.lines_per_second) + ' 行/秒', ''],
   ];
-  if (s.truncated || s.limit_hit) {
-    stats.push(['状态', '已达行数上限', 'hot']);
+  // 「用户取消」与「已达行数上限」是两回事：前者是没跑完就停了，后者是
+  // 主动只采样了前 N 行。此前两者共用「已达行数上限」一句话，取消被
+  // 谎报成采样，用户以为拿到了全量结果。
+  if (s.truncated) {
+    stats.push(['状态', '已取消（仅含取消前的增量结果）', 'hot']);
+  }
+  if (s.limit_hit) {
+    stats.push(['状态', '已达行数上限（非全量结果）', 'hot']);
   }
   $('#overview').innerHTML = stats.map(([k, v, cls]) =>
     `<div class="stat ${cls}"><div class="k">${esc(k)}</div>` +
@@ -536,7 +569,10 @@ const BOOL_RE = /\b(?:and|or|not)\b/i;
 /** 与旧 GUI 的 _kw_match 同语义：含布尔算子时按表达式求值，否则子串匹配 */
 function kwMatch(hay, expr) {
   if (!expr) return true;
-  if (!BOOL_RE.test(expr)) return expr.includes(hay);
+  // 修复：原来写的是 `expr.includes(hay)`，参数反了 —— 变成「查询词里
+  // 是否包含整段簇文本」。簇文本永远比查询词长，于是普通子串搜索
+  // **永远零命中**，搜索框除了报「没有匹配的错误簇」什么也做不了。
+  if (!BOOL_RE.test(expr)) return hay.includes(expr);
   const clauses = expr.split(/\bor\b/i);
   for (const clause of clauses) {
     let ok = true;
@@ -596,7 +632,7 @@ function renderClusterList() {
       <div class="cluster-head">
         <span class="lv lv-${esc(c.level)}">${esc(c.level)}</span>
         <span class="cnt">×${fmtInt(c.count)}</span>
-        <span class="prio">P${esc(c.priority)}</span>
+        <span class="prio">${esc(c.priority_label || '—')}</span>
         ${c.root_cause_confidence === 'CONFIRMED'
           ? '<span class="prio" style="color:var(--ok)">已证实</span>'
           : c.root_cause_confidence === 'LIKELY'
@@ -632,7 +668,7 @@ function renderDetail(c) {
     ['簇号 / 级别', `[${c.id}] ${c.level}`],
     ['模块', c.module || '—'],
     ['出现次数', fmtInt(c.count)],
-    ['优先级', `${c.priority}（${c.priority_detail || '—'}）`],
+    ['优先级', `${c.priority_label || ''} ${c.priority}（${c.priority_detail || '—'}）`],
     ['行范围', `${fmtInt(c.first_line)} ~ ${fmtInt(c.last_line)}`],
     ['时间范围', `${c.first_seen_text || '—'} ~ ${c.last_seen_text || '—'}`],
   ];
@@ -641,6 +677,21 @@ function renderDetail(c) {
   if (c.related_clusters?.length) kv.push(['相关簇', c.related_clusters.join(', ')]);
   parts.push(`<div class="kv">${kv.map(([k, v]) =>
     `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join('')}</div>`);
+
+  // 取证层：结论出处。放在最显眼的位置 —— 这是本工具与其它日志工具
+  // 最直接的差别，每条结论都能点回原文行，不接受"相信我"。
+  if (c.evidence_citation) {
+    parts.push(`<div class="evidence-box"><div class="ev-head">证据出处</div>`
+      + `<div class="ev-cite">${esc(c.evidence_citation)}</div>`
+      + `<div class="ev-note">用 <code>log-ai-compressor verify --report</code> `
+      + `可重读原文逐条核对；日志被改动会报 TAMPERED</div></div>`);
+  }
+  if (c.traces?.length) {
+    parts.push(`<div class="trace-box"><div class="ev-head">调用链 `
+      + `<span class="ev-warn">（证明顺序，非因果）</span></div>`
+      + c.traces.map((t) => `<div class="ev-cite">${esc(t)}</div>`).join('')
+      + `</div>`);
+  }
 
   if (entry.raw) {
     parts.push('<h5>典型样例</h5>');
@@ -686,9 +737,7 @@ function renderDetail(c) {
     if (!dragging) return;
     dragging = false;
     document.body.style.userSelect = '';
-    try {
-      localStorage.setItem('lac.split', $('.split-left').style.width);
-    } catch (_) {}
+    lsSet('lac.split', $('.split-left').style.width);
   };
   const start = (e) => { e.preventDefault(); dragging = true;
     document.body.style.userSelect = 'none'; };
@@ -698,7 +747,7 @@ function renderDetail(c) {
   document.addEventListener('touchmove', onMove, { passive: false });
   document.addEventListener('mouseup', onUp);
   document.addEventListener('touchend', onUp);
-  const saved = localStorage.getItem('lac.split');
+  const saved = lsGet('lac.split');
   if (saved) left.style.width = saved;
 })();
 
@@ -902,6 +951,7 @@ $('#btn-ai-settings').addEventListener('click', async () => {
     });
   }
   const st = await api('/api/ai/status').catch(() => ({}));
+  State.providers = st.providers || State.providers || [];
   const cfg = st.config || {};
   sel.value = cfg.provider || 'none';
   $('#ai-base').value = cfg.base_url && cfg.provider !== 'none' ? cfg.base_url : '';
@@ -920,10 +970,11 @@ function onProviderChange() {
   $('#ai-env-hint').textContent = env
     ? `留空则读取环境变量 ${env}`
     : '该服务商不需要 API Key';
-  // 修复：这里原来写的是 `sel.value`，而 sel 只是弹窗点击回调里的
-  // 局部 const，在本函数作用域不存在 —— 每切换一次服务商就抛
-  // ReferenceError，base_url 占位符永远设不上。
-  $('#ai-base').placeholder = (State.health?.providers || [])
+  // 上次修的 ReferenceError 把 `sel.value` 换成了 State.health，但
+  // /api/health 压根不返回 providers（那是 /api/ai/status 的字段），于是
+  // 换成另一种静默失效：占位符永远是空串。改读 State.providers ——
+  // 打开弹窗时从 /api/ai/status 存下来的服务商列表。
+  $('#ai-base').placeholder = (State.providers || [])
     .find((p) => p.key === opt?.value)?.label || '';
 }
 $('#ai-provider').addEventListener('change', onProviderChange);
@@ -984,7 +1035,7 @@ function renderCompare(data) {
 /* ============================ 启动 ============================ */
 (async function init() {
   buildLevelChips();
-  applyTheme(localStorage.getItem('lac.theme') || 'dark');
+  applyTheme(lsGet('lac.theme') || 'dark');
   loadCfg();
   try {
     State.health = await api('/api/health');

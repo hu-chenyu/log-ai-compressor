@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from log_ai_compressor.constants import (
     LEVEL_ALIASES,
@@ -27,6 +27,7 @@ from log_ai_compressor.constants import (
     normalize_level,
 )
 from log_ai_compressor.core.models import LogEntry
+from log_ai_compressor.core.structured import parse_line
 from log_ai_compressor.rules.engine import RuleSet
 
 # ---------------------------------------------------------------------------
@@ -260,6 +261,18 @@ class LogParser:
         if not line or line.isspace():
             return None  # 空行不产出、不断裂续行
 
+        # A0) 结构化日志（JSON Lines / logfmt）——原生字段优先于正则。
+        #     2026 年主流框架默认输出 JSON，级别/服务/trace_id 都是**字段**
+        #     而不是嵌在文本里的字符串；拿正则去刮会全部丢失。
+        #     判定极便宜（首字符 + 是否闭合），非结构化日志零额外开销。
+        structured = parse_line(line)
+        if structured is not None:
+            prev = self._current
+            self._current = self._build_structured_entry(structured, line,
+                                                         line_no)
+            self._in_stack = False
+            return prev
+
         # A/B) 缩进行：堆栈优先（Python 回溯的源码行等），否则消息折行
         if line[0] in " \t":
             if self._in_stack or self._rules.match_stack_indicator(line.strip()):
@@ -326,6 +339,44 @@ class LogParser:
             self._current.stack.append(text)
             self._current.last_line_no = line_no
         self._in_stack = True
+
+    def _build_structured_entry(self, parsed, line: str,
+                                line_no: int) -> LogEntry:
+        """从结构化字段构建 LogEntry。
+
+        级别仍走 normalize_level（把 severity=FATAL 之类的写法归一），
+        时间戳仍交给同一个 TimestampParser（格式识别口径与纯文本路径
+        完全一致，不出现「结构化日志的时间解析和文本日志不一样」的割裂）。
+        """
+        level = normalize_level(parsed.level) if parsed.level else (
+            self._rules.infer_level_by_keyword(parsed.message) or "INFO")
+        # 消息头部的模块前缀只在没有显式 service 字段时才剥，避免把
+        # 结构化日志里本来就有的 service 字段覆盖掉
+        message = parsed.message
+        module = parsed.service
+        if not module or not parsed.level:
+            head = _HEAD_TOKEN_SEP.match(message)
+            if head:
+                token = head.group(1)
+                if _is_level_token(token):
+                    if not parsed.level:
+                        level = normalize_level(token)
+                    message = message[head.end():].strip()
+                elif not module:
+                    module = token
+                    message = message[head.end():].strip()
+        stack: List[str] = []
+        if parsed.error and parsed.error not in message:
+            stack.append(parsed.error)
+        return LogEntry(
+            line_no=line_no, raw=line, last_line_no=line_no,
+            timestamp=self._ts.parse(parsed.timestamp),
+            level=level, module=module, message=message,
+            stack=stack,
+            trace_id=parsed.trace_id, request_id=parsed.request_id,
+            span_id=parsed.span_id, structured=True,
+            fields=dict(parsed.fields),
+        )
 
     def _build_entry(self, match: re.Match, line: str, line_no: int) -> LogEntry:
         """从规则匹配结果构建 LogEntry（含级别/模块/时间戳后处理）。"""

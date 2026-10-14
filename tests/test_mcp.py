@@ -25,6 +25,8 @@ V2 = BASE / "examples" / "app_v2.log"
 EXPECTED_TOOLS = {
     "analyze_log_file", "analyze_log_text", "compare_log_files",
     "export_report", "get_cluster_detail", "list_rules", "check_environment",
+    # 取证层入口：让 Agent 能自己复核结论出处，而不是只能相信工具
+    "verify_evidence",
 }
 
 
