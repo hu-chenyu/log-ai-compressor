@@ -73,6 +73,22 @@ _TS_LINE = re.compile(r"^\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}:\d{2}")
 # 堆栈续行：帧 / 折叠计数 / 被抑制异常 / 空白（不构成条目边界）
 _CONT = re.compile(r"^(?:at |\.\.\. |\s*Suppressed:)", re.IGNORECASE)
 
+# 修复评测器缺陷#2：Android logcat 前缀 `12-17 19:42:44.457 3168 3307 W System.err: `
+# 让上面三条全部失效 —— `Caused by:` 不在行首、`_TS_LINE` 要 4 位年份（logcat 只有
+# MM-DD）、堆栈帧 `at ...` 前面也隔着前缀。结果：Android_v1 明明有 131 条真实
+# Caused-by 链，scan_chains 却扫出 **0 条**，评测器自己失真。
+#
+# 改法不是给每条正则各加一个分支（那样三条之间会再次不同步），而是**先把
+# 行首日志前缀剥掉，再走同一套逻辑** —— 与工具解析器的做法同口径。
+_LOGCAT = re.compile(
+    r"^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[.,]\d{3}\s+\d+\s+\d+\s+[VDIWEFS]\s+[^:]*:\s?")
+
+
+def _strip_prefix(s: str) -> str:
+    """剥掉行首日志前缀（logcat 风格），其余格式原样返回。"""
+    m = _LOGCAT.match(s)
+    return s[m.end():] if m else s
+
 
 def _is_cont(s: str) -> bool:
     """堆栈续行（保持当前链继续累积）。"""
@@ -244,7 +260,8 @@ def scan_chains(path: Path) -> list[Chain]:
 
     with path.open(encoding="utf-8", errors="replace") as fh:
         for i, line in enumerate(fh, 1):
-            s = line.strip()
+            # 先剥日志前缀（Hadoop 的时间戳行剥不掉，原样保留），再统一判定
+            s = _strip_prefix(line.strip())
             m = _CAUSED.match(s)
             if m:
                 # Caused by 是链的直接信号：即便前面没有裸异常行（内嵌

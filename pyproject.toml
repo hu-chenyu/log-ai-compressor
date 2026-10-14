@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "log-ai-compressor"
-version = "2.2.0"
+version = "2.3.0"
 description = "本机日志取证层：结论带行号出处、可重读原文自校验；拿不出因果链就说证据不足。零出网，附 MCP Server / Agent Skill。"
 readme = "README.md"
 requires-python = ">=3.11"
