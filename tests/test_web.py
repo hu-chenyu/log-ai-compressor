@@ -238,6 +238,78 @@ class TestSSE:
 # ---------------------------------------------------------------------------
 # 导出
 # ---------------------------------------------------------------------------
+class TestVerifyEndpoint:
+    """/api/verify：浏览器里当场复核结论出处。
+
+    这不是给 Web 层加个便利按钮 —— 取证层最核心的主张是「每条结论都
+    能被独立复核」，而如果用户只能在命令行跑 verify，那在浏览器里看到
+    证据出处的人仍然无从判断它是否还对得上原文。主张必须在它出现的
+    地方就能被验证。
+    """
+
+    def test_verifies_untouched_log(self, client, tmp_path):
+        p = tmp_path / "a.log"
+        p.write_text("2026-10-14 10:00:00 ERROR db refused\n"
+                     "2026-10-14 10:00:01 ERROR db refused\n",
+                     encoding="utf-8")
+        job_id = _run(client, mode="file", paths=[str(p)])
+        r = client.post("/api/verify", json={"job_id": job_id})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["verdict"] == "VERIFIED"
+        assert body["ok"] is True
+        assert body["checked"] > 0
+        assert body["matched"] == body["checked"]
+
+    def test_detects_tampered_log(self, client, tmp_path):
+        """分析之后日志被改 —— 必须报 TAMPERED。"""
+        p = tmp_path / "b.log"
+        original = ("2026-10-14 10:00:00 ERROR db refused to db-primary:5432\n"
+                    "2026-10-14 10:00:01 ERROR db refused to db-primary:5432\n")
+        p.write_text(original, encoding="utf-8")
+        job_id = _run(client, mode="file", paths=[str(p)])
+        p.write_text(original.replace("db-primary:5432", "db-replica:6432"),
+                     encoding="utf-8")
+        r = client.post("/api/verify", json={"job_id": job_id})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["verdict"] == "TAMPERED"
+        assert body["ok"] is False
+        assert body["mismatched"] >= 1
+        assert any(d["status"] == "MISMATCH" for d in body["details"])
+
+    def test_pasted_text_has_no_readable_source(self, client):
+        """粘贴文本没有可回读源文件 —— 必须如实说，不谎称通过。"""
+        job_id = _run(client, mode="text",
+                      text="2026-10-14 10:00:00 ERROR db refused\n"
+                           "2026-10-14 10:00:01 ERROR db refused\n")
+        body = client.post("/api/verify", json={"job_id": job_id}).json()
+        assert body["verdict"] == "TAMPERED"
+        assert body["missing_source"] >= 1
+
+    def test_unknown_job_404(self, client):
+        assert client.post("/api/verify",
+                           json={"job_id": "deadbeef"}).status_code == 404
+
+    def test_missing_body_field_404(self, client):
+        assert client.post("/api/verify", json={}).status_code == 404
+
+    def test_no_partial_pass_verdict(self, client, tmp_path):
+        """不能出现「大部分通过」这种判定 —— 掺假证据的报告不该放行。"""
+        p = tmp_path / "c.log"
+        original = "2026-10-14 10:00:00 ERROR boom %d\n" % 0
+        lines = original + "".join(
+            f"2026-10-14 10:00:0{i} ERROR other {i}\n" for i in range(1, 5))
+        p.write_text(lines, encoding="utf-8")
+        job_id = _run(client, mode="file", paths=[str(p)])
+        p.write_text(lines.replace("ERROR other 1", "ERROR other 99"),
+                     encoding="utf-8")
+        body = client.post("/api/verify", json={"job_id": job_id}).json()
+        assert body["verdict"] in ("VERIFIED", "TAMPERED")
+        assert body["matched"] > 0 and body["mismatched"] > 0
+        assert body["ok"] is False
+
+
 class TestExport:
     @pytest.fixture(scope="class")
     def job_id(self, client):

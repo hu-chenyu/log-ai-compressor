@@ -39,25 +39,49 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------------------------
-# 字段别名表（大小写不敏感；点号命名空间走扁平化后的末段匹配）
+# 字段别名表
+#
+# 键一律**全小写**：`_flatten` 会把原键 lowercase，所以 `TraceId`（Serilog /
+# ECS 的 PascalCase 写法）落到表里就是 `traceid`。三类写法靠同一张表覆盖：
+#   点号命名空间 {"log.level": …}   → 走 full key 精确匹配
+#   真嵌套       {"log": {"level":…}} → 走 full key（_flatten 递归补出点号路径）
+#   末段兜底     {"TraceId": …}       → 走末段匹配
+#
+# 覆盖的生态（字段名来自实测而非记忆，见 docs/BENCHMARK.md 与 README）：
+#   OpenTelemetry Logs  level / severity_text / body / trace_id / span_id / time_unix_nano
+#   Elastic ECS         @timestamp / log.level / service.name / trace.id / event.original
+#   Grafana Loki        level / msg / traceID / labels
+#   Serilog / zap       Timestamp / Level / Message / TraceId / CorrelationId / Exception
+#   winston / pino      level / message / msg / service / trace_id / req_id
+#   Python structlog    event / level / logger / timestamp / exc_info
 # ---------------------------------------------------------------------------
 _LEVEL_KEYS = ("level", "severity", "severity_text", "severitytext", "lvl",
-               "loglevel", "levelname", "level_name", "priority")
+               "loglevel", "levelname", "level_name", "priority",
+               "loglevel_name", "severitynumber", "log.level", "log.severity")
 _MESSAGE_KEYS = ("message", "msg", "log", "event", "@message", "short_message",
-                 "text", "description")
+                 "text", "description", "body", "event.original",
+                 "event.original_message", "content", "line")
 _TIMESTAMP_KEYS = ("timestamp", "time", "ts", "@timestamp", "eventtime",
-                   "datetime", "date", "asctime", "event_time")
+                   "datetime", "date", "asctime", "event_time", "time_unix_nano",
+                   "observedtimestamp", "logged_at", "time_stamp")
 _SERVICE_KEYS = ("service", "service.name", "servicename", "logger",
                  "logger_name", "loggername", "app", "application", "app_name",
-                 "module", "component", "source", "logger_name")
-_TRACE_KEYS = ("trace_id", "traceid", "trace.id", "otel.trace_id", "trace")
+                 "module", "component", "source", "logger_name",
+                 "service_name", "servicename", "job", "job_name", "origin",
+                 "source_name", "context.source", "name", "host", "hostname")
+_TRACE_KEYS = ("trace_id", "traceid", "trace.id", "otel.trace_id", "trace",
+               "traceparent", "trace-id", "x-b3-traceid", "b3.traceid")
 _REQUEST_KEYS = ("request_id", "requestid", "request.id", "correlation_id",
-                 "correlationid", "req_id", "reqid", "requestid_internal")
-_SPAN_KEYS = ("span_id", "spanid", "span.id", "otel.span_id")
+                 "correlationid", "req_id", "reqid", "requestid_internal",
+                 "correlation-id", "x-request-id", "x-correlation-id",
+                 "session_id", "sessionid")
+_SPAN_KEYS = ("span_id", "spanid", "span.id", "otel.span_id", "span",
+              "x-b3-spanid", "b3.spanid")
 _ERROR_KEYS = ("error", "err", "exception", "exc", "error.message",
-               "stack_trace", "stacktrace", "stack")
+               "stack_trace", "stacktrace", "stack", "error_message",
+               "errmessage", "exc_info", "exception_message")
 _EXCEPTION_KEYS = ("exception.type", "exception_type", "exceptiontype",
-                   "exc_type")
+                   "exc_type", "exception_name", "error.type", "err.type")
 
 # logfmt：`key=value`，value 可带引号
 _LOGFMT_RE = re.compile(r'([A-Za-z_][\w.\-]*)=("(?:[^"\\]|\\.)*"|'
