@@ -106,11 +106,32 @@ class Outcome:
     rows: int = 0
     chains: int = 0
     chains_matched: int = 0
+    # 严格口径：覆盖该链的 CONFIRMED 簇，其自身携带的证据文本里
+    # **点名了这条链的根因异常类名**。行区间覆盖只证明"位置对得上"，
+    # 严格口径才回答"它说的是不是这一条"。两个数一起看才有意义。
+    chains_matched_strict: int = 0
     confirmed: int = 0
     confirmed_ok: int = 0
     by_conf: dict = field(default_factory=lambda: defaultdict(int))
     misses: list = field(default_factory=list)
     false_conf: list = field(default_factory=list)
+
+
+def _cluster_text(c) -> str:
+    """簇自身携带的全部文本（典型样例完整条目 + 前后上下文 + 摘要）。
+
+    这是"这个簇到底说了什么"的全部依据 —— 报告里给人看的就是这些。
+    """
+    parts: list[str] = [c.summary or ""]
+    s = getattr(c, "sample", None)
+    if s is not None:
+        entry = getattr(s, "entry", None)
+        if entry is not None:
+            parts.append(getattr(entry, "message", "") or "")
+            parts.extend(getattr(entry, "stack_lines", None) or [])
+        parts.extend(getattr(s, "before", None) or [])
+        parts.extend(getattr(s, "after", None) or [])
+    return "\n".join(parts).lower()
 
 
 def _sig(cls: str, msg: str | None) -> str:
@@ -274,18 +295,30 @@ def evaluate(path: Path, name: str = "") -> Outcome:
         else:
             o.false_conf.append(c)
 
-    # --- 召回率：每条真实因果链，是否有 CONFIRMED 簇的行区间覆盖其最内层异常。
-    #     与精确率用同一把尺子（行区间含链最内层行 = 认领该链）。不再做异常
-    #     签名匹配：簇文本只有消息模板、不含栈，拿签名对账会把真召回判成
-    #     漏报 —— 首跑复现语料时召回率因此整体假 0%，评测器自己的 bug。
+    # --- 召回率：两个口径一起给，只给一个就是误导 ---
+    #
+    # 口径 A（行区间覆盖，宽松）：这条链的最内层行，是否被任意一个
+    #   CONFIRMED 簇的行区间盖住。只证明"位置对得上"，不证明"说的是这一条"。
+    #   大文件上必然接近 100% —— 实测某文件 2,643 条链只有 12 个 CONFIRMED
+    #   簇，12 个簇的行区间铺满全文件，于是 2,643 条链全被"认领"。
+    #
+    # 口径 B（严格，本项目对外只认这个）：覆盖该链的 CONFIRMED 簇，其
+    #   自身携带的证据文本里必须**点名这条链的根因异常类名**。
+    #
+    # 只报 A 会让指标变成近乎恒真的谓词（换个工具只要至少吐一个
+    # CONFIRMED 看着也像 99.9%）。所以两个数都打出来，差多少一眼可见。
+    cluster_text = {id(c): _cluster_text(c) for c in result.clusters}
     for ch in chains:
-        hit = any(c.root_cause_confidence == CONF_CONFIRMED
-                  and c.first_line <= ch.deepest_line <= c.last_line
-                  for c in result.clusters)
-        if hit:
+        covering = [c for c in result.clusters
+                    if c.root_cause_confidence == CONF_CONFIRMED
+                    and c.first_line <= ch.deepest_line <= c.last_line]
+        if covering:
             o.chains_matched += 1
         else:
             o.misses.append(ch)
+        cls = ch.deepest_sig.partition(":")[0].strip().lower()
+        if cls and any(cls in cluster_text[id(c)] for c in covering):
+            o.chains_matched_strict += 1
 
     for c in result.clusters:
         o.by_conf[c.root_cause_confidence or "(空)"] += 1
@@ -307,12 +340,23 @@ def main() -> int:
     elif args:
         named = [(Path(a), "") for a in args]
     else:
-        named = [(p, "") for p in sorted(
-            p for p in (ROOT / "data" / "loghub").rglob("*_full.log")
-            if scan_chains(p))]            # 只评有真实因果链的数据集
+        # 默认扫两处：Loghub-2.0 精简集（data/loghub/*_full.log）与
+        # Loghub 全量（data/loghub_full/**/*.log，含真实 Java 异常栈）。
+        #
+        # 以前只扫前者，于是 README / BENCHMARK 里"61 文件 / 5,921 链"那条
+        # 数字**没法用一条命令复现**（裸跑会报"没有找到含 Caused-by 因果链的
+        # 日志"）。本项目的门禁之一就是"每个数字一条命令可跑"，这条得修。
+        roots = [ROOT / "data" / "loghub", ROOT / "data" / "loghub_full"]
+        candidates: set[Path] = set()
+        for root in roots:
+            if root.is_dir():
+                candidates.update(root.rglob("*_full.log"))
+                candidates.update(root.rglob("*.log"))
+        named = [(p, "") for p in sorted(candidates) if scan_chains(p)]
     if not named:
         print("没有找到含 Caused-by 因果链的日志。")
-        print("真实数据：下载 Loghub Android_v1 / Hadoop 全量（zenodo，含真实 Java 异常栈）")
+        print("真实数据：把 Loghub Android_v1 / Hadoop 全量解压到 data/loghub_full/，")
+        print("          或精简集放到 data/loghub/（文件名 *.log 或 *_full.log）")
         print("功能基准：python scripts/eval_rootcause.py --repro（复现语料，非生产日志）")
         return 1
 
@@ -322,6 +366,13 @@ def main() -> int:
     if repro:
         print("  [口径] 复现语料：自建故障场景 + 真实 Java 异常/栈帧/日志格式，")
         print("         **非生产日志** —— 验证指标机制与回归，不替代真实数据集结论。")
+    else:
+        print(f"  [口径] 真实数据集，共 {len(named)} 个含链文件。")
+        print("         **召回率是行区间口径、偏宽**：一条链只要被任意一个 CONFIRMED")
+        print("         簇的行区间盖住最内层异常行就算认领，不校验认的是不是同一条。")
+        print("         大文件上尤其明显 —— 簇行区间横跨数千行时，几十上百条重复链会")
+        print("         被同一个簇一次性'认领'。所以这个数只能读作**覆盖率**，")
+        print("         不能读作'工具找对了根因的比例'。真正的召回率至今无有效数字。")
     print("=" * 78)
 
     tot = Outcome()
@@ -335,7 +386,10 @@ def main() -> int:
               f"   ({o.confirmed_ok}/{o.confirmed})")
         print(f"    自信错误率        : "
               f"{'—' if not o.confirmed else f'{(1 - o.confirmed_ok / o.confirmed) * 100:.1f}%'}")
-        print(f"    召回率（该说时说）: "
+        print(f"    召回率·严格（点名了这条链）: "
+              f"{'—' if not o.chains else f'{o.chains_matched_strict / o.chains * 100:.1f}%'}"
+              f"   ({o.chains_matched_strict}/{o.chains})")
+        print(f"    召回率·宽松（仅行区间覆盖）: "
               f"{'—' if not o.chains else f'{o.chains_matched / o.chains * 100:.1f}%'}"
               f"   ({o.chains_matched}/{o.chains})")
         dist = {k: v for k, v in o.by_conf.items() if not k.startswith("_")}
@@ -347,6 +401,7 @@ def main() -> int:
             print(f"    · 漏报            : L{ch.deepest_line} {ch.deepest_sig[:60]}")
         tot.chains += o.chains
         tot.chains_matched += o.chains_matched
+        tot.chains_matched_strict += o.chains_matched_strict
         tot.confirmed += o.confirmed
         tot.confirmed_ok += o.confirmed_ok
 
@@ -357,8 +412,17 @@ def main() -> int:
           if tot.confirmed else "    精确率 —")
     print(f"    自信错误率 {(1 - tot.confirmed_ok / tot.confirmed) * 100:.1f}%"
           if tot.confirmed else "    自信错误率 —")
-    print(f"    召回率 {tot.chains_matched / tot.chains * 100:.1f}%"
-          if tot.chains else "    召回率 —")
+    print(f"    召回率·严格 {tot.chains_matched_strict / tot.chains * 100:.1f}%"
+          f" ({tot.chains_matched_strict}/{tot.chains})"
+          if tot.chains else "    召回率·严格 —")
+    print(f"    召回率·宽松 {tot.chains_matched / tot.chains * 100:.1f}%"
+          f" ({tot.chains_matched}/{tot.chains})"
+          if tot.chains else "    召回率·宽松 —")
+    if tot.chains and tot.chains_matched_strict != tot.chains_matched:
+        gap = (tot.chains_matched - tot.chains_matched_strict) / tot.chains * 100
+        print(f"    两口径相差 {gap:.1f} 个百分点 —— 宽松口径高估的部分，")
+        print("    是'簇的行区间盖住了这条链'但'簇并没有点名这条链的根因'。")
+        print("    **对外只认严格口径。**")
     return 0
 
 

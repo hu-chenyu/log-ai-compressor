@@ -434,12 +434,20 @@ def _attach_change_events(clusters: List[ErrorCluster],
             continue
         # 首发之前最近的变更事件（events 已按时间排序，线性回扫即可；
         # 变更有 MAX_CHANGE_EVENTS 上界，开销可忽略）
+        #
+        # 必须排除两类"伪前置事件"，否则叙事会自我指涉：
+        #   1. 与错误同属一条目行的事件 —— 变更关键词正则会命中错误原文本身
+        #      （"connection pool restarted" 既是错误也是变更）；
+        #   2. 与错误首发同一时刻的事件 —— 同一秒发生的两件事不存在先后，
+        #      谈"变更导致错误"是无根据的。
+        # 不排除的话会输出「错误首发在〈错误原文〉后 0s」，等于自己引用自己。
         prev = None
         for e in events:
-            if e.ts <= c.first_seen:
-                prev = e
-            else:
+            if e.ts > c.first_seen:
                 break
+            if e.ts == c.first_seen or e.line_no == c.first_line:
+                continue
+            prev = e
         if prev is None:
             continue
         gap = c.first_seen - prev.ts
