@@ -223,7 +223,11 @@ class PipelineConfig:
 
 # 过滤近乎全灭时提示用户（避免"点了没反应"的静默失败）
 _NOTICE_MIN_ENTRIES = 50        # 小于此条目数不提示，避免样本噪声
-_NOTICE_MAX_KEEP_RATIO = 0.10   # 保留率低于 10% 即视为"过滤近乎全灭"
+# 修复缺陷#6：阈值 0.10 → 0.15 —— 实测 OpenStack 默认级别保留率 10.4%，
+# 恰好高过旧阈值一丁点，于是那份"几乎空的报告"依旧拿不到任何解释。
+# HealthApp 1.9% / Zookeeper 2.2% / OpenStack 10.4% 三个实测坏例全部要
+# 被这个阈值兜住。
+_NOTICE_MAX_KEEP_RATIO = 0.15   # 保留率低于 15% 即视为"过滤近乎全灭"
 _NOTICE_TOP_LEVELS = 5
 
 
@@ -236,17 +240,21 @@ def _build_filter_notice(stats, clusters) -> Optional[str]:
     且**没有任何解释** —— 这是最坏的失败形态：看不出是"没有错误"
     还是"工具坏了"。
 
+    修复缺陷#6：**报告为空（0 簇）时同样必须解释** —— 此前 `not clusters`
+    和 `kept <= 0` 都直接静默返回，恰恰把最坏情形（近空/全空报告）
+    排除在解释之外。静默是这个函数要消灭的东西，不能自己制造静默。
+
     刻意**不自动放宽过滤**：用户要的是错误，静悄悄改成全量输出会给出
     他没要的东西，并且让压缩比之类的数字失去意义。这里只解释、不改行为。
     """
     total = stats.entry_lines
-    if total < _NOTICE_MIN_ENTRIES or not clusters:
+    if total < _NOTICE_MIN_ENTRIES:
         return None
     # 簇内实例数是"通过过滤的条目数"的准确值；但实例有全局上限
     # （MAX_TOTAL_INSTANCES），极端情况下可能为 0，此时退回 error_entries，
     # 免得"恰好没有可记录的实例"被误判成"过滤没生效"而静默。
     kept = sum(len(c.instances) for c in clusters) or stats.error_entries
-    if kept <= 0 or kept / total > _NOTICE_MAX_KEEP_RATIO:
+    if kept / total > _NOTICE_MAX_KEEP_RATIO:
         return None
     levels = sorted(stats.level_counts.items(), key=lambda kv: -kv[1])
     shown = " / ".join(f"{lv} {cnt:,}" for lv, cnt in levels[:_NOTICE_TOP_LEVELS])
