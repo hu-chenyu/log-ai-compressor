@@ -647,3 +647,41 @@ class TestFormatTimestamp:
 
     def test_epoch(self):
         assert format_timestamp(1704067200.0).startswith("2024-01-01")
+
+
+# ---------------------------------------------------------------------------
+# 修复缺陷#4：因果图上游选择的确定性
+# ---------------------------------------------------------------------------
+class TestRootCauseDeterminism:
+    """多入边簇的「上游」必须按时间序取定，不能任取。
+
+    修复缺陷#4：原实现 next(iter(in_edges)) 从内存地址（id()）集合里
+    任取一个上游拼进 root_cause_reason —— 该字段参与确定性指纹，同一份
+    日志两次分析的指纹就可能不一致，「同输入同结论」变成赌运气。
+    """
+
+    def _graph(self):
+        return [
+            make_cluster(1, "alpha beta failed", first_seen=1.0),
+            make_cluster(2, "gamma delta failed", first_seen=2.0),
+            make_cluster(3, "request aborted because alpha beta gamma delta",
+                         first_seen=3.0),
+        ]
+
+    def test_upstream_is_earliest_in_time(self):
+        cs = self._graph()
+        analyze_clusters(make_result(cs))
+        downstream = next(c for c in cs if c.cluster_id == 3)
+        assert "疑似连锁衍生" in downstream.root_cause_reason
+        # 时间序最早的上游是簇 1（first_seen=1.0），不是任取的簇 2
+        assert "alpha beta failed" in downstream.root_cause_reason
+
+    def test_reason_stable_across_object_identity(self):
+        """同样的图跑多遍（对象 id() 各不相同），理由文本必须逐字一致。"""
+        reasons = set()
+        for _ in range(5):
+            cs = self._graph()
+            analyze_clusters(make_result(cs))
+            reasons.add(
+                next(c for c in cs if c.cluster_id == 3).root_cause_reason)
+        assert len(reasons) == 1, f"理由文本不稳定：{reasons}"

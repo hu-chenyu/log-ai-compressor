@@ -485,6 +485,12 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
     ordered = sorted(clusters, key=_cluster_sort_key)
     weights = _keyword_weights(clusters)
     by_id = {id(c): c for c in ordered}
+    # 修复缺陷#4：入边多于一个时要按**时间序**选上游 —— 排名表先建好，
+    # 不能从集合 next(iter()) 任取：id() 是内存地址，取哪个全看运行时
+    # 布局，而选出来的上游会写进 root_cause_reason，该字段参与确定性
+    # 指纹 —— 同一份日志两次分析指纹就可能不一致，直接打脸
+    # 「同输入同结论」这条对外承诺。
+    rank = {id(c): i for i, c in enumerate(ordered)}
     out_edges: dict = {}
     in_edges: dict = {}
 
@@ -557,7 +563,9 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
         elif not c.is_root_cause and not c.root_cause_reason:
             ins = in_edges.get(id(c))
             if ins:
-                src = by_id[next(iter(ins))]
+                # 修复缺陷#4：取时间序最早的上游（确定性），理由文本才能
+                # 跨进程复现、进指纹不漂
+                src = by_id[min(ins, key=lambda i: rank[i])]
                 c.root_cause_reason = (
                     f"疑似连锁衍生（上游：{src.summary[:40]}）")
             elif _has_cascade_keyword(c):
