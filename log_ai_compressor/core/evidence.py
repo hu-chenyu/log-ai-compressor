@@ -303,6 +303,8 @@ def result_fingerprint(result) -> str:
             c.cluster_id, c.level, c.module, c.summary, c.count,
             round(c.priority, 1), c.priority_label, c.is_root_cause,
             c.root_cause_confidence, c.root_cause_reason, c.anomaly,
+            # 变更时间窗关联是结论的一部分，必须进指纹（确定性口径）
+            c.change_context,
             round(c.first_seen, 3) if c.first_seen is not None else None,
             round(c.last_seen, 3) if c.last_seen is not None else None,
             tuple(e.evidence_id for e in c.evidence),

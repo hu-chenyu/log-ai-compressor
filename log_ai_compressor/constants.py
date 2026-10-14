@@ -180,6 +180,32 @@ CASCADE_KEYWORDS = (
 )
 
 # ---------------------------------------------------------------------------
+# 部署/变更事件关联（跨服务/时间窗/部署事件关联）
+# ---------------------------------------------------------------------------
+# 变更事件词表（保守）：只认明确的启动/停止/发布/重启措辞，
+# 宁漏勿误 —— 把普通错误行当成"发版"会给出误导性的时间窗叙事。
+CHANGE_EVENT_RE = re.compile(
+    r"(?:"
+    # 启动 / 停止（Spring Boot / systemd / 通用服务日志）
+    r"started\s+\S.*\sin\s+\d+(?:\.\d+)?\s*(?:s|sec|seconds|ms)\b"
+    r"|\bstarting\s+(?:up\s+)?(?:version|service|server|application)\b"
+    r"|\bshutting\s+down\b|\bshutdown\s+(?:initiated|complete|completed|requested)\b"
+    r"|\bstopped\s+(?:the\s+)?(?:service|server|daemon|instance|application)\b"
+    r"|\brestarted\b"
+    # 发布 / 变更
+    r"|\bdeploy(?:ed|ing|ment)\b|\brollback\b|\bupgrad(?:ed|ing)\b"
+    r"|\bversion\s+\S+\s+(?:started|released|deployed)\b"
+    r"|\bSIGTERM\b|\bSIGKILL\b"
+    # 中文
+    r"|服务(?:启动|重启|停止|发布|上线|下线)|系统(?:启动|重启)"
+    r"|(?:发布|发版|上线|下线|停机|重启)(?:完成|开始|成功|失败)?"
+    r")",
+    re.IGNORECASE,
+)
+CHANGE_WINDOW_SEC = 1800.0        # 变更事件 ↔ 错误首发关联时间窗（30 分钟）
+MAX_CHANGE_EVENTS = 200           # 变更事件记录上限（内存有界）
+
+# ---------------------------------------------------------------------------
 # 默认参数
 # ---------------------------------------------------------------------------
 # 修复缺陷#5：典型样例前后上下文默认 5 行太少，调整为 50 行；

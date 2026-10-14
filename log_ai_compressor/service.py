@@ -359,6 +359,8 @@ def cluster_to_dict(cluster: ErrorCluster, *,
         "anomaly": cluster.anomaly,
         "related_clusters": list(cluster.related_clusters),
         "traces": list(cluster.traces),
+        # 变更事件时间窗关联叙事（统计线索，不提升置信档位）
+        "change_context": cluster.change_context,
         "hist": _hist(cluster.hist),
         "instances_truncated": cluster.instances_truncated,
         # 证据引用：每条结论都能指回日志原文的具体行，调用方可自行
@@ -483,6 +485,9 @@ def result_to_dict(result: AnalysisResult, *, top_n: Optional[int] = None,
         "cooccurring": cooc,
         # 调用链（结构化日志里有 trace_id / request_id 时非空）
         "traces": [t.as_dict() for t in (getattr(result, "traces", None) or [])],
+        # 部署/变更事件（级别过滤前捕获；时间窗关联线索，非因果）
+        "change_events": [e.as_dict() for e in
+                          (getattr(result, "change_events", None) or [])],
         "clusters": [cluster_to_dict(c, include_sample=with_samples)
                      for c in clusters],
         "total_clusters": len(result.clusters),

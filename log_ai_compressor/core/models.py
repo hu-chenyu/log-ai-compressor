@@ -183,6 +183,27 @@ class ClusterSample:
 
 
 @dataclass
+class ChangeEvent:
+    """部署/变更事件（服务启动、发版、重启、停机……）。
+
+    跨服务/时间窗/部署事件关联的一环：错误首发前若刚发生过变更，
+    是极有价值的排查线索（"上线后开始报错"）。与 traces 同一语义
+    边界 —— **只作统计线索，绝不提升置信档位**：时间窗里的共现不
+    证明是变更引起的，可能是巧合，也可能是变更与错误同源于另一次
+    故障。捕获必须发生在级别过滤之前（发版行多为 INFO 级）。
+    """
+    ts: Optional[float] = None
+    module: str = ""
+    text: str = ""                       # 事件原文（截断展示）
+    line_no: int = 0
+    source: str = ""
+
+    def as_dict(self) -> dict:
+        return {"ts": self.ts, "module": self.module, "text": self.text,
+                "line_no": self.line_no, "source": self.source}
+
+
+@dataclass
 class ClusterInstance:
     """簇内单个错误实例（修复缺陷R4：全屏簇展开查看全部实例）。
 
@@ -246,6 +267,10 @@ class ErrorCluster:
     # 该簇出现过的调用链关联键（analysis 填充）。**不提升置信档位** ——
     # 链路只证明同一次请求的先后顺序，不证明因果。
     traces: List[str] = field(default_factory=list)
+    # 变更事件时间窗关联（analysis._attach_change_events 填充）："错误
+    # 首发在「发版/重启」后 Ns" 的一行叙事。与 traces 同一语义边界 ——
+    # **只作统计线索，绝不提升置信档位**（时间共现不证明因果）。
+    change_context: str = ""
     # 证据引用（analysis 填充）：把簇的存在与判定绑定到日志原文的具体行。
     # 没有它，「根因是 X」只是一句话；有了它，每条结论都能被调用方
     # 重新读原文核对 —— 见 core/evidence.py。
@@ -349,6 +374,10 @@ class AnalysisResult:
     # 重建出的调用链（core/traces.TraceChain）。只在结构化日志里存在
     # 关联键时非空 —— 纯文本日志没有关联键，这里就诚实地是空的。
     traces: List[Any] = field(default_factory=list)
+    # 捕获到的部署/变更事件（本模块 ChangeEvent）。**必须在级别过滤
+    # 之前捕获**（pipeline._handle_entry）—— 发版/重启行多为 INFO 级，
+    # 等过滤后捕获会整条丢掉，"上线后开始报错"这类线索将不可见。
+    change_events: List[Any] = field(default_factory=list)
 
     @property
     def top_clusters(self) -> List[ErrorCluster]:
