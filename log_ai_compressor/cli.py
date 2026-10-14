@@ -385,7 +385,7 @@ def cmd_verify(args) -> int:
                     line_start=int(e.get("line_start", 0)),
                     line_end=int(e.get("line_end", 0)),
                     kind=e.get("kind", "sample"),
-                    digest=e.get("digest_full") or e.get("digest", ""),
+                    digest=e.get("digest", ""),
                     note=e.get("note", "")))
         source_label = f"报告 {report_path.name}"
         if not refs:

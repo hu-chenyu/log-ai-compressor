@@ -548,8 +548,7 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
     # 放在精简模式的提前 return **之前**：证据是这个工具的存在理由，
     # 精简的是上下文与堆栈原文（几十 KB 级），证据是几十字节。让人
     # 为了省几十字节而丢掉可复核性，等于把产品价值砍掉。
-    d["evidence"] = [e.as_dict() | {"digest_full": e.digest}
-                     for e in getattr(c, "evidence", ())]
+    d["evidence"] = [e.as_dict() for e in getattr(c, "evidence", ())]
 
     # 修复缺陷R61：精简模式 —— 仅核心字段 + 实例行号列表（不含
     # 上下文/堆栈/样例原文），人可通读；full 模式供脚本二次处理

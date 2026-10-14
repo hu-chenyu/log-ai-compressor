@@ -262,6 +262,54 @@ class TestDeterminism:
 # ---------------------------------------------------------------------------
 # CLI / MCP 入口
 # ---------------------------------------------------------------------------
+class TestEvidenceSerialization:
+    """证据摘要的精度必须在所有出口一致。
+
+    同一份证据经 Web API 与 JSON 导出两条路出去，如果一个给 64 位、一个
+    给 16 位短摘要，字段名还都叫 `digest` —— 第三方拿 Web API 的数据去
+    跑 `verify` 必然失配，而症状是"哈希对不上"，极难反推到是序列化层
+    截断。这类不一致必须有测试钉死。
+    """
+
+    def _result(self, tmp_path):
+        p = tmp_path / "e.log"
+        p.write_text("2026-10-14 10:00:00 ERROR db refused\n"
+                     "2026-10-14 10:00:01 ERROR db refused\n", encoding="utf-8")
+        return S.analyze(paths=[str(p)], params={"context_lines": 2})
+
+    def test_web_api_and_json_export_agree(self, tmp_path):
+        r = self._result(tmp_path)
+        api_ev = S.result_to_dict(r, with_samples=False)["clusters"][0]["evidence"]
+        json_ev = json.loads(S.export_text(r, "json"))["clusters"][0]["evidence"]
+        assert api_ev and json_ev
+        assert api_ev[0]["digest"] == json_ev[0]["digest"]
+        assert len(api_ev[0]["digest"]) == 64, "下游必须拿到完整摘要才能自校验"
+
+    def test_verify_accepts_report_from_this_build(self, tmp_path):
+        """本版导出的报告必须能被本版 verify --report 读回并核对通过。"""
+        r = self._result(tmp_path)
+        rp = tmp_path / "r.json"
+        rp.write_text(S.export_text(r, "json"), encoding="utf-8")
+        from log_ai_compressor.cli import main
+        assert main(["verify", "--report", str(rp)]) == 0
+
+    def test_no_legacy_digest_full_field(self, tmp_path):
+        """digest_full 是被统一掉的历史字段，不该再出现。"""
+        r = self._result(tmp_path)
+        for c in json.loads(S.export_text(r, "json"))["clusters"]:
+            for e in c["evidence"]:
+                assert set(e) == {"evidence_id", "source", "line_start",
+                                  "line_end", "kind", "digest", "note"}
+
+    def test_short_digest_only_for_display(self, tmp_path):
+        """short_digest 仍可用于人读展示，但不得进入结构化输出。"""
+        r = self._result(tmp_path)
+        ref = r.clusters[0].primary_evidence
+        assert ref.short_digest == ref.digest[:16]
+        assert "short_digest" not in json.loads(S.export_text(r, "json"))[
+            "clusters"][0]["evidence"][0]
+
+
 class TestEntrypoints:
     def test_cli_verify_command(self, logfile, capsys):
         from log_ai_compressor.cli import main
@@ -303,7 +351,7 @@ class TestVerifySavedReport:
         evs = [e for c in payload["clusters"] for e in c.get("evidence", [])]
         assert evs
         for e in evs:
-            assert len(e["digest_full"]) == 64
+            assert len(e["digest"]) == 64
             assert e["source"] and e["line_start"] > 0
 
     def test_saved_report_verifies_when_log_unchanged(self, logfile, tmp_path,
