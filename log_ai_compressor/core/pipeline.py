@@ -76,7 +76,7 @@ def _in_tod_window(tod: float, start: Optional[float],
 
 def _attach_evidence(cluster, entry, recent: deque, replace: bool = False,
                      encoding: str = "") -> None:
-    """给簇挂上第一条证据引用（典型样例所在的原文行区间）。
+    """给簇挂上证据引用（典型样例所在的原文行区间）。
 
     为什么挂在聚类这一步而不是分析层：证据要的是**原始行**，
     而原始行只有摄入时还在窗口里 —— 分析层再来取就只剩剥过 ANSI 的
@@ -89,19 +89,31 @@ def _attach_evidence(cluster, entry, recent: deque, replace: bool = False,
         return
     start = entry.line_no
     end = entry.last_line_no or entry.line_no
-    raw_lines = [raw for (no, _text, raw) in recent
-                 if start <= no <= end]
-    if len(raw_lines) != end - start + 1:
+    # 修复缺陷#2：轮转合并（run_files）按全局行号计数，而引用指向的是
+    # 单个来源文件 —— 必须换算成**文件内**行号，否则第二个文件起的证据
+    # 全部行号错位，verify 回读必然 OUT_OF_RANGE。条目跨文件边界（堆栈
+    # 续进下一个轮转文件）时按（来源, 文件内连续行）拆成多条引用，
+    # 每条都能单独回读复核；绝不给一条指向错误行号的引用。
+    seg = [(src, fno, raw) for (no, fno, src, _text, raw) in recent
+           if start <= no <= end]
+    if len(seg) != end - start + 1:
         return
-    # 修复缺陷#1：encoding 随证据记录，verify 回读时复现同一解码路径
-    ref = make_ref(entry.source_file or "<粘贴文本>", start, end, raw_lines,
-                   kind=KIND_SAMPLE, note="典型样例原文", encoding=encoding)
+    runs: List[list] = []       # [source, 文件内起行, 文件内止行, [原始行...]]
+    for src, fno, raw in seg:
+        if runs and runs[-1][0] == src and fno == runs[-1][2] + 1:
+            runs[-1][2] = fno
+            runs[-1][3].append(raw)
+        else:
+            runs.append([src, fno, fno, [raw]])
+    refs = [make_ref(src or "<粘贴文本>", first, last, raws,
+                     kind=KIND_SAMPLE, note="典型样例原文", encoding=encoding)
+            for src, first, last, raws in runs]
     if replace:
         # 样例被升级成带堆栈的版本时，证据必须跟着换 —— 引用指向的行
         # 和实际展示的样例对不上，比没有引用更容易误导人。
-        cluster.evidence = [ref]
+        cluster.evidence = refs
     else:
-        cluster.evidence.append(ref)
+        cluster.evidence.extend(refs)
 
 
 # 优化缺陷R90：ANSI 转义序列（Jenkins AnsiColor 等彩色控制符，
@@ -363,6 +375,10 @@ class LogPipeline:
         cancelled = False
         limit_hit = False     # 优化缺陷R85：行数上限采样命中标记
         cur_source = str(stats.source)
+        # 修复缺陷#2：每个来源文件独立计行号（证据引用要指向文件内行号；
+        # 全局 line_no 只服务窗口/待补/进度等内部逻辑）。按来源名计数而非
+        # 切换即清零，是为了同一文件在合并序列里出现多次/交错时也不串号。
+        src_line_no: Dict[str, int] = {}
 
         def notify(phase: str) -> None:
             if self._progress_cb:
@@ -382,6 +398,8 @@ class LogPipeline:
                 else:
                     raw_line = item
                 line_no += 1
+                file_line_no = src_line_no.get(cur_source, 0) + 1
+                src_line_no[cur_source] = file_line_no
                 # 优化缺陷R99：原始字符数逐行累计（Token 压缩率原始侧）
                 stats.raw_chars += len(raw_line)
                 stripped = raw_line.rstrip("\r\n")
@@ -403,8 +421,10 @@ class LogPipeline:
                             if len(item_["lines"]) >= self._ctx:
                                 self._close_pending(item_, pending)
 
-                # 3) 前上下文滚动窗口
-                recent.append((line_no, line, stripped))
+                # 3) 前上下文滚动窗口（no=全局行号，fno=文件内行号，
+                #    src=来源 —— 证据引用按后者换算，修复缺陷#2）
+                recent.append((line_no, file_line_no, cur_source,
+                               line, stripped))
 
                 # 4) 取消轮询（独立间隔，开销极低）
                 if (self._cancel_event is not None
@@ -512,12 +532,12 @@ class LogPipeline:
         # 前上下文快照：按行号区间截取（排除条目自身的堆栈/折行）
         before: Optional[List[str]] = None
         if self._ctx > 0:
-            before = [text for (no, text, _raw) in recent
+            before = [text for (no, _fno, _src, text, _raw) in recent
                       if entry.line_no - self._ctx <= no < entry.line_no]
 
         cluster, replaced, instance = clusterer.add(entry, before)
         # 证据引用：把「这个簇是存在的」绑定到日志原文的具体行区间。
-        # 摘要取自文件原始文本（recent 的第三元），这样 verify 能重读
+        # 摘要取自文件原始文本（recent 里的原始行元），这样 verify 能重读
         # 原文核对 —— 这是结论可被独立复核的前提。
         _attach_evidence(cluster, entry, recent, replace=replaced,
                          encoding=stats.encoding or "")

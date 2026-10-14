@@ -294,6 +294,62 @@ class TestVerifyEncoding:
 
 
 # ---------------------------------------------------------------------------
+# B3 多文件（轮转合并）证据行号（修复缺陷#2）
+# ---------------------------------------------------------------------------
+class TestMultiFileEvidence:
+    """轮转合并分析的证据必须指向来源文件**内**的行号。
+
+    修复缺陷#2：合并流按全局行号计数，引用却带着单个文件名 —— 第二个
+    文件起的证据行号整体错位，verify 回读必然 OUT_OF_RANGE（整批误报
+    TAMPERED）。条目跨文件边界时按（来源, 文件内连续行）拆多条引用。
+    """
+
+    NOISE = ("2026-10-14 09:59:00 INFO [api] warmup 1\n"
+             "2026-10-14 09:59:01 INFO [api] warmup 2\n"
+             "2026-10-14 09:59:02 INFO [api] warmup 3\n")
+
+    def test_second_file_refs_point_inside_that_file(self, tmp_path):
+        """错误全在第二个文件：引用行号必须是文件内 1~4，不是全局 5~8。"""
+        f1 = tmp_path / "app.log.1"
+        f2 = tmp_path / "app.log.2"
+        f1.write_text(self.NOISE, encoding="utf-8")
+        f2.write_text(LOG, encoding="utf-8")
+        result = analyze_files([f1, f2], levels=["ERROR"], context_lines=3)
+        refs = [e for c in result.clusters for e in c.evidence]
+        assert refs, "第二个文件的错误应产生证据引用"
+        for r in refs:
+            assert r.source == str(f2)
+            assert 1 <= r.line_start <= r.line_end <= LOG.count("\n"), \
+                f"{r.citation()} 行号应落在 f2 文件内"
+        rep = verify_refs(refs)
+        assert rep.verdict == "VERIFIED", rep.details
+
+    def test_entry_spanning_file_boundary_gets_two_refs(self, tmp_path):
+        """条目跨轮转边界（堆栈续进下一文件）：拆成两条引用，各自可复核。"""
+        f1 = tmp_path / "app.log.1"
+        f2 = tmp_path / "app.log.2"
+        f1.write_text("2026-10-14 10:00:00 ERROR [order] request failed\n",
+                      encoding="utf-8")
+        f2.write_text("Caused by: java.sql.SQLException: connection refused\n",
+                      encoding="utf-8")
+        result = analyze_files([f1, f2], context_lines=3)
+        refs = [e for c in result.clusters for e in c.evidence]
+        assert refs
+        assert {r.source for r in refs} == {str(f1), str(f2)}
+        rep = verify_refs(refs)
+        assert rep.verdict == "VERIFIED", rep.details
+
+    def test_single_file_line_numbers_unchanged(self, logfile):
+        """单文件回归：文件内行号 == 全局行号，引用行为必须与从前一致。"""
+        result = analyze_files([logfile], context_lines=3)
+        c = next(x for x in result.clusters if "db" in (x.module or ""))
+        ref = c.primary_evidence
+        assert ref.source == str(logfile)
+        assert (ref.line_start, ref.line_end) == (2, 2)   # LOG 第 2 行
+        assert verify_refs([ref]).verdict == "VERIFIED"
+
+
+# ---------------------------------------------------------------------------
 # C 确定性
 # ---------------------------------------------------------------------------
 class TestDeterminism:
