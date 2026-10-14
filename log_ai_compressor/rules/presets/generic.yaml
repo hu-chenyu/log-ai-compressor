@@ -5,6 +5,20 @@ name: generic
 description: 通用系统/应用日志（程序运行日志、访问日志、审计日志等主流格式）
 
 patterns:
+  - name: android_logcat
+    # Android logcat：`MM-DD HH:MM:SS.mmm  PID TID L Tag: message`
+    #   12-17 19:31:36.263  1795  1825 I PowerManager_screenOn: DisplayPower...
+    #   12-17 19:42:44.457  3168  3307 W System.err: Caused by: com.huawei...: xxx
+    # 三个此前踩空的点（实测 Android_v1 召回率 0% 的根因之一）：
+    #   1. **无年份**，只有 MM-DD —— iso_* 系列全部要求 \d{4}- ，整行落无结构兜底
+    #   2. 级别是**单字母** —— {LEVEL} 展开的是词表（TRACE|DEBUG|INFO|...），
+    #      匹配不上，级别只能靠关键词猜（实测 `E PushLog2824:` 被猜成 INFO）
+    #   3. 时间戳与级别之间夹着 PID / TID 两个数字
+    # 结果：时间戳与模块全丢，指纹里带着整行时间戳噪声当消息的一部分。
+    # 放在 patterns 首位：它足够specific，先匹配可避免被后面的宽松模式抢走。
+    # 单字母级别交由 normalize_level 归一（D/I/W/E 正确）。
+    regex: '^(?P<timestamp>\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[.,]\d{3})\s+\d+\s+\d+\s+(?P<level>[VDIWEFS])\s+(?P<module>[^:\n]{1,64}?)\s*:\s*(?P<message>.*)$'
+
   - name: bracket_iso
     # [2026-09-04T06:12:12.244Z] error: xxx —— Jenkins/CI 等方括号 ISO
     # 时间戳（修复缺陷R59：此前 generic 无此模式，整文件落无结构

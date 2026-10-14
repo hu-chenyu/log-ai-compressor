@@ -85,6 +85,41 @@ COOC_MIN_HITS = 2              # 至少同现次数（1 次可能是巧合）
 _CAUSED_BY_RE = re.compile(r"^\s*Caused by\s*[:：]", re.IGNORECASE)
 # Caused by 行里**异常本体**（`Caused by: java.io.IOException: boom` → 异常文本）
 _CAUSED_BY_TEXT = re.compile(r"^\s*Caused by\s*[:：]\s*(.+?)\s*$", re.IGNORECASE)
+# **行内** Caused by —— 单行异常形态。
+#
+# Android logcat / 部分移动端与嵌入式日志把整个异常压成一行：
+#   `E PushLog2824: com.x.PushException: boom  Caused by: java.net.SocketException: abort`
+# 上面两条正则都锚在 ^，于是这种链**整条看不见** —— 工具只能判 INSUFFICIENT。
+# 实测代价：Android_v1 上 131 条真实 Caused-by 链，召回率 **0%**，而同一份代码
+# 在 Hadoop 上是 91.4%。不是判断变保守了，是压根没看见链。
+#
+# 收紧点（防止把无关条目抬成 CONFIRMED）：行内 `Caused by:` 之后必须紧跟一个
+# **异常类名**（Exception/Error/Throwable/Fault 结尾）。消息里随口一句
+# "caused by: user input" 不满足该形状，不会触发。
+_CAUSED_BY_INLINE = re.compile(
+    r"Caused by\s*[:：]\s*"
+    r"(?P<sig>[A-Za-z_][\w.$]*(?:Exception|Error|Throwable|Fault)[^\n]*)",
+    re.IGNORECASE)
+
+
+def _causal_lines(entry) -> list:
+    """条目内所有可能承载因果链的文本：堆栈行 + 消息本体。
+
+    多行堆栈把 Caused by 放在 stack 里；单行异常（logcat）它落在 message 里。
+    两者都要看，否则单行形态永远漏。
+    """
+    if entry is None:
+        return []
+    out = list(getattr(entry, "stack", None) or [])
+    msg = getattr(entry, "message", None)
+    if msg:
+        out.append(msg)
+    return out
+
+
+def _has_caused_by(lines: Sequence[str]) -> bool:
+    return any(_CAUSED_BY_RE.match(ln) or _CAUSED_BY_INLINE.search(ln)
+               for ln in lines or [])
 
 
 def deepest_caused_by(stack: Sequence[str]) -> str:
@@ -96,6 +131,9 @@ def deepest_caused_by(stack: Sequence[str]) -> str:
         Caused by: java.sql.SQLTimeoutException: ... <- 内层：因
         Caused by: java.lang.OutOfMemoryError: ...  <- 最内层：根因
 
+    同时认两种形态：行首 `Caused by:`（多行堆栈）与行内 `... Caused by: X`
+    （单行异常，见 `_CAUSED_BY_INLINE` 的说明）。
+
     历史实现把「时间上紧邻在它之前的另一个错误簇」当成因，那是**时间相邻性**
     —— 统计猜测，不是因果证明。现已改为只认本函数给出的链内证据。
     """
@@ -104,6 +142,10 @@ def deepest_caused_by(stack: Sequence[str]) -> str:
         m = _CAUSED_BY_TEXT.match(line)
         if m:
             deepest = m.group(1).strip()
+            continue
+        mi = _CAUSED_BY_INLINE.search(line)
+        if mi:
+            deepest = mi.group("sig").strip()
     return deepest
 
 _TRACEBACK_RE = re.compile(r"^Traceback \(|Backtrace:", re.IGNORECASE)
@@ -114,7 +156,8 @@ _RAISE_RE = re.compile(r"^\s*raise\s+\w")
 def _is_key_frame(line: str) -> bool:
     """关键因果行：Caused by / Traceback 头 / 异常摘要 / raise，永不折叠。"""
     return bool(
-        _CAUSED_BY_RE.match(line) or _TRACEBACK_RE.match(line)
+        _CAUSED_BY_RE.match(line) or _CAUSED_BY_INLINE.search(line)
+        or _TRACEBACK_RE.match(line)
         or _EXCEPTION_RE.match(line) or _RAISE_RE.match(line)
     )
 
@@ -554,7 +597,8 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
     #    根因是链上**最内层**的异常，证据就在这条目自己的堆栈里，
     #    与「时间上排在它前面的另一个错误」无关。
     for c in ordered:
-        deepest = deepest_caused_by(c.sample.entry.stack if c.sample else [])
+        deepest = deepest_caused_by(
+            _causal_lines(c.sample.entry) if c.sample else [])
         if not deepest:
             continue
         c.is_root_cause = True
@@ -565,8 +609,7 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
     # b) 跨簇时间相邻：保留为边（用于「谁衍生自谁」的展示），但**绝不升级
     #    成 CONFIRMED** —— 前一个错紧接着出现，只是统计线索。
     for c in ordered:
-        stack = c.sample.entry.stack if c.sample else []
-        if any(_CAUSED_BY_RE.match(line) for line in stack):
+        if _has_caused_by(_causal_lines(c.sample.entry) if c.sample else []):
             prior = _nearest_prior(ordered, c)
             if prior is not None:
                 _add(id(prior), id(c))
