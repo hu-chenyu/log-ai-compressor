@@ -435,6 +435,9 @@ def _cluster_detail_md(index: int, c: ErrorCluster,
         notes.append(f"异常：{_anomaly_label(c)}")
     if notes:
         out.append(f"- 智能分析：{'；'.join(notes)}")
+    if c.change_context:
+        # 变更时间窗关联：统计线索（先后共现），措辞刻意不写"因变更导致"
+        out.append(f"- 变更关联：{c.change_context}（时间共现线索，非因果结论）")
     # 优化缺陷R58：实例行号索引（板块勾选时随详情输出）
     if include_instances:
         inst_line = _instances_line(c)
@@ -511,6 +514,8 @@ def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
         out.append(f"{i}. [{' | '.join(tags)}] {c.summary}")
         if c.is_root_cause:
             out.append(f"   -> {c.root_cause_reason}")
+        if c.change_context:
+            out.append(f"   ~ 变更关联：{c.change_context}（时间共现线索，非因果）")
     # 优化缺陷R99：头部第二行插入 token 估算（粘贴投喂 AI 时自带
     # 压缩率；按最终文本长度估算，忽略本行自身的自引用误差）
     body = "\n".join(out)
@@ -534,6 +539,8 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
         "root_cause": c.is_root_cause,
         "root_cause_reason": c.root_cause_reason,
         "anomaly": c.anomaly,
+        # 变更时间窗关联（统计线索，非因果；措辞见 _attach_change_events）
+        "change_context": c.change_context,
         "first_line": c.first_line,
         "last_line": c.last_line,
         # 修复缺陷R60：时间戳 ISO 可读化（原 epoch 浮点人不可读）
@@ -713,6 +720,8 @@ def _cluster_detail_txt(index: int, c: ErrorCluster,
         notes.append(f"异常：{_anomaly_label(c)}")
     if notes:
         out.append(f"    智能分析：{'；'.join(notes)}")
+    if c.change_context:
+        out.append(f"    变更关联：{c.change_context}（时间共现线索，非因果结论）")
     if include_instances:
         inst_line = _instances_line(c)
         if inst_line:
@@ -927,6 +936,10 @@ def to_html(result: AnalysisResult, top_n: Optional[int] = None,
             if notes:
                 out.append(f'<p class="notes"><b>智能分析：</b>'
                            f"{esc('；'.join(notes))}</p>")
+            if c.change_context:
+                out.append(f'<p class="notes"><b>变更关联：</b>'
+                           f"{esc(c.change_context)}"
+                           "（时间共现线索，非因果结论）</p>")
             if "instances" in secs and c.instances:
                 refs = " ".join(f"L{inst.line_no}" for inst in c.instances)
                 out.append(f'<div class="insts"><b>实例行号'

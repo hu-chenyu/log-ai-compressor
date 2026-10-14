@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from log_ai_compressor.constants import (
     CASCADE_KEYWORDS,
+    CHANGE_WINDOW_SEC,
     LEVEL_WEIGHT,
     ROOT_CAUSE_KEYWORDS,
     is_noise_stack_frame,
@@ -182,6 +183,8 @@ def analyze_clusters(result: AnalysisResult, *,
         _build_timelines(clusters, out_edges, by_id)
         # 优化缺陷R78：关联叙事（依赖因果图与异常标注，须在优先级前）
         _attach_traces(clusters, result)
+        # 跨服务/时间窗/部署事件关联：错误首发 ← 变更事件时间窗
+        _attach_change_events(clusters, result)
         _compute_priorities(clusters, result.stats)
         _sort_clusters(clusters)
         # v2：证据充分性评估。必须放在 _mark_root_causes 之后（它读
@@ -406,6 +409,45 @@ def _attach_traces(clusters: List[ErrorCluster],
             c.traces = ids[:8]
     result.traces = chains[:20]
     return chains
+
+
+def _attach_change_events(clusters: List[ErrorCluster],
+                          result: AnalysisResult) -> None:
+    """错误簇 ↔ 部署/变更事件的时间窗关联（跨服务/时间窗/部署事件关联）。
+
+    规则：取错误簇**首发时间之前**最近的一个变更事件，若落在
+    CHANGE_WINDOW_SEC（30 分钟）窗口内，则写入一行叙事
+    `change_context`："错误首发在「发版/重启」后 Ns（来源:行）"。
+
+    与 traces 严格的同一语义边界 —— **只作统计线索，绝不提升置信
+    档位**：时间窗里的先后共现不证明"是变更引起的"，可能纯属巧合，
+    也可能二者同源于另一次故障。CONFIRMED 的唯一来源仍然是条目内
+    Caused-by 链。工具能诚实做到的是：把「上线后 N 秒开始报错」这个
+    值班排查时第一个会问的问题，连同原文出处一起摆上桌面。
+    """
+    events = sorted((e for e in (result.change_events or [])
+                     if e.ts is not None), key=lambda e: e.ts)
+    if not events:
+        return
+    for c in clusters:
+        if c.first_seen is None:
+            continue
+        # 首发之前最近的变更事件（events 已按时间排序，线性回扫即可；
+        # 变更有 MAX_CHANGE_EVENTS 上界，开销可忽略）
+        prev = None
+        for e in events:
+            if e.ts <= c.first_seen:
+                prev = e
+            else:
+                break
+        if prev is None:
+            continue
+        gap = c.first_seen - prev.ts
+        if gap > CHANGE_WINDOW_SEC:
+            continue
+        src = f"{prev.source}:L{prev.line_no}" if prev.source else f"L{prev.line_no}"
+        c.change_context = (f"错误首发在「{prev.text[:40]}」后 "
+                            f"{gap:.0f}s（{src}）")
 
 
 def _mark_causal_evidence(c: ErrorCluster, deepest: str) -> None:
