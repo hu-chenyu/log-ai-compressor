@@ -227,9 +227,12 @@ $ python scripts/eval_rootcause.py --repro
     精确率 100.0%   自信错误率 0.0%   召回率 100.0%
 ```
 
-**真实数据集也已补上一份**（网络恢复后测）：Loghub Hadoop 全量（61 个含
-真实异常栈的文件，5,921 条真实 `Caused by:` 链）—— 精确率 100.0%、
-自信错误率 0.0%、**严格口径召回率 91.4%**（5,410/5,921）：
+**真实数据集：两个，都测了**
+
+| 数据集 | 含链文件 | 真实链 | CONFIRMED | 精确率 | 自信错误率 | 召回率·严格 |
+|---|---:|---:|---:|---:|---:|---:|
+| Loghub **Hadoop** 全量 | 61 | **5,921** | 112 | 100.0% | 0.0% | **91.4%** |
+| Loghub **Android_v1**（切片） | 1 | 131 | 10 | 100.0% | 0.0% | **100.0%** |
 
 ```console
 $ python scripts/eval_rootcause.py
@@ -242,13 +245,21 @@ $ python scripts/eval_rootcause.py
 
 **两个召回口径必须说清差别**：宽松口径只要求"某个 CONFIRMED 簇的行区间盖住
 这条链"，严格口径还要求**该簇自身携带的证据文本点名了这条链的根因异常类名**。
-差 8.6 个点，是因为某文件 2,643 条链工具只给了 12 个 CONFIRMED 断言，
+Hadoop 上差 8.6 个点，是因为某文件 2,643 条链工具只给了 12 个 CONFIRMED 断言，
 12 个簇的行区间铺满全文件，宽松口径于是全数"认领"——**工具做了 38 次断言，
 宽松指标记了 5,836 次成功**。只报宽松口径会把指标变成近乎恒真的谓词。
 
-另有一条样本限制：5,838 / 5,921 条链来自 5 个巨型文件（单个最大 99,014 行），
-分母被超大文件主导。只测了 Hadoop 一个数据集，Android_v1 等其它含栈数据集
-已下载尚未跑数。复现语料与真实数据分开列，不混。详见
+**Android_v1 那一行是被真实 bug 逼出来的**：最初实测召回率是 **0%**（131 条真实
+链、CONFIRMED 零个）。根因是 Android logcat 把整个异常压在一行里
+（`E Tag: com.x.PushException: boom Caused by: java.net.SocketException: abort`），
+而本工具既没有 logcat 解析模式（无年份 / 单字母级别 / PID+TID），`Caused by` 的
+两条正则也都锚在行首 —— 链**整条看不见**。现在两种形态都认，
+见 [`docs/BENCHMARK.md`](docs/BENCHMARK.md) 与 CHANGELOG 2.3.0。
+
+**样本限制照实说**：Hadoop 的 5,838 / 5,921 条链来自 5 个巨型文件（单个最大
+99,014 行），分母被超大文件主导；Android 是**切片**测的（228,710 行 / 131 条链，
+链密度比原文件高 6.8 倍，见 BENCHMARK 的构造说明），全量 155 万行因聚类在
+高基数日志上慢约 30 倍而未跑。复现语料与真实数据分开列，不混。详见
 [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
 
 复现：`python scripts/benchmark_loghub.py` ·
@@ -326,7 +337,7 @@ log-ai-compressor verify app.log                        # 当场自检
 git clone https://github.com/hu-chenyu/log-ai-compressor.git
 cd log-ai-compressor
 pip install -r requirements-dev.txt
-python -m pytest                        # 891 个测试
+python -m pytest                        # 904 个测试
 python scripts/adversarial_eval.py      # 对抗性评测评分卡（CI 门禁之一）
 python scripts/benchmark_loghub.py      # 复现上面的实测表（需先下载数据集）
 ```
@@ -520,7 +531,7 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 | 指标 | 实测值 |
 | --- | --- |
 | 生产代码 | 8,906 行（28 个模块） |
-| 测试 | **891 用例**，覆盖率 **94%**，`ruff` 全绿 |
+| 测试 | **904 用例**，覆盖率 **94%**，`ruff` 全绿 |
 | CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**五道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 |
 | 内存 | 与日志总行数无关，只与错误种类数相关 |
 | 硬依赖 | 仅 PyYAML（web / mcp / ai 全部为可选 extra） |
@@ -642,7 +653,7 @@ pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证�
 | **比云平台更高的根因准确率** | 多模态根因需要指标 + 链路 + 拓扑。RCA100 数据集的结论是 **62.5% 的案例至少需要两种模态，31% 需要三种**。本工具只有日志一种 | Datadog / SLS / Dynatrace |
 | 持续监控与告警 | 没有 agent 埋点、没有时序库、没有告警队列。**这是有意的取舍** | 全部 APM 平台 |
 | 调用链追踪 | `traces` 是从日志里的 `trace_id` **重建**出来的，不是采集的。没有采样就没有精确耗时、没有 span 树 | Jaeger / Tempo |
-| 「召回率」实测 | 真实数据集（Loghub Hadoop 全量）已测：精确率 100%、自信错误率 0%、**严格口径召回率 91.4%**。但**只测了 Hadoop 一个数据集**，且 5,838/5,921 条链来自 5 个巨型文件，分母被超大文件主导；Android_v1 等含栈数据集已下载未跑数。未必可外推 | — |
+| 「召回率」实测 | 真实数据集测了两个：Hadoop 全量严格召回 **91.4%**、Android_v1 切片 **100.0%**，两者精确率 100%、自信错误率 0%。但 **Hadoop 的 5,838/5,921 条链来自 5 个巨型文件**（分母被超大文件主导），**Android 是切片测的**（全量 155 万行因高基数日志上聚类慢约 30 倍未跑）。未必可外推到其它日志形态 | — |
 | 隐私合规认证 | 它不处理合规，只保证「数据不出本机」 | — |
 
 还有一条是方法论上的硬约束，写在代码里而不只是文档里：
