@@ -151,7 +151,7 @@ $ python scripts/prove.py
         硬依赖 ['PyYAML>=6.0']
 
 尚无数据的主张（刻意列出，不藏）
-  ?  根因判定的召回率
+  ?  根因判定的召回率（真实数据集）
   ?  与云平台根因准确率的对比
 ```
 
@@ -208,11 +208,24 @@ HealthApp 的 `YYYYMMDD-HH:MM:SS:mmm|模块|ID|内容` 两种格式。在解析�
 被判成确定性根因，正是这个功能声称要消灭的「自信的错误答案」。已修复为
 只认条目内 `Caused by:` 链，并把根因指向链上最内层的异常。
 
-**召回率（真出现因果链时能否找到）仍无真实数据** —— 需要含真实异常栈的
-数据集，本机网络下反复下载失败。详见 [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
+**召回率（真出现因果链时能否找到）**：复现语料（自建故障场景 + 真实 Java
+异常/栈帧/日志格式，**非生产日志**）上已可复跑 —— 5 条因果链，精确率 100%、
+召回率 100%、自信错误率 0%，无链对照组 0 CONFIRMED：
+
+```console
+$ python scripts/eval_rootcause.py --repro
+  合计：真实因果链 5，CONFIRMED 5
+    精确率 100.0%   自信错误率 0.0%   召回率 100.0%
+```
+
+**但真实数据集上的召回率仍无数字** —— 需要含真实异常栈的数据集
+（Loghub Android_v1 / Hadoop 全量，托管 zenodo），本机网络下反复下载失败。
+复现语料的数字**不能**冒充真实数据集结论，两者分开列。详见
+[`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
 
 复现：`python scripts/benchmark_loghub.py` ·
 `python scripts/eval_rootcause.py <日志路径>` ·
+`python scripts/eval_rootcause.py --repro` ·
 完整方法学、对照组公平性说明与「本文不能证明什么」见 [`docs/BENCHMARK.md`](docs/BENCHMARK.md)
 
 ---
