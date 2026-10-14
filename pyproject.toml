@@ -71,6 +71,10 @@ Repository = "https://github.com/hu-chenyu/log-ai-compressor"
 include = ["log_ai_compressor*"]
 
 [tool.setuptools.package-data]
+# PEP 561 标记：全项目写了完整类型注解（from __future__ import annotations
+# + Optional[...]），但没有这个文件，下游 mypy / IDE 拿不到任何类型信息，
+# 注解就只是给人看的注释。空文件即可，内容由 mypy 从源码读取。
+"log_ai_compressor" = ["py.typed"]
 "log_ai_compressor.rules" = ["presets/*.yaml"]
 # 前端是零构建的静态资源，必须打进包里，否则 pip 安装后界面 404
 "log_ai_compressor.web" = ["static/*.html", "static/*.css", "static/*.js"]

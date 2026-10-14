@@ -66,13 +66,22 @@ class EvidenceRef:
         return self.digest[:_DIGEST_LEN]
 
     def as_dict(self) -> Dict[str, Any]:
+        """对外表示。
+
+        `digest` 一律给**完整** sha256。之前这里截断到 16 位、短摘要只进
+        报告正文，导致同一份证据经 Web API 与 JSON 导出两条路拿到不同精度
+        的摘要 —— 第三方接入方拿 Web API 的结果去校验必然失配，而
+        `verify --report` 只吃完整摘要。这类不一致极难排查（两边字段名
+        都叫 digest，值格式却不同），所以序列化层不做截断，截断只发生在
+        人读的展示路径（见 short_digest）。
+        """
         return {
             "evidence_id": self.evidence_id,
             "source": self.source,
             "line_start": self.line_start,
             "line_end": self.line_end,
             "kind": self.kind,
-            "digest": self.short_digest,
+            "digest": self.digest,
             "note": self.note,
         }
 
