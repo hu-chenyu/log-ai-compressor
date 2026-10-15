@@ -36,9 +36,11 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from log_ai_compressor.core.encoding import detect_encoding, open_text_stream
 
 # 证据类型（决定报告与 UI 怎么呈现）
+# 说明：此前这里还有一条 KIND_INSTANCE = "instance"，定义后全项目零使用
+# （find_unused.py 实测），已删。留着它等于宣称「我们支持按实例取证」，
+# 而实际上没有任何代码产出这种引用 —— 一个说谎的常量比没有更糟。
 KIND_SAMPLE = "sample"        # 簇的典型样例原文
 KIND_CAUSED_BY = "caused_by"  # 驱动 CONFIRMED 判定的 Caused by 行
-KIND_INSTANCE = "instance"    # 某个具体实例
 
 _ID_LEN = 12                  # evidence_id 长度：够短好引用，够长不撞
 _DIGEST_LEN = 16              # 摘要展示长度（完整 sha256 存全文）

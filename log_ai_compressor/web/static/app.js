@@ -720,6 +720,14 @@ function renderDetail(c) {
     ['时间范围', `${c.first_seen_text || '—'} ~ ${c.last_seen_text || '—'}`],
   ];
   if (c.is_root_cause) kv.push(['根因判定', c.root_cause_reason || '是']);
+  // 簇内全部 Caused-by 内层因（v2.7.0）：外层消息相同的错误聚成一簇时，
+  // 内层抛的东西可以不一样。只显示「根因判定」那一条会让用户以为这个簇
+  // 只有一个因 —— v2.6.0 正是这样把另一个同样确凿的内层因整个吞掉的。
+  const _vars = (c.root_cause_variants || []).filter(v => !String(v.reason).startsWith('（'));
+  if (_vars.length > 1) {
+    kv.push(['簇内全部内层因', _vars.map((v, i) =>
+      `${i === 0 ? '' : '、'}${v.reason} × ${v.count}`).join('')]);
+  }
   if (c.anomaly) kv.push(['异常标记', ANOMALY_LABEL[c.anomaly] || c.anomaly]);
   if (c.related_clusters?.length) kv.push(['相关簇', c.related_clusters.join(', ')]);
   parts.push(`<div class="kv">${kv.map(([k, v]) =>

@@ -7,8 +7,7 @@ Android logcat 把整个异常压在一行里：
 
     12-17 19:42:44.457  3168  3307 E PushErr: com.x.PushException: boom  Caused by: java.net.SocketException: abort
 
-此前有两处让它完全失效，导致实测 **Android_v1 上 131 条真实链的召回率是 0%**
-（同一份代码在 Hadoop 上是 91.4%）：
+此前有两处让它完全失效，导致实测 **Android_v1 上 131 条真实链的召回率是 0%**：
 
 1. generic 规则没有 logcat 模式 —— 无年份、级别是单字母、还夹着 PID/TID，
    整行落进无结构兜底，时间戳/模块全丢、级别靠关键词猜

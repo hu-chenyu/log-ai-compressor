@@ -291,5 +291,6 @@ def parse_line(line: str) -> Optional[ParsedFields]:
     return None
 
 
-#: 报告/证据里用的可读名（不是所有日志都有全部字段）
-SUPPORTED_FORMATS = ("json-lines", "logfmt")
+# 说明：此处原有 SUPPORTED_FORMATS = ("json-lines", "logfmt")，定义后全项目
+# 零引用（find_unused.py 实测），支持格式在 README / SKILL.md 里以文字说明，
+# 已删。两种格式仍由本模块的 parse_line 自动识别，功能未减。

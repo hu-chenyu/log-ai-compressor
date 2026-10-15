@@ -167,12 +167,8 @@ def build_traces(entries: Iterable[Any],
     chains.sort(key=lambda c: (not c.cross_service, -len(c.steps)))
     return chains
 
-
-def trace_summary(chains: List[TraceChain]) -> Dict[str, Any]:
-    """链路汇总（写进证据评估的 inputs_used 与报告）。"""
-    cross = [c for c in chains if c.cross_service]
-    return {
-        "chains": len(chains),
-        "cross_service_chains": len(cross),
-        "services_involved": len({s for c in cross for s in c.services}),
-    }
+# 说明：此处原有 trace_summary(chains)，docstring 写着「写进证据评估的
+# inputs_used 与报告」—— 但它从来没被调用过，而它算的那三个数在
+# analysis.assess_evidence 里早就**内联**算好了（链数 / 跨服务链数）。
+# 同一个口径存在两份实现，其中一份还是死的，正是「派生值有两个来源」这类
+# 隐患的温床。已删；要用就调 analysis 里那一份。
