@@ -520,6 +520,20 @@ foreach ($n in "Proxifier","Apache","Zookeeper","HealthApp","OpenStack") {
   Expand-Archive "data/loghub/$n.zip" "data/loghub/$n"
 }
 
+# 1b. Android_v1 在另一个记录里 —— Loghub 1.0，不是 2.0
+#     记录号 8275861（Loghub-2.0）里【没有】Android_v1，只有 Android_v2。
+#     完整文件（23.7 MB / 解压 183 MB / 1,556,425 行）在 Loghub 1.0 的 8196385：
+Invoke-WebRequest "https://zenodo.org/api/records/8196385/files/Android_v1.zip/content" `
+  -OutFile "data/loghub/Android_v1.zip"
+Expand-Archive "data/loghub/Android_v1.zip" "data/loghub_full/Android" -Force
+
+# ⚠️ 这条链路在部分网络环境下会反复中途断流。下到一半的 zip 有合法
+#    PK\x03\x04 头但没有 PK\x05\x06 中央目录，标准工具一律报
+#    「找不到中央目录结尾记录」。判断方法：
+#    [System.IO.Compression.ZipFile]::OpenRead($path)  能打开 = 完整
+#    逐次重下无效时用 HTTP Range 断点续传，不要反复从头重来。
+```
+
 # 2. 装对照工具（可选，不装则跳过 Drain3）
 pip install drain3
 

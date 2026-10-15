@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "log-ai-compressor"
-version = "2.3.0"
-description = "本机日志取证层：结论带行号出处、可重读原文自校验；拿不出因果链就说证据不足。零出网，附 MCP Server / Agent Skill。"
+version = "2.4.0"
+description = "本机日志取证层：每条结论带行号出处与原文 sha256，可脱离本工具自校验；拿不出因果链就说证据不足并列出还缺什么。零出网。附 Loghub 2.0 可复现基准（对照 Drain3 / tail / grep）。"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["log", "analyzer", "llm", "compressor", "troubleshooting",
-            "mcp", "root-cause", "local-first"]
+            "benchmark", "reproducible", "root-cause", "local-first",
+            "forensics", "mcp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
