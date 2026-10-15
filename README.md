@@ -405,7 +405,7 @@ log-ai-compressor verify app.log                        # 当场自检
 git clone https://github.com/hu-chenyu/log-ai-compressor.git
 cd log-ai-compressor
 pip install -r requirements-dev.txt
-python -m pytest                        # 904 个测试
+python -m pytest                        # 946 个测试
 python scripts/adversarial_eval.py      # 对抗性评测评分卡（CI 门禁之一）
 python scripts/benchmark_loghub.py      # 复现上面的实测表（需先下载数据集）
 ```
@@ -599,8 +599,8 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 | 指标 | 实测值 |
 | --- | --- |
 | 生产代码 | 8,906 行（28 个模块） |
-| 测试 | **904 用例**，覆盖率 **94%**，`ruff` 全绿 |
-| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**五道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 |
+| 测试 | **946 用例**，覆盖率 **95%**，`ruff` 全绿 |
+| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**六道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 / **构建可复现性** |
 | 内存 | 与日志总行数无关，只与错误种类数相关 |
 | 硬依赖 | 仅 PyYAML（web / mcp / ai 全部为可选 extra） |
 
@@ -703,8 +703,8 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 
 CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
 `ubuntu-3.12`（最常用版本）、`windows-3.12`（行尾 / shell / 路径处理与
-unix 不同，且 `start.bat` 是 Windows 一等入口）。**五道门禁**：ruff →
-pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证脚本。
+unix 不同，且 `start.bat` 是 Windows 一等入口）。**六道门禁**：ruff →
+pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证脚本 → 构建可复现性。
 
 ### 启动脚本的硬约束
 

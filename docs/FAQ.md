@@ -162,7 +162,7 @@ LLMLingua（Microsoft Research, arXiv:2310.05736）能把 prompt 压 20 倍，
 - Android_v1 在 v2.4.0 已补跑全量（1,555,005 行 / 131 链，严格召回 100%，密度与原文件一致）；但 **Hadoop 那份数据的来源至今查不到公开出处**，见 BENCHMARK 的复核记录
 
 有的是：
-- 218 笔提交、904 个测试、覆盖率 94%、测试/主代码行数比 0.94
+- 218 笔提交、946 个测试、覆盖率 95%、测试/主代码行数比 0.94
 - 五道 CI 门禁（ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本）
 - 全历史 0 处密钥泄露
 - 每个对外数字都有复现命令
@@ -203,7 +203,7 @@ LLMLingua（Microsoft Research, arXiv:2310.05736）能把 prompt 压 20 倍，
 ```bash
 python scripts/prove.py            # 自证脚本：逐条核对本文每个对外主张，列出尚无数据的主张
 python scripts/adversarial_eval.py # 对抗评测：10 个专门设计来误导本工具的场景
-python -m pytest -q                # 904 个测试
+python -m pytest -q                # 946 个测试
 ```
 
 `prove.py` 的设计原则是：**尚无数据的主张要显式列出来，不藏**。
@@ -233,6 +233,42 @@ python -m pytest -q                # 904 个测试
 对照组：Android_v1 的数字在 v2.4.0 已经补齐为**全量可复现**
 （1,555,005 行 / 131 链，严格召回 100%，从下载到评测每一步都走得通），
 详见 [`BENCHMARK.md`](BENCHMARK.md) 的复现命令。
+
+---
+
+## Q11 一个簇里有好几个不同的根因时，你报哪一个？（已知缺陷，不藏）
+
+**报样例那一个，其余静默丢掉。** 这是我写健壮性测试时用最小用例复现出来的。
+
+最小复现（两条链，外层消息一词之差，聚类判为同一簇）：
+
+```
+2024-01-15 10:00:00 ERROR java.lang.RuntimeException: a failed
+Caused by: com.acme.First: root of it
+2024-01-15 10:00:01 ERROR java.lang.RuntimeException: b failed
+Caused by: com.acme.Second: root of it
+```
+
+结果：`count=2`、两个实例各带一条 Caused-by，但
+`root_cause_reason` 只写了 `com.acme.First`。**`com.acme.Second` 的链没人提。**
+
+**为什么这影响「严格召回 100%」的可信度**：Android 的 131 条链分布在 8 个根因类上，
+其中 2 个类只出现 1 次。这些链若恰好落在别人的簇里，就不会被点名 ——
+「131/131 全认领」里有多少是模型的功劳、多少是这个结构的运气，目前分不开。
+
+**为什么我不打算随手修**：CONFIRMED 的定义就是「根因来自条目内的 Caused-by 链」，
+而簇是按**外层消息相似度**划分的。一个簇里出现多个不同内层因时，报哪一个
+本身就是设计问题：报最多的？全列出来？按实例拆簇？三种改法都会动到本项目
+最核心的不变量，代价远超「补个 bug」。
+
+**当前状态**：`tests/test_orphan_cause_robustness.py` 里两条用例标了
+`xfail(strict=True)` —— 现在是坏的，将来若有人修了它，**用例会转为失败**并强制
+我们回来更新这里的口径说明与 BENCHMARK，而不是悄悄变成"已修"。
+
+**怎么自己验**：
+```bash
+python -m pytest tests/test_orphan_cause_robustness.py -rx
+```
 
 ---
 
