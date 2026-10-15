@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,9 +27,20 @@ HEAD = "2024-01-15 10:00:00"
 
 
 def _run_module(*argv: str) -> subprocess.CompletedProcess:
+    """跑一次 `python -m log_ai_compressor`。
+
+    **必须给子进程显式指定 UTF-8 输出。** 这不是洁癖：Windows CI runner 的
+    控制台是 cp1252，子进程会把中文按 cp1252 写出来，而这里按 UTF-8 解码 ——
+    于是「错误：日志文件不存在」变成乱码，下面那条断言中文的用例在 Windows
+    上红、在 Ubuntu 上绿。本地默认编码是 UTF-8，所以本地怎么跑都发现不了。
+    **跨平台测试失败的头号原因，就是两边默认编码不同。**
+    """
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    env.pop("PYTHONUTF8", None)
     return subprocess.run(
         [sys.executable, "-m", "log_ai_compressor", *argv],
-        capture_output=True, text=True, encoding="utf-8", timeout=120,
+        capture_output=True, text=True, encoding="utf-8",
+        env=env, timeout=120,
     )
 
 
