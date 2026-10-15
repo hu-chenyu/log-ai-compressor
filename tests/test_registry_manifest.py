@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -122,12 +123,68 @@ class TestServerJson:
         assert pkg["registryBaseUrl"] == "https://pypi.org"
         assert pkg["identifier"] == "log-ai-compressor"
 
-    def test_transport_is_stdio_and_version_matches_package(self):
-        """version 必须与 PyPI 上真实存在的版本一致，否则验证抓不到包。"""
+    def test_transport_is_stdio(self):
+        """Registry 只能拉起 stdio 服务器。"""
         data = json.loads(SERVER_JSON.read_text(encoding="utf-8"))
         pkg = data["packages"][0]
         assert pkg["transport"]["type"] == "stdio"
-        assert data["version"] == pkg["version"]
+
+    def test_version_matches_the_shipped_package(self):
+        """version 必须与**实际发布的那个包**一致，否则验证抓不到包。
+
+        此前这里只断言「同一文件里两个字段互相相等」（`data["version"] ==
+        pkg["version"]`），docstring 却写着「与 PyPI 上真实存在的版本一致」。
+        断言比承诺弱，于是 2.0.1 这个错值从 v2.1.0 一路绿灯放到 v2.7.0 ——
+        测试在跑、名字很像、实际上什么都没守住。
+        **断言要比 docstring 强，否则它只是一个仪式。**
+        """
+        data = json.loads(SERVER_JSON.read_text(encoding="utf-8"))
+        declared = tomllib.loads(
+            (BASE / "pyproject.toml").read_text(encoding="utf-8")
+        )["project"]["version"]
+        assert data["version"] == declared, (
+            f"server.json 写 {data['version']}，包版本是 {declared}；"
+            "Registry 会按清单里的版本去抓包，抓不到就收不了录")
+        assert data["packages"][0]["version"] == declared
+
+    def test_declared_version_matches_installed_package(self):
+        """再钉一层：清单里的版本必须等于运行时 import 到的版本。
+
+        前两条比的都是**文本文件**，万一有人改了 pyproject 却没重新构建，
+        文本仍自洽但发出去的包是旧的。这条把「装的到底是不是这个版本」
+        变成可执行事实。
+        """
+        data = json.loads(SERVER_JSON.read_text(encoding="utf-8"))
+        import log_ai_compressor
+        assert data["version"] == log_ai_compressor.__version__
+
+    def test_tool_list_matches_the_registered_tools(self):
+        """publisher-provided.tools 必须与实际注册的工具**完全一致**。
+
+        漏一个，用户在 Registry 页面上就看不到它存在 —— 而这恰恰发生在
+        `verify_evidence` 上：它是本项目唯一能让 Agent 自证「日志没被改过」
+        的工具，却因为不在清单里而在 Registry 上隐身了。
+        """
+        pytest.importorskip("mcp", reason="需要 mcp SDK")
+        import importlib
+        mod = importlib.import_module("log_ai_compressor.mcp.server")
+        registered = {t.name for t in mod.server._tool_manager.list_tools()}
+        data = json.loads(SERVER_JSON.read_text(encoding="utf-8"))
+        declared = {t["name"] for t in
+                    data["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["tools"]}
+        assert registered, "没取到已注册工具，本用例就失去意义了"
+        assert declared == registered, (
+            f"清单缺 {sorted(registered - declared)}；"
+            f"清单多 {sorted(declared - registered)}")
+
+    def test_verify_evidence_is_declared(self):
+        """单独钉住这个工具 —— 它是对外信任的锚点，不该是隐形功能。"""
+        data = json.loads(SERVER_JSON.read_text(encoding="utf-8"))
+        names = {t["name"] for t in
+                 data["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]["tools"]}
+        assert "verify_evidence" in names, (
+            "verify_evidence 是唯一能让调用方自证日志未被篡改的工具，"
+            "不登记等于对用户隐藏它存在")
 
     def test_runtime_arguments_are_objects_not_strings(self):
         """runtimeArguments 的元素必须是 Argument 对象。

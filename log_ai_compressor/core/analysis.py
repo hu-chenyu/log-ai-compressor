@@ -890,7 +890,14 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
 
     if confirmed:
         verdict = CONF_CONFIRMED
-        top = confirmed[0]
+        # 必须与 candidates 用**同一套排序**（v2.8.0 修）。
+        # 此前这里写的是 `confirmed[0]` —— 直接取入参顺序的第一个，于是
+        # headline 随调用方的簇顺序变化，而 candidates 恒定：两个字段
+        # 在同一份报告里自相矛盾（headline 点名 A，候选清单首位是 B）。
+        # 目前 `analyze_clusters` 恰好先排序再调用，所以端到端看不出来；
+        # 但 assess_evidence 是**公开函数**（tests 直接调），一旦新增调用
+        # 点、或调整两处调用的先后，就会静默退化成「点名了另一个簇」。
+        top = max(confirmed, key=lambda c: (c.priority, c.count))
         headline = (f"已定位根因：{top.summary[:60]}"
                     f"（Caused-by 因果链直连，见第 {top.first_line} 行）")
         can_conclude = True

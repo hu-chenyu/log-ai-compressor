@@ -3,7 +3,7 @@
   "name": "io.github.hu-chenyu/log-ai-compressor",
   "title": "log-ai-compressor",
   "description": "Local log forensics: compress logs into citable evidence with root-cause confidence tiers.",
-  "version": "2.0.1",
+  "version": "2.8.0",
   "repository": {
     "url": "https://github.com/hu-chenyu/log-ai-compressor",
     "source": "github"
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "log-ai-compressor",
-      "version": "2.0.1",
+      "version": "2.8.0",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
@@ -61,6 +61,10 @@
         {
           "name": "list_rules",
           "description": "List built-in log parsing rule templates and the log formats each targets. Check this first when a log parses badly."
+        },
+        {
+          "name": "verify_evidence",
+          "description": "Re-read the source log and re-verify every evidence reference in a report: file, line range, sha256 digest. Returns VERIFIED / TAMPERED. This is the tool's trust anchor - the agent does not need to believe the analysis, it can re-run this step itself."
         },
         {
           "name": "check_environment",

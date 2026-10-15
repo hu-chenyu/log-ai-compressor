@@ -268,26 +268,54 @@ def verify_refs(refs: Iterable[EvidenceRef]) -> VerifyReport:
 # ---------------------------------------------------------------------------
 # 确定性指纹
 # ---------------------------------------------------------------------------
-# 不参与指纹的字段：它们每次运行都不同，但不影响任何结论
-_VOLATILE_STATS = frozenset({
-    "duration", "lines_per_second", "analysis_cost",
-    "duration_sec", "lines_per_second", "analysis_cost_sec",
-    "determinism_fingerprint",        # 指纹自身不能参与自己的计算
-})
+# 不参与指纹的字段（口径记录在这里，**不另设常量**）：耗时与速率这类每次
+# 运行都不同的数字，以及指纹自身。此前有一个 `_VOLATILE_STATS` 集合写着
+# 这份名单，但实现是就地逐字段重建 stats 字典、从不由那个集合推导 ——
+# 于是它变成一个「改了没用」的死常量，而注释会让读代码的人以为改它就能
+# 控制指纹口径。名单写在下面 docstring 里，改口径时看得到、也改得动。
+
+# 结论字段白名单：簇上**会进入报告、且影响判断**的字段。
+# 新增结论字段时必须同步加进这里，否则指纹会看不见这次改动 —— v2.7.0 就
+# 漏了 root_cause_variants，于是「把变体改回只报主因」这种回归指纹纹丝不动，
+# 而指纹恰恰是对外公开的「同输入同结论」唯一证明。
+_FINGERPRINT_CLUSTER_FIELDS = (
+    "cluster_id", "level", "module", "summary", "count", "priority",
+    "priority_label", "is_root_cause", "root_cause_confidence",
+    "root_cause_reason", "anomaly", "change_context",
+    "root_cause_variants", "cause_overflow", "root_timeline",
+    "related_clusters", "traces", "first_seen", "last_seen",
+    "evidence_ids",
+)
+
+
+def _fingerprint_variants(cluster) -> tuple:
+    """簇内全部内层因的稳定摘要（原因 / 次数 / 各自的首处证据引用）。"""
+    return tuple(
+        (v.reason, v.count, v.evidence.evidence_id if v.evidence else "")
+        for v in (getattr(cluster, "root_cause_variants", None) or ())
+    )
 
 
 def result_fingerprint(result) -> str:
     """一次分析的"结论指纹"：同输入必须逐字节相同。
 
-    只覆盖**会影响判断**的部分：级别、摘要、次数、优先级、根因判定与
-    置信档位、证据引用、时间戳。耗时与速率这类每次都不同的数字被排除。
+    覆盖**会影响判断**的部分：级别、摘要、次数、优先级、根因判定与置信档位、
+    **簇内全部内层因**、根因时间线、关联簇、调用链、证据引用、时间戳。
+    耗时与速率这类每次都不同的数字被排除（在下面的 stats 字面量里根本不取）。
 
     这个数可以直接公开（"确定性指纹一致性 100%"）：把同一份日志跑两遍，
     比对指纹是否相等 —— 一个不需要相信厂商就能做的验证。
 
+    反过来说，**它也是承诺**：凡是会出现在报告里、且影响判断的字段，都必须
+    进来。漏掉一个字段，就等于给那种"悄悄改回旧行为"的回归发了一张通行证
+    —— v2.7.0 的 `root_cause_variants` 就是这么漏的。
+
     注意这里**不能**经由 service.result_to_dict 取统计（那条路上挂着
     本函数，会无限递归）。统计口径在此处就地重建，且刻意只取与结论
     相关的字段。
+
+    集合型字段（`related_clusters` / `traces`）按**排序后的元组**入指纹：
+    它们语义上是集合，而集合的存储顺序不该让同一份日志的指纹漂移。
     """
     s = result.stats
     stats = {
@@ -307,6 +335,13 @@ def result_fingerprint(result) -> str:
             c.root_cause_confidence, c.root_cause_reason, c.anomaly,
             # 变更时间窗关联是结论的一部分，必须进指纹（确定性口径）
             c.change_context,
+            # v2.7.0 补：以下五个此前不在指纹里，于是改它们指纹纹丝不动。
+            # 每一条都会出现在报告里、且都会改变用户的结论，必须进。
+            _fingerprint_variants(c),
+            c.cause_overflow,
+            c.root_timeline,
+            tuple(sorted(c.related_clusters)),
+            tuple(sorted(c.traces)),
             round(c.first_seen, 3) if c.first_seen is not None else None,
             round(c.last_seen, 3) if c.last_seen is not None else None,
             tuple(e.evidence_id for e in c.evidence),

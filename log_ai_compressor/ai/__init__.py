@@ -65,17 +65,13 @@ def explain_cluster(result, cluster_id: int, *,
     """针对单个错误簇生成 AI 解读（带典型样例与降噪堆栈）。"""
     cfg = cfg or _require_config()
     from log_ai_compressor import service as S
-    from log_ai_compressor.core.analysis import cooccurring_clusters
     target = next((c for c in result.clusters if c.cluster_id == cluster_id), None)
     if target is None:
         raise LLMError(f"错误簇 {cluster_id} 不存在")
     ctx = {
         "stats": S.result_to_dict(result, with_samples=False)["stats"],
         "cluster": S.cluster_to_dict(target, full=True),
-        "cooccurring": [
-            {"id": o.cluster_id, "hits": hits, "summary": o.summary}
-            for o, hits in cooccurring_clusters(target, result.clusters)
-        ],
+        "cooccurring": S.cooccurring_to_dicts(target, result.clusters),
     }
     prompt = build_cluster_prompt(ctx, question=question)
     return chat(prompt, cfg=cfg)

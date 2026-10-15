@@ -156,6 +156,52 @@ def claim_structured() -> dict:
                  f"普通文本误判={not plain_ok}")
 
 
+def _code_metrics() -> dict:
+    """包内代码规模（口径：log_ai_compressor/**/*.py 的非空非注释行）。
+
+    口径必须写死在这里，因为 README 与 prove.py 要用**同一个**定义 ——
+    「多少行代码」换一个算法能从 7,486 变成 9,538，中间还隔着注释与空行。
+    两边各算一次必然漂移。
+    """
+    files = sorted((ROOT / "log_ai_compressor").rglob("*.py"))
+    lines = 0
+    for p in files:
+        for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = raw.strip()
+            if s and not s.startswith("#"):
+                lines += 1
+    return {"modules": len(files), "lines": lines}
+
+
+def claim_readme_metrics() -> dict:
+    """README 里的工程指标必须与仓库实际一致（v2.8.0 新增门禁）。
+
+    为什么单列一条：README 曾长期写着「生产代码 8,906 行（28 个模块）」，
+    而实测是 7,486 行 / 32 个 .py —— 差了一整个版本周期的改动量，
+    **六道自证门禁没有一项拦它**。一个专门讲「不必相信作者，自己跑」
+    的项目，README 里的数字却没有对应的可执行检查，这本身就是矛盾。
+
+    加了这条之后，README 数字再漂移就不是「读者自己发现」，而是 CI 变红。
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    m = _code_metrics()
+    row = next((ln for ln in readme.splitlines()
+                if ln.strip().startswith("| 生产代码")), "")
+    import re
+    got = re.search(r"([\d,]+)\s*行（(\d+)\s*个模块）", row)
+    if not got:
+        return claim("README 工程指标与仓库一致", False,
+                     f"README 里找不到「生产代码」那一行：{row!r}")
+    claimed_lines = int(got.group(1).replace(",", ""))
+    claimed_modules = int(got.group(2))
+    ok = (claimed_lines == m["lines"] and claimed_modules == m["modules"])
+    return claim(
+        "README 工程指标与仓库一致", ok,
+        f"README 写 {claimed_lines} 行 / {claimed_modules} 个模块；"
+        f"实测 {m['lines']} 行 / {m['modules']} 个模块"
+        f"（口径：log_ai_compressor/**/*.py 非空非注释行）")
+
+
 def claim_optdeps() -> dict:
     """硬依赖必须只有 PyYAML —— 轻量是 PyPI 生态的硬通货。"""
     try:
@@ -212,6 +258,7 @@ def gather(path: Path) -> dict:
         claim_scorecard(),
         claim_structured(),
         claim_optdeps(),
+        claim_readme_metrics(),
     ]
     return {
         "subject": str(path.name),
