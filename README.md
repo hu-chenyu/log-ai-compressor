@@ -613,7 +613,7 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 | --- | --- |
 | 生产代码 | 7,534 行（32 个模块） |
 | 测试 | **1,001 用例**，覆盖率 **96%**，`ruff` 全绿 |
-| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**七道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **README 指标一致** |
+| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**六道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性。其中自证脚本现已断言 **9 条**主张，含「README 工程指标与架构树必须与仓库一致」 |
 | 内存 | 与日志总行数无关，只与错误种类数相关 |
 | 硬依赖 | 仅 PyYAML（web / mcp / ai 全部为可选 extra） |
 
@@ -631,7 +631,9 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 
 ```
 log_ai_compressor/
+├── constants.py              # 全局常量（时间上限 / 内存有界参数 / 展示上限）
 ├── service.py               # 共享服务层：参数校验 + JSON 序列化 + 导出门面
+├── __main__.py              # `python -m log_ai_compressor` 入口（退出码即契约）
 ├── rules/                   # 可插拔解析规则引擎（YAML 驱动）
 │   ├── engine.py            #   规则加载/编译/占位符展开
 │   └── presets/             #   generic / embedded / jenkins 三套模板
@@ -640,6 +642,7 @@ log_ai_compressor/
 │   ├── encoding.py          #   编码探测（BOM/严格解码验证/截断容忍）
 │   ├── structured.py        #   结构化日志原生解析（JSON Lines / logfmt）
 │   ├── parser.py            #   增量解析器（多行聚合：折行/堆栈/Caused-by）
+│   ├── causal.py            #   Caused-by 因果链识别原语（摄入层与分析层共用）
 │   ├── filters.py           #   级别 + 关键词准入过滤
 │   ├── clustering.py        #   模糊指纹聚类（三级匹配）
 │   ├── analysis.py          #   根因判定/异常检测/优先级/堆栈降噪/证据评估
@@ -716,9 +719,10 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 
 CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
 `ubuntu-3.12`（最常用版本）、`windows-3.12`（行尾 / shell / 路径处理与
-unix 不同，且 `start.bat` 是 Windows 一等入口）。**七道门禁**：ruff →
-pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证脚本 → 构建可复现性 →
-**README 工程指标与仓库一致**（第七道，v2.8.0 新增）。
+unix 不同，且 `start.bat` 是 Windows 一等入口）。**六道门禁**：ruff →
+pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证脚本 → 构建可复现性。
+自证脚本内部已扩到 **9 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
+v2.8.1 再加「README 架构树必须列全包内模块」）。
 
 ### 启动脚本的硬约束
 
