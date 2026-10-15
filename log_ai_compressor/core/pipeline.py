@@ -33,7 +33,12 @@ from log_ai_compressor.constants import (
     PROGRESS_EVERY_LINES,
     SIMILARITY_PRESETS,
 )
-from log_ai_compressor.core.analysis import ANALYSIS_MODE_DEEP, analyze_clusters
+from log_ai_compressor.core.analysis import (
+    ANALYSIS_MODE_DEEP,
+    _causal_lines,
+    _has_caused_by,
+    analyze_clusters,
+)
 from log_ai_compressor.core.clustering import ErrorClusterer
 from log_ai_compressor.core.encoding import (
     detect_encoding,
@@ -262,7 +267,17 @@ def _build_filter_notice(stats, clusters) -> Optional[str]:
     shown = " / ".join(f"{lv} {cnt:,}" for lv, cnt in levels[:_NOTICE_TOP_LEVELS])
     more = " / …" if len(levels) > _NOTICE_TOP_LEVELS else ""
     pct = kept / total * 100
+    causal = getattr(stats, "causal_dropped", 0)
+    if causal:
+        # 有因果链的行被级别过滤掉了 —— 这是最要紧的一句，必须排在最前面。
+        head = (
+            f"注意：被过滤掉的 {causal:,} 条里带 Caused-by 因果链，"
+            f"你的根因很可能就在这些行中，而它们不在选中的级别里。"
+        )
+    else:
+        head = ""
     return (
+        f"{head}"
         f"当前级别过滤只保留了 {kept:,} / {total:,} 条（{pct:.1f}%），"
         f"其余条目未进入分析。这份日志识别到的级别分布：{shown}{more}。"
         f"若日志确实没有错误，这属于正常结果；"
@@ -555,6 +570,14 @@ class LogPipeline:
         # WARN/INFO/DEBUG 时同样聚类展示（五级别五色五档）；
         # error_lines/error_entries 统计口径不变（仍只计错误类级别）
         if not self._entry_filter.match(entry):
+            # 被级别过滤掉、但**带着因果链**的条目：单独计数。
+            # 这是「过滤近乎全灭」notice 里最有价值的一句话的依据 ——
+            # 告诉用户根因可能就在他刚丢掉的那批行里，比泛泛说
+            # 「若怀疑格式特殊可用 INFO」具体得多。
+            # 只在 ERROR/FAIL 之外才可能丢根因，故先判级别省掉正则开销。
+            if entry.level not in ERROR_LEVELS and _has_caused_by(
+                    _causal_lines(entry)):
+                stats.causal_dropped += 1
             return
         if entry.level in ERROR_LEVELS:
             stats.error_entries += 1

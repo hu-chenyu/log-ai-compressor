@@ -319,6 +319,11 @@ class RunStats:
     # 优化缺陷R71：带时间戳的条目数（规则体检的时间戳识别率分子）
     ts_entries: int = 0
     level_counts: Dict[str, int] = field(default_factory=dict)
+    # 因果线索被级别过滤掉的条目数（entry 里带 Caused-by 链但级别不是
+    # ERROR/FAIL）。这个数不为 0 时，根因**就在被丢掉的那批行里** ——
+    # 过滤近乎全灭的 notice 必须点破这一点，否则用户只知道「过滤很狠」，
+    # 不知道「狠到把根因一起扔了」。
+    causal_dropped: int = 0
     duration: float = 0.0                # 处理耗时（秒）
     lines_per_second: float = 0.0
     time_start: Optional[float] = None   # 日志时间范围
@@ -345,6 +350,10 @@ class RunStats:
             "error_entries": self.error_entries,
             "ts_entries": self.ts_entries,
             "level_counts": dict(self.level_counts),
+            # 因果线索被级别过滤掉的条数：JSON 侧据此判断「根因可能被扔了」，
+            # 不落盘的话 Web/API 消费者就看不到这个诊断（缺陷#6 的同类：
+            # 关键状态只存在于内存里，机器读不到）。
+            "causal_dropped": self.causal_dropped,
             "duration_sec": round(self.duration, 3),
             "lines_per_second": round(self.lines_per_second, 1),
             "time_start": self.time_start, "time_end": self.time_end,

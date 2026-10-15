@@ -97,6 +97,15 @@ jobs:
         # 先构建，再跑测试，那 5 条才会真正执行。
         run: python -m build --sdist --wheel
 
+      - name: Reproducible build check (same source -> same bytes)
+        # 第六道门禁。本项目的纪律是「同一版本号不得对应两套字节不同的产物」，
+        # 但那只管住了「别把 A 版冒充成已发布的 A 版」，管不住「能不能从同一份
+        # 源码重建出已发布的那一份」。实测：wheel 设 SOURCE_DATE_EPOCH 后即可复现，
+        # sdist 连内层 tar 的成员 mtime 都每次不同（PAX 头里存着带小数的 mtime）。
+        # 只跑一个平台 —— 可复现性是构建器属性，与 OS 无关，三矩阵跑三遍纯属浪费。
+        if: matrix.os == 'ubuntu-latest'
+        run: python scripts/build_repro.py --verify
+
       - name: Unit & integration tests with coverage
         # 用 python 承载这段逻辑，而不是 shell：
         # Windows runner 的默认 shell 是 pwsh，`if !` / `2>/dev/null` 这类
