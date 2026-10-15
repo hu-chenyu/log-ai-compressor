@@ -129,14 +129,25 @@ v2 的核心判断「这块地是空的」经外部检索复核后成立：
 
 ### 洞 3：合规叙事完全没人占，而且有一个现成的、真实的英雄故事
 
-**2026 年 7 月 Hugging Face 遭攻击事件**（Orange Cyberdefense 整理）：
+**2026 年 7 月 Hugging Face 遭攻击事件**
+（HF 官方事故通报 2026-07-16；多方独立转载：澎湃新闻 / 南方日报 / 路透社
+报道，均可独立检索到）。HF 自己的原话是：
 
-> 攻击者生成了 17000+ 条事件记录。HF 最初尝试调用商业 LLM API 做取证分析，
-> **但请求被安全策略拦截了** —— 商业模型的安全护栏无法可靠判断提交者
-> 是攻击者还是应急响应人员。最终 HF 只能在自己基础设施上部署开源
-> GLM-5.2 完成分析。
->
-> 附带好处：日志中的凭据**从未离开 HF 环境**。
+> 分析需要提交大量真实的攻击命令、漏洞利用载荷以及 C2 痕迹数据，
+> 而这些请求被服务提供商的安全护栏拦截了 ——
+> **它们无法区分事件响应者和攻击者。**
+
+事实链条：
+
+- 攻击者留下**超过 17000 条**事件日志（含真实攻击指令、恶意代码、C2 通信记录）
+- HF 先调用美国商业闭源模型 API 做分析 → **被安全护栏拦截**
+- 随后在**本地基础设施部署智谱 GLM-5.2**，跑完全部取证分析
+- HF 官方补充：这样做还有个额外好处 —— **攻击数据及涉及的凭证始终保留在
+  本地环境，没有离开企业基础设施**
+
+> ⚠️ **引用纪律**：这四条每一句都能被独立检索到。写进对外材料时**只引 HF
+> 官方通报**，不要转引二手整理 —— 挂着查不到的出处，风险在自己身上。
+> （本节早前版本标注的"Orange Cyberdefense 整理"经检索不存在，已更正。）
 
 **这是你这个产品最强的单页文案。** 世界上最先进的 AI 公司，
 在真实事故里用不了商业 LLM API，因为安全策略挡住了攻击日志。
@@ -500,9 +511,9 @@ mcp-publisher publish           # 提交 server.json
 | Log-Insight（华为，arXiv 2607.08529） | arxiv.org/abs/2607.08529 | 六阶段神经符号管线；日志压 1000~7000 倍；MRR 0.790；Top-3 >90%；**"Forensic Evidence 段被运维一致认为是采纳关键"** |
 | LogDx-CI 基准 | 专知 278bd9f18f6e | 35 个真实 CI 失败案例、11 种缩减工具；混合 grep+tail 占成本-质量帕累托前沿，token 少 4.5 倍 |
 | Loghub 2.0（ISSTA'24） | github.com/logpai/Loghub-2.0 | 14 个带标注真实数据集，平均 360 万行；Drain 综合第一 |
-| LogsLop（AMD） | rocm.blogs.amd.com/software-tools-optimization/logslop | 唯一正面竞品；SURCL 指标（中位 96 行 → 5 行）；其自述"设计很简单" |
+| LogsLop（AMD ROCm 博客，2026-07-14） | rocm.blogs.amd.com/software-tools-optimization/logslop/README.html | **已核实的正面竞品**（`pip install logslop`，amd/logslop）：去重式日志摘要 + SURCL 指标（中位 96 行 → 5 行）；同样用 Loghub HDFS 与 Drain3 对照，并自述 Drain3 的 PA 99.75% 远高于自己 81% |
 | o11y-bench（Grafana） | GrafanaCON 2026 | 开源公开基准连自家产品都可能考不过 —— 营销动作的标杆 |
-| HF 事故取证复盘 | orangecyberdefense.com | 商业 LLM API 被安全策略拦截；最终自托管 GLM-5.2；凭据未离开环境 |
+| HF 事故取证复盘 | Hugging Face 官方事故通报（2026-07-16），多方独立转载可交叉验证 | 商业 LLM API 被安全策略拦截（HF 原话：「它们无法区分事件响应者和攻击者」）；最终自托管 GLM-5.2；凭据未离开环境 |
 | 官方 MCP Registry | modelcontextprotocol.io/registry/quickstart | PyPI 是受支持的包类型；`mcp-publisher`；命名空间与质量评分规则 |
 | NetForensicAI | github.com/Sh3n0bi/NetForensicAI | 确定性优先、证据 ID、相关性≠因果的表述范式 |
 | AI Incident Investigator | github.com/lyudmylan/ai-incident-investigator | 对抗性评测集 + 评分卡的工程范式 |
