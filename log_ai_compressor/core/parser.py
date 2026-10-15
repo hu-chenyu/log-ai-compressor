@@ -53,6 +53,8 @@ _TS_FORMATS = (
 )
 # 尾部时区（fromisoformat 不支持的紧凑形式）
 _TS_TZ_SUFFIX = re.compile(r"\s*(?:Z|[+-]\d{2}:?\d{2})\s*$")
+# 只认结尾的 Z（UTC），用于剥离后把 +00:00 补回去 —— 数字偏移不能补。
+_TZ_Z_SUFFIX = re.compile(r"[Zz]\s*$")
 # 纯数字（epoch 秒 / 嵌入式相对秒）
 _TS_NUMERIC = re.compile(r"^\d+(?:\.\d+)?$")
 
@@ -179,6 +181,15 @@ class TimestampParser:
         stripped = _TS_TZ_SUFFIX.sub("", key).strip()
         if stripped != key:
             iso = stripped.replace(",", ".")
+            # 剥掉的是「Z / +HH:MM / +HHMM」这类偏移，不是「什么都没有」。
+            # 直接把剩余部分当裸时间戳解析会把 UTC 当成本地时间 —— 在
+            # UTC+8 机器上整整差 28800 秒（实测 2024-01-15T10:30:00.123 Z
+            # 解析成 1705285800，+00:00 才是 1705314600）。
+            # Z 被 sub() 连同空白一起剥掉了，所以要回原串判断它是不是 Z，
+            # 是的话把 +00:00 补回去。数字偏移（+0800）交给 fromisoformat
+            # 自己处理，3.11 已原生支持紧凑写法。
+            if _TZ_Z_SUFFIX.search(key):
+                iso = iso + "+00:00"
             try:
                 return _to_epoch(datetime.fromisoformat(iso))
             except ValueError:

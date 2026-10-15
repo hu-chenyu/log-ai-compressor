@@ -256,6 +256,58 @@ def method_drain3(ds: Dataset, budget_tokens: int) -> Tuple[str, Set[str]]:
     return "\n".join(rows), covered
 
 
+# LogsLop 跳过标记形如 "  ...2...3"（两空格 + 省略号 + 两组行号）
+_SKIP_MARK = re.compile(r"^\s*\.\.\.\d+\.\.\.\d+\s*$")
+
+
+def method_logslop(ds: Dataset, budget_tokens: int) -> Tuple[str, Set[str]]:
+    """AMD LogsLop（2026-07 ROCm 博客开源，pip install logslop）：逐行 Jaccard
+    去重，只保留每个簇的首见行，其余折叠成 ``...N...M`` 跳过标记。
+
+    喂**原始日志行**而不是剥离过的 Content 字段 —— 这是它自己文档与博客里的
+    标准用法（Drain 要剥离结构化头是因为它的模板抽取需要，对照时给各自应得的
+    输入才叫公平）。
+
+    与 Drain3 的关键差别：LogsLop 保留的是**原始行**，所以能按 LineId 精确回查，
+    映射口径与 tail / grep / 本项目一致，不存在模板相似度误判。
+    """
+    try:
+        import logslop
+    except ImportError:
+        return "", set()
+    # 生成器按原顺序吐出「首见行」与「跳过标记」，跳过标记不占原始行号，
+    # 因此只能靠「数到第几条被保留的行」反推它是原文第几行（LineId 为 1-based）。
+    kept: List[Tuple[str, int]] = []
+    src = 0
+    for out in logslop.process(ds.raw_lines):
+        if _SKIP_MARK.match(out):
+            continue
+        src += 1
+        kept.append((out, src))
+
+    rows: List[str] = []
+    covered: Set[str] = set()
+    spent = 0
+    for text, lid in kept:
+        cost = estimate_tokens(text) + 1
+        if spent + cost > budget_tokens:
+            break
+        spent += cost
+        rows.append(text)
+        eid = ds.event_of_line_no(lid)
+        if eid:
+            covered.add(eid)
+    return "\n".join(rows), covered
+
+
+def sweep_logslop(ds: Dataset, budgets: List[int]) -> List[Tuple[int, int, int]]:
+    out = []
+    for b in budgets:
+        text, cov = method_logslop(ds, b)
+        out.append((b, estimate_tokens(text), len(cov)))
+    return out
+
+
 def method_ours(ds: Dataset, budget_tokens: int,
                 levels: Optional[str] = None) -> Tuple[str, Set[str]]:
     """本项目：压缩摘要报告 + 证据卡片。
@@ -315,7 +367,7 @@ def pct(num: int, den: int) -> str:
 
 
 def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
-             use_drain: bool) -> None:
+             use_drain: bool, use_logslop: bool = True) -> None:
     total_events = len(ds.events)
     print()
     print("=" * 78)
@@ -326,6 +378,10 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
     t0 = time.time()
     drain_text, drain_cov = method_drain3(ds, 10 ** 9) if use_drain else ("", set())
     t_drain = time.time() - t0
+
+    t0 = time.time()
+    lop_text, lop_cov = method_logslop(ds, 10 ** 9) if use_logslop else ("", set())
+    t_lop = time.time() - t0
 
     t0 = time.time()
     our_def_text, our_def_cov = method_ours(ds, 10 ** 9, levels)
@@ -341,6 +397,7 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
             ("log-ai-compressor 默认级别(排障)", our_def_text, our_def_cov, t_our_def),
             ("log-ai-compressor 全级别(摘要)", our_all_text, our_all_cov, t_our_all),
             ("Drain3（ICWS'17, 821★）", drain_text, drain_cov, t_drain),
+            ("LogsLop（AMD 2026-07）", lop_text, lop_cov, t_lop),
     ):
         if not text and not cov:
             continue
@@ -364,14 +421,16 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
     print()
     print(f"  朴素基线在同预算下的保留率曲线（事件类型 {total_events} 种）")
     print(f"  {'预算(tokens)':>14}{'tail 保留':>12}{'grep 保留':>12}"
-          f"{'本项目(全级别)':>16}")
-    print("  " + "-" * 54)
+          f"{'LogsLop 保留':>14}{'本项目(全级别)':>16}")
+    print("  " + "-" * 70)
     st = dict((b, c) for b, _, c in sweep_tail(ds, budgets))
     sg = dict((b, c) for b, _, c in sweep_grep(ds, budgets))
+    sl = dict((b, c) for b, _, c in sweep_logslop(ds, budgets)) if use_logslop else {}
     for b in budgets:
         ours_at = pct(len(our_all_cov), total_events)
         print(f"  {b:>14,}{pct(st[b], total_events):>12}"
-              f"{pct(sg[b], total_events):>12}{ours_at:>16}")
+              f"{pct(sg[b], total_events):>12}"
+              f"{(pct(sl[b], total_events) if use_logslop else '—'):>14}{ours_at:>16}")
 
 
 def main() -> int:
@@ -383,6 +442,8 @@ def main() -> int:
     ap.add_argument("--levels", default="",
                     help="传给本项目的级别过滤，逗号分隔；留空=工具默认")
     ap.add_argument("--no-drain3", action="store_true", help="跳过 Drain3 对照")
+    ap.add_argument("--no-logslop", action="store_true",
+                    help="跳过 AMD LogsLop 对照（未装 logslop 时可显式关掉）")
     args = ap.parse_args()
 
     names = [n.strip() for n in args.datasets.split(",") if n.strip()] or None
@@ -400,7 +461,8 @@ def main() -> int:
 
     for ds in datasets:
         try:
-            run_one(ds, budgets, args.levels or None, not args.no_drain3)
+            run_one(ds, budgets, args.levels or None, not args.no_drain3,
+                    not args.no_logslop)
         except Exception as exc:                     # 单个数据集失败不中断全局
             print(f"\n  {ds.name} 基准失败：{type(exc).__name__}: {exc}")
 
