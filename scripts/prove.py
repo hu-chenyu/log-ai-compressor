@@ -202,6 +202,27 @@ def claim_readme_metrics() -> dict:
         f"（口径：log_ai_compressor/**/*.py 非空非注释行）")
 
 
+def claim_readme_module_tree() -> dict:
+    """README 的架构树必须列全包内模块（v2.8.1 新增门禁）。
+
+    为什么单列一条：`core/causal.py` 在 v2.7.0 新增，README 的架构树一直
+    没补 —— 而上一条「行数/模块数一致」的门禁**照样绿**，因为它只数总量、
+    不看名单。一棵树少画一个模块，读者会以为那部分逻辑没有独立文件。
+
+    这正是「数字对得上但内容错了」的典型：**聚合值守住了，明细漏了**。
+    所以总数与名单要分两条门禁，各守各的。
+    """
+    import re
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    listed = set(re.findall(r"[├└]──\s+(?:[\w/]+/)?([a-z_]+)\.py", readme))
+    mods = {p.stem for p in (ROOT / "log_ai_compressor").rglob("*.py")
+            if p.stem != "__init__"}
+    missing = sorted(mods - listed)
+    return claim("README 架构树列全包内模块", not missing,
+                 f"架构树缺 {missing}" if missing
+                 else f"{len(mods)} 个模块全部在架构树里")
+
+
 def claim_optdeps() -> dict:
     """硬依赖必须只有 PyYAML —— 轻量是 PyPI 生态的硬通货。"""
     try:
@@ -259,6 +280,7 @@ def gather(path: Path) -> dict:
         claim_structured(),
         claim_optdeps(),
         claim_readme_metrics(),
+        claim_readme_module_tree(),
     ]
     return {
         "subject": str(path.name),
