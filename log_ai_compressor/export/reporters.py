@@ -387,6 +387,10 @@ def _variants_line(c: ErrorCluster) -> str:
     为什么要单独一行：``root_cause_reason`` 只写**主因**一条。同簇的另一
     个内层因（同样是日志里确凿的因果链）若不在这里列出，读者会以为这个
     簇只有一个因 —— v2.6.0 正是这样把 `com.acme.Second` 整个吞掉的。
+
+    **「全部」这个词要有账**：展示上限（MAX_CAUSES_SHOWN=8）小于实际种类数时，
+    必须把差额写出来。标题写着「全部」而实际漏掉四分之三，恰好复刻了
+    v2.6.0 那个缺陷的心理后果 —— 用户以为只有这几因。宁可多一行字。
     """
     variants = [v for v in getattr(c, "root_cause_variants", ()) or ()]
     real = [v for v in variants if not v.reason.startswith("（")]
@@ -401,6 +405,10 @@ def _variants_line(c: ErrorCluster) -> str:
         mark = "（主因）" if v is real[0] else ""
         parts.append(f"{v.reason[:60]} × {v.count}{mark}")
     parts.extend(v.reason for v in tail)
+    # 展示层截断了多少 —— 这是「全部」这个词的对账口径。
+    hidden = len(getattr(c, "cause_counts", ()) or ()) - len(real)
+    if hidden > 0:
+        parts.append(f"（另有 {hidden} 种未展开，完整清单见 JSON 的 cause_counts）")
     return "；".join(parts)
 
 
@@ -569,6 +577,11 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
         # JSON 的人也无从得知还有别的因，所以连精简模式也带上（几十字节）。
         "root_cause_variants": [v.as_dict() for v in
                                 getattr(c, "root_cause_variants", ())],
+        # 完整计数表：变体列表受展示上限截断，这里给全量，机器侧不必猜
+        "cause_counts": dict(sorted(
+            (getattr(c, "cause_counts", None) or {}).items(),
+            key=lambda kv: (-kv[1], kv[0]))),
+        "cause_overflow": c.cause_overflow,
         "anomaly": c.anomaly,
         # 变更时间窗关联（统计线索，非因果；措辞见 _attach_change_events）
         "change_context": c.change_context,

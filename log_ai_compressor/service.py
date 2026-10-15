@@ -360,6 +360,14 @@ def cluster_to_dict(cluster: ErrorCluster, *,
         # 否则等于把漏报从「报告里」挪到了「JSON 里」。
         "root_cause_variants": [v.as_dict()
                                 for v in getattr(cluster, "root_cause_variants", ())],
+        # 完整计数表（人类可读的报告层有 MAX_CAUSES_SHOWN 展示上限，
+        # 只给变体列表的话机器侧看到的也是被截断的那份 —— 于是「报告说全部
+        # 内层因」这句话对 API 调用方就是假的。计数表本身受
+        # MAX_CAUSES_PER_CLUSTER 约束，体积有界。
+        "cause_counts": dict(sorted(
+            (getattr(cluster, "cause_counts", None) or {}).items(),
+            key=lambda kv: (-kv[1], kv[0]))),
+        "cause_overflow": cluster.cause_overflow,
         "root_timeline": cluster.root_timeline,
         "anomaly": cluster.anomaly,
         "related_clusters": list(cluster.related_clusters),
@@ -433,6 +441,19 @@ def cluster_to_dict(cluster: ErrorCluster, *,
     return data
 
 
+def cooccurring_to_dicts(target, clusters) -> List[Dict[str, Any]]:
+    """与 ``target`` 共现的簇 -> JSON 形状（v2.8.0 提取）。
+
+    此前同一段字面量在三处各写一遍：`result_to_dict`（主体是
+    `clusters[0]`，即优先级最高的簇）、MCP `get_cluster_detail` 与
+    `ai explain --cluster`（主体都是**被请求的那个 target**）。
+    同一个键名、两种主体，而两处恰好长得一模一样 —— 复制粘贴最容易
+    漏掉「主体不同」这个语义差异。统一到这里，主体由调用方显式传入。
+    """
+    return [{"id": o.cluster_id, "hits": h, "summary": o.summary}
+            for o, h in cooccurring_clusters(target, clusters)]
+
+
 def result_to_dict(result: AnalysisResult, *, top_n: Optional[int] = None,
                    with_samples: bool = True) -> Dict[str, Any]:
     """AnalysisResult → 前端 / Agent 用的完整 dict。"""
@@ -444,11 +465,12 @@ def result_to_dict(result: AnalysisResult, *, top_n: Optional[int] = None,
         truncated = True
 
     roots = [c for c in result.clusters if c.is_root_cause]
-    cooc: List[Dict[str, Any]] = []
-    if result.clusters:
-        for other, hits in cooccurring_clusters(result.clusters[0], result.clusters):
-            cooc.append({"id": other.cluster_id, "hits": hits,
-                         "summary": other.summary})
+    # 共现的主体是「优先级最高的那个簇」，不是「根因簇」—— 这一点原先
+    # 只存在于实现里，键名 cooccurring 紧挨着 root_causes，读者极自然
+    # 会理解成「与根因共现」。所以把主体显式写出来（v2.8.0）。
+    cooc_subject = result.clusters[0].cluster_id if result.clusters else None
+    cooc = cooccurring_to_dicts(result.clusters[0], result.clusters) \
+        if result.clusters else []
 
     return {
         "stats": {
@@ -488,6 +510,9 @@ def result_to_dict(result: AnalysisResult, *, top_n: Optional[int] = None,
             for c in roots
         ],
         "cooccurring": cooc,
+        # v2.8.0 新增：共现的**主体**是哪个簇。键名没改（改了是破坏性变更），
+        # 但语义不再只存在于实现里。
+        "cooccurring_subject_cluster_id": cooc_subject,
         # 调用链（结构化日志里有 trace_id / request_id 时非空）
         "traces": [t.as_dict() for t in (getattr(result, "traces", None) or [])],
         # 部署/变更事件（级别过滤前捕获；时间窗关联线索，非因果）

@@ -334,12 +334,9 @@ def get_cluster_detail(
             return {"ok": False,
                     "error": f"簇 {cluster_id} 不存在；当前文件的簇号有："
                              f"{[c.cluster_id for c in result.clusters][:20]}"}
-        from log_ai_compressor.core.analysis import cooccurring_clusters
         detail = S.cluster_to_dict(target, full=True)
-        detail["cooccurring"] = [
-            {"id": o.cluster_id, "hits": h, "summary": o.summary}
-            for o, h in cooccurring_clusters(target, result.clusters)
-        ]
+        detail["cooccurring"] = S.cooccurring_to_dicts(target, result.clusters)
+        detail["cooccurring_subject_cluster_id"] = target.cluster_id
         return {"ok": True, "cluster": detail}
     except S.ServiceError as exc:
         return {"ok": False, "error": str(exc)}

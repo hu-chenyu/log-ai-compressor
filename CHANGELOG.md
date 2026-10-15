@@ -8,6 +8,136 @@
 
 ---
 
+## [2.8.0] - 2026-10-16
+
+**这一版不发功能，全部是「对外承诺的兑现」**：一次全仓代码审查挖出 9 个问题，
+其中 3 个直接伤到本项目最核心的对外主张（确定性指纹、Registry 契约、CLI 退出码），
+全部修掉，并为其中最容易复发的那类加上了门禁。
+
+### 怎么查出来的，以及一条没查对的
+
+派了一个独立审查 Agent 跑全仓 AST 核验 + 畸形输入 + 打包产物检查，
+它报了 9 个问题。**我没有直接转述**——每一条都自己复跑了一遍。
+
+结果：8 条属实，**1 条是错的**。它说 `ai/prompts.py:_MAX_BUCKETS` 是死代码，
+我实测该名字全仓出现 **9 次**，不是死代码。**代理的结论和事实之间也会有偏差，
+复核这一步不能省。**
+
+### 🔧 高 · 确定性指纹对 v2.7.0 的招牌字段完全失明
+
+`result_fingerprint` 的 payload 里没有 `root_cause_variants`、`cause_overflow`、
+`root_timeline`、`related_clusters`、`traces`。实测把变体改回「只报主因」，
+**指纹逐字节不变** —— 而指纹是对外公开的「同输入同结论」唯一证明，
+也是 CI 第三道门禁。
+
+这条比「指纹算错」严重：它不是算错，是**看不见**。CI 那道确定性门禁只比对
+三次运行是否彼此相等，对确定性回归本来就是盲的；现在连字段级回归也是盲的。
+
+修法：五个字段全部入 payload；集合型字段（`related_clusters` / `traces`）
+按**排序后**入哈希——它们语义上是集合，存储顺序不该让指纹漂移。
+另加 `_FINGERPRINT_CLUSTER_FIELDS` 白名单常量，把「哪些字段必须进指纹」写成
+可读清单而不是藏在实现里。
+
+新增 `tests/test_fingerprint_coverage.py`（14 条）：**逐字段反向证明** ——
+每个结论字段都故意改坏一次，断言指纹一定变，外加一条白名单一致性测试
+（加了白名单条目却忘了写保护，本文件会直接红）。
+
+写这组测试时它当场抓到了自己的疏漏（`change_context` 漏进了保护表），
+补上才绿——这就是这道门禁该有的行为。
+
+### 🔧 高 · `server.json` 停在 2.0.1，且漏了 `verify_evidence`
+
+PyPI 是 2.7.0，Registry 清单写 2.0.1（v2.1.0 之后每个版本都没跟上）。
+更严重的是清单里的工具只有 7 个，**漏了 `verify_evidence`** —— 那是本项目
+唯一能让调用方自证「日志没被改过」的工具，却在 Registry 页面隐身。
+
+`_meta` 实测 2,537 B / 上限 4,096 B，补一条约 251 B 后仍有 1,300 B 余量。
+（上一轮我以为「整个文件 4,023 B 快满了」——上限管的是 `_meta` 那一块，
+不是整个文件。量错对象会得出「塞不进去」的错误结论。）
+
+### 🔧 高 · 守着 server.json 的测试是假守卫
+
+```python
+def test_transport_is_stdio_and_version_matches_package(self):
+    """version 必须与 PyPI 上真实存在的版本一致，否则验证抓不到包。"""
+    assert data["version"] == pkg["version"]      # 只比了同一文件内两个字段
+```
+
+docstring 承诺「与 PyPI 上真实存在的版本一致」，断言只做了**同文件内互相相等**。
+因为比的是彼此而不是 `pyproject.toml`，2.0.1 一路绿灯放到今天。
+**断言要比 docstring 强，否则它只是一个仪式。**
+
+拆成四条：`transport` / 版本对 `pyproject.toml` / 版本对运行时 import 到的包 /
+**工具清单与实际注册的工具完全一致**。最后一条当场就把清单少一个工具这件事
+变成了 CI 会红的问题。
+
+### 🔧 中 · 变体截断不透明
+
+`MAX_CAUSES_SHOWN=8` 小于实际种类数时，报告标题仍写「簇内**全部**内层因」，
+实际只列 8 种，漏的那几种**一个字都没提**。实测造 12 种内层因：漏 4 种无提示。
+
+我们全部信誉建立在「不静默丢证据」上，这条恰好复刻了 v2.6.0 那个缺陷的
+心理后果——用户以为只有这几因。
+
+修法：人读的报告补「（另有 N 种未展开，完整清单见 JSON 的 cause_counts）」；
+机器侧补**完整**的 `cause_counts` 计数表与 `cause_overflow`
+（原先 `root_cause_variants` 本身就有展示上限，JSON 侧看到的也是截断后的）。
+
+### 🔧 中 · `python -m log_ai_compressor` 永远返回 0
+
+```
+log-ai-compressor run no_such_file.log    -> exit=1   错误：日志文件不存在
+python -m log_ai_compressor run no_such.log -> exit=0   （同一句话）
+```
+
+`__main__.py` 写的是 `main()`，返回值被丢弃。对取证工具，**退出码就是契约**
+（`verify` 的 0=VERIFIED / 1=TAMPERED）。任何用 `python -m` 的 CI 脚本、
+shell 管道、pre-commit 钩子都会把失败当成功。
+
+修法 `sys.exit(main())`，新增 `tests/test_exit_codes.py`（5 条），并额外钉住
+「退出码修对了但错误提示不能丢、且不许冒出 traceback」——
+最省事的修法是改成裸抛异常，那会让用户拿到一整页栈回溯。
+
+### 🔧 中 · `assess_evidence` 的 headline 依赖入参顺序
+
+`headline` 取 `confirmed[0]`（入参顺序的第一个），而 `candidates` 按
+`(-priority, -count)` 排序。两者可以指向**不同的簇** —— 同一份报告里标题说
+「根因是 A」、候选清单首位却是 B。
+
+目前不可达（`analyze_clusters` 恰好先排序再调用），但 `assess_evidence` 是
+**公开函数**，测试就直接调它。改成用与 candidates 同一套排序取最大值。
+
+### 🧹 低 · 三处清理
+
+- `_VOLATILE_STATS` 死常量已删。它写着「不参与指纹的字段」，但实现是就地
+  重建 stats 字典、从不由它推导 —— 改它对输出零影响，而注释会让人以为
+  改它就能控制指纹口径。口径名单移进 `result_fingerprint` 的 docstring。
+- 共现 dict 的字面量原本在三处各写一遍，其中 `result_to_dict` 的主体是
+  `clusters[0]`、另两处是被请求的 `target`——**同一个键名、两种主体**，
+  而后两处逐字相同（复制粘贴最容易漏掉这个差异）。提取为
+  `service.cooccurring_to_dicts()`，并新增 `cooccurring_subject_cluster_id`
+  把主体显式写出来（键名不改，改了是破坏性变更）。
+- README 的「生产代码 8,906 行（28 个模块）」是**假的**：实测 7,534 行 / 32 个
+  .py，差了一整个版本周期的改动量，而六道自证门禁**没有一项拦它**。
+  一个专门讲「不必相信作者，自己跑」的项目，README 数字却没有对应检查。
+
+### 🛡 新增第七道门禁：README 工程指标必须与仓库一致
+
+`prove.py` 新增一条主张：重算包内代码规模（口径写死在代码里：非空非注释行），
+与 README 那一行比对，不一致就 FAIL。它写 README 数字时当场抓出了上面的漂移。
+
+这条的价值不在「修了这一次」，而在**它让 README 的数字从此不再靠人记**。
+
+### 📈 测试 973 → 1,001，覆盖率维持 96%
+
+新增三组：`tests/test_fingerprint_coverage.py`（14 条，逐字段反向证明）、
+`tests/test_exit_codes.py`（5 条，退出码契约）、Registry 清单守卫从 1 条拆成 5 条。
+
+### 门禁
+
+ruff / build / pytest **1,001** + 覆盖率 96% / 对抗性评分卡 35:35 PASS /
+自证脚本「全部主张成立」（7 项）/ 构建可复现性 / **README 指标一致** —— 七道全绿。
+
 ## [2.7.0] - 2026-10-15
 
 **这一版把 v2.6.0 用 `xfail` 钉住的那个真缺陷真正修掉了，撤回了一个跑不出来的

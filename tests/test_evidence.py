@@ -175,6 +175,28 @@ class TestSerialization:
         assert a.verdict in (CONF_CONFIRMED, CONF_LIKELY, CONF_INSUFFICIENT)
         assert a.to_dict()["verdict"] == a.verdict
 
+    def test_headline_and_candidates_never_disagree(self):
+        """headline 点名的簇，必须与候选清单的首位是**同一个**（v2.8.0 修）。
+
+        此前 `headline` 取 `confirmed[0]`（入参顺序的第一个），而
+        `candidates` 按 (-priority, -count) 排序。两者可以指向不同的簇 ——
+        于是同一份报告里，标题说「根因是 A」、候选清单首位却是 B。
+        端到端跑不出来（`analyze_clusters` 恰好先排序再调用），但
+        `assess_evidence` 是**公开函数**，测试就直接调它。
+        """
+        r = analyze_file(str(SAMPLE), levels=["ERROR", "FAIL"])
+        if not any(c.root_cause_confidence == CONF_CONFIRMED
+                   for c in r.clusters):
+            pytest.skip("这份语料没有 CONFIRMED 簇，构造不出矛盾场景")
+        forward = assess_evidence(r.clusters, r.stats)
+        backward = assess_evidence(list(reversed(r.clusters)), r.stats)
+        assert forward.headline == backward.headline, (
+            "只调换簇的入参顺序，headline 就变了 —— 它依赖入参顺序而非排序")
+        top_id = forward.candidates[0]["id"]
+        assert str(top_id) in forward.headline or \
+            forward.candidates[0].get("summary", "")[:20] in forward.headline, (
+            f"headline 与候选首位（簇 {top_id}）不是同一个簇")
+
 
 class TestTheFailureMode:
     """回归：v1 会在这个场景自信地给出错误根因。"""
