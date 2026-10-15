@@ -9,17 +9,19 @@
 这组用例就是钉住这个不变量：**哪怕一条链只出现一次、周围全是别的异常，
 它也必须被判成 CONFIRMED 且根因点名正确。**
 
-同时覆盖 v2.6.0 新增的因果线索丢弃提示：级别过滤若扔掉了带 Caused-by 的
-条目，notice 必须点破「根因就在被丢掉的行里」。
+同时覆盖：
+- v2.7.0 修复的「一簇只报一因」漏报（原先只有样例那条被报告）；
+- v2.6.0 新增的因果线索丢弃提示：级别过滤若扔掉了带 Caused-by 的
+  条目，notice 必须点破「根因就在被丢掉的行里」。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from log_ai_compressor import service
-from log_ai_compressor.core.analysis import CONF_CONFIRMED
+from log_ai_compressor.constants import MAX_CAUSES_PER_CLUSTER
+from log_ai_compressor.core.analysis import CONF_CONFIRMED, analyze_clusters
+from log_ai_compressor.core.evidence import verify_refs
 from log_ai_compressor.core.models import AnalysisResult
 
 HEAD = "2024-01-15 10:00:00"
@@ -51,12 +53,19 @@ def _run(path: Path) -> AnalysisResult:
                            params={"top_n": 0, "context_lines": 0})
 
 
+def _class_of(text: str) -> str:
+    """`com.acme.Xxx: root of it` -> `com.acme.Xxx`"""
+    return text.split(":", 1)[0].strip()
+
+
 def _confirmed_names(result: AnalysisResult) -> set[str]:
-    """取出所有 CONFIRMED 簇点名的根因类名。
+    """所有 CONFIRMED 簇点名的根因类名（含变体）。
 
     注意属性名：置信档在 ``root_cause_confidence``（不是 ``confidence``），
     根因描述在 ``root_cause_reason`` 里，形如
-    ``Caused-by 因果链直连，根因：com.acme.Xxx: ...``。
+    ``Caused-by 因果链直连，根因：com.acme.Xxx: ...``；v2.7.0 起同簇的其余
+    内层因在 ``root_cause_variants`` 里，也算「被点名」——
+    只看 reason 就等于把刚修好的漏报又当成缺陷。
     """
     names = set()
     for c in result.clusters:
@@ -64,7 +73,11 @@ def _confirmed_names(result: AnalysisResult) -> set[str]:
             continue
         reason = getattr(c, "root_cause_reason", "") or ""
         if "根因：" in reason:
-            names.add(reason.split("根因：", 1)[1].split(":")[0].strip())
+            head = reason.split("根因：", 1)[1].split("（")[0]
+            names.add(_class_of(head))
+        for v in getattr(c, "root_cause_variants", []) or []:
+            if not v.reason.startswith("（"):        # 跳过溢出记账行
+                names.add(_class_of(v.reason))
     return names
 
 
@@ -83,21 +96,15 @@ def test_lone_cause_occurrence_is_still_confirmed(tmp_path: Path) -> None:
         f"CONFIRMED 簇没有点名根因类，实得 {_confirmed_names(r)}"
 
 
-@pytest.mark.xfail(strict=True, reason="已知缺陷：同簇多内层因只报样例，待设计决策")
 def test_rare_class_survives_among_common_ones(tmp_path: Path) -> None:
-    """【已知缺陷 · 待设计决策】稀有根因类会被同类簇的样例挤掉。
+    """稀有根因类不会被同类簇的样例挤掉。
 
     复现：50 条 ``java.net.SocketException`` + 1 条 ``com.acme.RarelySeen``，
-    外层消息只有一词之差（"reset i" vs "reset rare"），聚类判为同一簇；
-    簇只报告**样例**那一条的 Caused-by，于是稀有类的链没人提。
+    外层消息只有一词之差（"reset i" vs "reset rare"），聚类判为同一簇。
 
-    这不是随手能修的：CONFIRMED 的定义是「根因来自条目内的 Caused-by 链」，
-    而簇按外层消息相似度划分 —— 一个簇里出现多个不同内层因时，
-    要报哪一个本身就是设计问题（报最多的？全列？按实例拆簇？）。
-    改这里会动到本项目最核心的不变量，风险远超「补个测试」。
-
-    因此这里用 **strict xfail**：现在是坏的，将来若有人修了它，这个用例会
-    转为失败并强制我们回来更新文档与对外口径，而不是悄悄变成"已修"。
+    v2.6.0 时这条是 **strict xfail**（只报样例那一条，稀有类没人提）。
+    v2.7.0 改为按摄入期累计的次数排名，主因写进 reason、其余进 variants，
+    所以现在必须真的通过 —— 若哪天又退回只报一因，这里会直接红。
     """
     lines: list[str] = []
     for i in range(50):
@@ -105,19 +112,21 @@ def test_rare_class_survives_among_common_ones(tmp_path: Path) -> None:
     lines[25 * 3 : 25 * 3 + 3] = _chain("resetrare", "com.acme.RarelySeen")
     p = _write(tmp_path, "rare.log", lines)
     r = _run(p)
-    assert "com.acme.RarelySeen" in _confirmed_names(r), \
-        f"稀有根因类被同类簇的样例挤掉了，实得 {_confirmed_names(r)}"
+    names = _confirmed_names(r)
+    assert "com.acme.RarelySeen" in names, \
+        f"稀有根因类被同类簇的样例挤掉了，实得 {names}"
+    # 主因必须是次数多的那个，而不是「谁恰好当了样例谁赢」。
+    # 注意是 49 不是 50：上面那行是**替换**掉第 25 条链（slicing 赋值），
+    # 所以实为 49 条 SocketException + 1 条 RarelySeen。
+    c = next(c for c in r.clusters
+             if c.root_cause_confidence == CONF_CONFIRMED)
+    assert c.root_cause_variants[0].count == 49, c.root_cause_variants
+    assert "SocketException" in c.root_cause_variants[0].reason
+    assert "主因 49/50 次" in c.root_cause_reason, c.root_cause_reason
 
 
-@pytest.mark.xfail(strict=True, reason="已知缺陷：一簇只报一个根因，待设计决策")
 def test_two_rare_classes_both_survive(tmp_path: Path) -> None:
-    """【已知缺陷 · 待设计决策】同簇内两个不同内层因，只报样例那一个。
-
-    最小复现：两条链外层消息一词之差（"a failed" / "b failed"）→ 同一簇，
-    count=2、两个实例各带一条 Caused-by，但 root_cause_reason 只写了样例那条。
-
-    与上一条同源，同为待设计决策项。
-    """
+    """同簇内两个不同内层因，两个都要被点名。"""
     lines = _chain("a", "com.acme.First") + [""] + _chain("b", "com.acme.Second")
     p = _write(tmp_path, "two_rare.log", lines)
     r = _run(p)
@@ -126,22 +135,113 @@ def test_two_rare_classes_both_survive(tmp_path: Path) -> None:
         f"同簇内两个稀有类只报了一个，实得 {names}"
 
 
-def test_current_behaviour_is_pinned_single_cause_per_cluster(tmp_path: Path) -> None:
-    """把「一簇只报一个根因」这个现状钉死。
+def test_single_cause_cluster_keeps_legacy_reason_text(tmp_path: Path) -> None:
+    """只有一种内层因时，文案与 v2.6.0 **逐字一致**（不做无谓的口径漂移）。"""
+    p = _write(tmp_path, "one.log", _chain("a", "com.acme.First"))
+    r = _run(p)
+    c = r.clusters[0]
+    assert c.root_cause_reason == \
+        "Caused-by 因果链直连，根因：com.acme.First: root of it", \
+        c.root_cause_reason
+    assert len(c.root_cause_variants) == 1, c.root_cause_variants
 
-    它现在是**设计**（CONFIRMED 绑定单条 Caused-by 链），所以写断言固定住，
-    将来真要改成「一簇多因」时，这里会失败并提醒同步改口径与文档。
+
+def test_multi_cause_reason_states_the_split(tmp_path: Path) -> None:
+    """多因时 reason 必须自报「几种/主因占比」，不能让人以为它是唯一根因。"""
+    lines = _chain("a", "com.acme.First") + [""] + _chain("b", "com.acme.Second")
+    p = _write(tmp_path, "multi.log", lines)
+    c = _run(p).clusters[0]
+    assert "本簇 2 种内层因" in c.root_cause_reason, c.root_cause_reason
+    assert "主因 1/2 次" in c.root_cause_reason, c.root_cause_reason
+
+
+def test_counts_cover_full_input_not_retained_instances(tmp_path: Path) -> None:
+    """计数必须覆盖**全量**输入，不能只数保留下来的前 N 个实例详情。
+
+    这正是 v2.6.0 缺陷的成因：靠 instances 反推只能拿到每簇前 200 条
+    （MAX_CLUSTER_INSTANCES_DETAILED）的有偏样本。这里造 250 条同类链，
+    远超单簇实例详情上限，若计数仍报 200 就说明退回了老路径。
+    """
+    lines: list[str] = []
+    for i in range(250):
+        lines += _chain(f"bulk{i}", "com.acme.BulkRoot")
+    p = _write(tmp_path, "bulk.log", lines)
+    r = _run(p)
+    c = next(c for c in r.clusters
+             if c.root_cause_confidence == CONF_CONFIRMED)
+    assert c.cause_counts.get("com.acme.BulkRoot: root of it") == 250, \
+        f"计数只覆盖了实例保留上限内的样本：{c.cause_counts}"
+    # 只有一种内层因，所以 reason 仍是单因旧文案（多因才加占比后缀）
+    assert c.root_cause_reason.endswith("com.acme.BulkRoot: root of it"), \
+        c.root_cause_reason
+
+
+def test_each_variant_carries_its_own_verifiable_evidence(tmp_path: Path) -> None:
+    """每种内层因都要有自己的原文引用，且必须回读校验通过。
+
+    这是本项目最不能退的一档：一条指向别处的"证据"比没有证据更危险 ——
+    排查的人会照着它去核对日志，结果核不到，整份报告的可信度一起塌。
     """
     lines = _chain("a", "com.acme.First") + [""] + _chain("b", "com.acme.Second")
-    p = _write(tmp_path, "pinned.log", lines)
+    p = _write(tmp_path, "ev.log", lines)
     r = _run(p)
-    assert len(r.clusters) == 1, f"预期同簇，实得 {len(r.clusters)} 个簇"
     c = r.clusters[0]
-    assert c.count == 2, c.count
-    assert "com.acme.First" in (c.root_cause_reason or ""), c.root_cause_reason
-    # 第二个内层因确实在实例里，只是不被报告 —— 这是现状，不是巧合
-    assert "com.acme.Second" not in (c.root_cause_reason or ""), \
-        "若这条断言失败，说明一簇已能报多因，请同步更新 FAQ / BENCHMARK 的口径说明"
+    refs = [v.evidence for v in c.root_cause_variants]
+    assert all(refs), f"有变体没拿到原文引用：{c.root_cause_variants}"
+    assert refs[0] is not refs[1], "两个变体共用同一条引用等于没指向各自原文"
+    # 引用必须落在各自的链上：First 在 L1-L2，Second 在 L5-L6
+    assert (refs[0].line_start, refs[0].line_end) == (1, 2), refs[0]
+    assert (refs[1].line_start, refs[1].line_end) == (5, 6), refs[1]
+    report = verify_refs([e for cl in r.clusters for e in cl.evidence])
+    assert report.ok, f"变体证据回读失败：{report.as_dict()}"
+
+
+def test_overflow_is_accounted_not_silently_dropped(tmp_path: Path) -> None:
+    """超过单簇内层因上限时，多出来的必须**记账**，不能静默丢弃。"""
+    n = MAX_CAUSES_PER_CLUSTER + 5
+    lines: list[str] = []
+    for i in range(n):
+        lines += _chain(f"of{i}", f"com.acme.Of{i:02d}")
+    p = _write(tmp_path, "of.log", lines)
+    r = _run(p)
+    c = next(c for c in r.clusters
+             if c.root_cause_confidence == CONF_CONFIRMED)
+    assert len(c.cause_counts) == MAX_CAUSES_PER_CLUSTER, len(c.cause_counts)
+    assert c.cause_overflow == 5, c.cause_overflow
+    tail = [v for v in c.root_cause_variants if v.reason.startswith("（")]
+    assert tail and "另有 5 次" in tail[0].reason, c.root_cause_variants
+
+
+def test_variant_ranking_is_deterministic(tmp_path: Path) -> None:
+    """同输入两次分析，变体顺序必须一致（参与确定性指纹的那类字段）。"""
+    lines = _chain("a", "com.acme.First") + [""] + _chain("b", "com.acme.Second")
+    p = _write(tmp_path, "det.log", lines)
+    a = _run(p).clusters[0]
+    b = _run(p).clusters[0]
+    assert [v.reason for v in a.root_cause_variants] == \
+           [v.reason for v in b.root_cause_variants]
+    assert a.root_cause_reason == b.root_cause_reason
+
+
+def test_confirmed_survives_without_ingest_accumulator(tmp_path: Path) -> None:
+    """簇不是由 pipeline 建出来时（直接构造 ErrorCluster），CONFIRMED 不能丢。
+
+    这是本项目吃过一次的亏形态：结论依赖某个「应该被填过」的字段，
+    字段一没填就**静默**降级成 INSUFFICIENT，而调用方看到的是「证据不足」，
+    根本猜不到是哪个上游没填。分析层必须能自己从样例回退。
+    """
+    from tests.test_analysis import make_cluster, make_result
+    carrier = make_cluster(
+        1, "handle failed", first_line=2, last_line=5,
+        stack=["java.lang.RuntimeException: query failed",
+               "Caused by: java.sql.SQLTimeoutException: lock timeout"],
+    )
+    r = make_result([carrier])
+    assert carrier.cause_counts == {}, "前置条件：手工簇没有摄入期累计"
+    analyze_clusters(r)
+    assert carrier.root_cause_confidence == CONF_CONFIRMED, \
+        carrier.root_cause_confidence
+    assert "SQLTimeoutException" in carrier.root_cause_reason
 
 
 # ---------------------------------------------------------------------------

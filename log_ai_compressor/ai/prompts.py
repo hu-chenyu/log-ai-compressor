@@ -70,6 +70,13 @@ def _cluster_block(c: Dict[str, Any], idx: int) -> str:
     ]
     if c.get("root_cause_reason"):
         lines.append(f"    根因依据：{c['root_cause_reason']}")
+    # 簇内其余内层因（v2.7.0）：只喂主因会让模型以为该簇只有一个因，
+    # 然后在解读里写出「根因是 X」而不提同样确凿的 Y。
+    _variants = [v for v in c.get("root_cause_variants") or []
+                 if not v.get("reason", "").startswith("（")]
+    if len(_variants) > 1:
+        detail = "；".join(f"{v['reason']}×{v['count']}" for v in _variants)
+        lines.append(f"    簇内全部内层因（按次数）：{detail}")
     if c.get("priority_detail"):
         lines.append(f"    评分构成：{c['priority_detail']}")
     if c.get("time_text"):
@@ -149,6 +156,11 @@ def build_cluster_prompt(ctx: Dict[str, Any], question: str = "") -> str:
     ]
     if c.get("is_root_cause"):
         parts.append(f"- 根因判定：是（{c.get('root_cause_reason')}）")
+        _variants = [v for v in c.get("root_cause_variants") or []
+                     if not v.get("reason", "").startswith("（")]
+        if len(_variants) > 1:
+            detail = "；".join(f"{v['reason']}×{v['count']}" for v in _variants)
+            parts.append(f"- 簇内全部内层因（按次数）：{detail}")
     if c.get("anomaly"):
         parts.append(f"- 异常标记：{c.get('anomaly')}")
 

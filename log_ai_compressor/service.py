@@ -355,6 +355,11 @@ def cluster_to_dict(cluster: ErrorCluster, *,
         "last_seen_text": _ts(cluster.last_seen),
         "is_root_cause": cluster.is_root_cause,
         "root_cause_reason": cluster.root_cause_reason,
+        # 簇内**全部** Caused-by 内层因（按次数降序）。此前只报主因一条，
+        # 同簇的其余内层因从不出现在任何出口上 —— 修掉之后必须一路透出，
+        # 否则等于把漏报从「报告里」挪到了「JSON 里」。
+        "root_cause_variants": [v.as_dict()
+                                for v in getattr(cluster, "root_cause_variants", ())],
         "root_timeline": cluster.root_timeline,
         "anomaly": cluster.anomaly,
         "related_clusters": list(cluster.related_clusters),

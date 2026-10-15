@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -172,10 +173,15 @@ class TimestampParser:
 
         # 2) 纯数字：epoch 秒或嵌入式相对计时秒
         if _TS_NUMERIC.match(key):
-            try:
-                return float(key)
-            except ValueError:
-                return None
+            # 正则已保证只含数字与小数点，float() 必成功（原 try/except
+            # ValueError 是死分支，删掉）。但**溢出是真会发生的**：309 位
+            # 以上的数字串被 float() 静默转成 inf，而不是报错。
+            # inf 一旦进 LogEntry.timestamp，就会顺着 TimeHistogram、
+            # 突发窗口、时间范围一路污染整份报告的时间轴 —— 极端值还会
+            # 让 min/max 与均值变成 NaN，整张趋势图失真。
+            # 一条畸形时间戳不该毁掉全局，所以这里判有限性后当"没解析出来"。
+            value = float(key)
+            return value if math.isfinite(value) else None
 
         # 3) 紧凑时区后缀剥离后重试 ISO
         stripped = _TS_TZ_SUFFIX.sub("", key).strip()

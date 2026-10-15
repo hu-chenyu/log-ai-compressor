@@ -224,6 +224,34 @@ class ClusterInstance:
     after: List[str] = field(default_factory=list)    # 后上下文（详情用）
 
 
+@dataclass(frozen=True)
+class RootCauseVariant:
+    """簇内**一种** Caused-by 内层因（链上最内层的那个异常）。
+
+    为什么需要它：簇是按外层消息+堆栈指纹聚的，**同一个簇里可以出现多个
+    不同的内层因**。v2.6.0 只报样例那一个，其余全丢 —— 一个真实的漏报缺陷。
+    现在按出现次数降序全部列出，主因仍写进 `root_cause_reason`（保持旧口径
+    与旧调用方可用），变体清单另存本字段。
+
+    Attributes:
+        reason: 内层因原文（异常类名 + 消息）
+        count: 携带该内层因的条目数（覆盖**全量**输入，不受实例保留上限影响）
+        evidence: 该内层因第一处出现的原文引用；拿不到时为 None ——
+            宁可缺一条引用，也不给一条指向别处的假引用。
+    """
+    reason: str
+    count: int
+    evidence: Optional[EvidenceRef] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "reason": self.reason,
+            "count": self.count,
+            "evidence_id": self.evidence.evidence_id if self.evidence else "",
+            "citation": self.evidence.citation() if self.evidence else "",
+        }
+
+
 @dataclass
 class ErrorCluster:
     """同类错误簇：模糊指纹聚合后的错误类别。"""
@@ -249,6 +277,19 @@ class ErrorCluster:
     # ---- 智能分析结果（analysis 模块填充）----
     is_root_cause: bool = False
     root_cause_reason: str = ""
+    # ---- 簇内全部 Caused-by 内层因（v2.7.0 修复「一簇只报一因」漏报）----
+    # 摄入期**流式**累计：每条带 Caused-by 链的条目入簇时就记一次，
+    # 因此计数覆盖全量输入，不受 MAX_CLUSTER_INSTANCES_DETAILED 的截断影响
+    # （靠实例详情反推只能得到有偏样本 —— 那正是 v2.6.0 缺陷的成因）。
+    cause_counts: Dict[str, int] = field(default_factory=dict)
+    # 超出 MAX_CAUSES_PER_CLUSTER 后未展开的实例数（如实记账，不静默丢弃）
+    cause_overflow: int = 0
+    # 分析期按次数降序展开的变体（含各自第一处原文引用）
+    root_cause_variants: List[RootCauseVariant] = field(default_factory=list)
+    # 摄入期为每种内层因造的第一处原文引用（内层因文本 → 引用）。
+    # 单独存映射而不是直接塞进 evidence：塞进去就得靠 note 文本反查是哪条
+    # 内层因，note 一改就断；映射也便于分析期决定要不要并入对外证据列表。
+    cause_evidence: Dict[str, EvidenceRef] = field(default_factory=dict)
     # 置信档位（v2 新增）：把"是/不是根因"的二元判断升级为三档，
     # 让工具在证据不足时**敢于不下结论** —— 见 analysis.assess_evidence。
     #   CONFIRMED   确定性证据链直连（Caused-by 链 / 强关键词 ≥3）

@@ -29,6 +29,7 @@ from log_ai_compressor.constants import (
     CLUSTER_SIMILARITY_THRESHOLD,
     DEFAULT_SELECTED_LEVELS,
     ERROR_LEVELS,
+    MAX_CAUSES_PER_CLUSTER,
     MAX_CHANGE_EVENTS,
     PROGRESS_EVERY_LINES,
     SIMILARITY_PRESETS,
@@ -39,13 +40,18 @@ from log_ai_compressor.core.analysis import (
     _has_caused_by,
     analyze_clusters,
 )
+from log_ai_compressor.core.causal import deepest_caused_by
 from log_ai_compressor.core.clustering import ErrorClusterer
 from log_ai_compressor.core.encoding import (
     detect_encoding,
     is_compressed,
     open_text_stream,
 )
-from log_ai_compressor.core.evidence import KIND_SAMPLE, make_ref
+from log_ai_compressor.core.evidence import (
+    KIND_CAUSED_BY,
+    KIND_SAMPLE,
+    make_ref,
+)
 from log_ai_compressor.core.filters import EntryFilter, FilterConfig
 from log_ai_compressor.core.models import AnalysisResult, ChangeEvent, RunStats
 from log_ai_compressor.core.parser import LogParser
@@ -81,6 +87,36 @@ def _in_tod_window(tod: float, start: Optional[float],
     return tod >= lo or tod <= hi          # 跨零点：22:00~06:00
 
 
+def _range_refs(entry, recent: deque, kind: str, note: str,
+                encoding: str = "") -> List:
+    """把条目的行区间换算成可回读的原始行引用列表（可能为空）。
+
+    抽出来是因为「样例原文」与「簇内某一内层因的第一处出现」要造的引用
+    结构完全一样，只有 kind / note 不同。
+    """
+    start = entry.line_no
+    end = entry.last_line_no or entry.line_no
+    # 修复缺陷#2：轮转合并（run_files）按全局行号计数，而引用指向的是
+    # 单个来源文件 —— 必须换算成**文件内**行号，否则第二个文件起的证据
+    # 全部行号错位，verify 回读必然 OUT_OF_RANGE。条目跨文件边界（堆栈
+    # 续进下一个轮转文件）时按（来源, 文件内连续行）拆成多条引用，
+    # 每条都能单独回读复核；绝不给一条指向错误行号的引用。
+    seg = [(src, fno, raw) for (no, fno, src, _text, raw) in recent
+           if start <= no <= end]
+    if len(seg) != end - start + 1:
+        return []
+    runs: List[list] = []       # [source, 文件内起行, 文件内止行, [原始行...]]
+    for src, fno, raw in seg:
+        if runs and runs[-1][0] == src and fno == runs[-1][2] + 1:
+            runs[-1][2] = fno
+            runs[-1][3].append(raw)
+        else:
+            runs.append([src, fno, fno, [raw]])
+    return [make_ref(src or "<粘贴文本>", first, last, raws,
+                     kind=kind, note=note, encoding=encoding)
+            for src, first, last, raws in runs]
+
+
 def _attach_evidence(cluster, entry, recent: deque, replace: bool = False,
                      encoding: str = "") -> None:
     """给簇挂上证据引用（典型样例所在的原文行区间）。
@@ -94,33 +130,41 @@ def _attach_evidence(cluster, entry, recent: deque, replace: bool = False,
     """
     if cluster.evidence and not replace:
         return
-    start = entry.line_no
-    end = entry.last_line_no or entry.line_no
-    # 修复缺陷#2：轮转合并（run_files）按全局行号计数，而引用指向的是
-    # 单个来源文件 —— 必须换算成**文件内**行号，否则第二个文件起的证据
-    # 全部行号错位，verify 回读必然 OUT_OF_RANGE。条目跨文件边界（堆栈
-    # 续进下一个轮转文件）时按（来源, 文件内连续行）拆成多条引用，
-    # 每条都能单独回读复核；绝不给一条指向错误行号的引用。
-    seg = [(src, fno, raw) for (no, fno, src, _text, raw) in recent
-           if start <= no <= end]
-    if len(seg) != end - start + 1:
-        return
-    runs: List[list] = []       # [source, 文件内起行, 文件内止行, [原始行...]]
-    for src, fno, raw in seg:
-        if runs and runs[-1][0] == src and fno == runs[-1][2] + 1:
-            runs[-1][2] = fno
-            runs[-1][3].append(raw)
-        else:
-            runs.append([src, fno, fno, [raw]])
-    refs = [make_ref(src or "<粘贴文本>", first, last, raws,
-                     kind=KIND_SAMPLE, note="典型样例原文", encoding=encoding)
-            for src, first, last, raws in runs]
+    refs = _range_refs(entry, recent, KIND_SAMPLE, "典型样例原文", encoding)
     if replace:
         # 样例被升级成带堆栈的版本时，证据必须跟着换 —— 引用指向的行
         # 和实际展示的样例对不上，比没有引用更容易误导人。
         cluster.evidence = refs
     else:
         cluster.evidence.extend(refs)
+
+
+def _track_causes(cluster, entry, recent: deque, encoding: str = "") -> None:
+    """累计本条目携带的 Caused-by 内层因（v2.7.0 修复「一簇只报一因」）。
+
+    为什么必须在**摄入期**做，而不是分析层回头翻 `cluster.instances`：
+    实例详情每簇只留前 200 条（MAX_CLUSTER_INSTANCES_DETAILED），大簇
+    绝大多数实例是元数据（entry=None）—— 分析层能看到的只是一个有偏样本。
+    真实分布（主因占比）是这个产品声称要给出的东西，不能建立在样本上。
+
+    每种内层因只在**首次出现**时造一条原文引用：那一次原文还在滚动窗口里，
+    之后就没了。造不出就留空 —— 缺一条引用可以接受，指错一条不行。
+    """
+    deepest = deepest_caused_by(_causal_lines(entry))
+    if not deepest:
+        return
+    counts = cluster.cause_counts
+    if deepest in counts:
+        counts[deepest] += 1
+        return
+    if len(counts) >= MAX_CAUSES_PER_CLUSTER:
+        cluster.cause_overflow += 1
+        return
+    counts[deepest] = 1
+    refs = _range_refs(entry, recent, KIND_CAUSED_BY,
+                       f"簇内内层因（第 1 次出现）：{deepest[:60]}", encoding)
+    if refs:
+        cluster.cause_evidence[deepest] = refs[0]
 
 
 # 优化缺陷R90：ANSI 转义序列（Jenkins AnsiColor 等彩色控制符，
@@ -594,6 +638,9 @@ class LogPipeline:
         # 原文核对 —— 这是结论可被独立复核的前提。
         _attach_evidence(cluster, entry, recent, replace=replaced,
                          encoding=stats.encoding or "")
+        # 簇内 Caused-by 内层因的流式累计（v2.7.0 修复「一簇只报一因」）：
+        # 与样例证据同一层造，因为原始行同样只在摄入窗口里。
+        _track_causes(cluster, entry, recent, encoding=stats.encoding or "")
         if replaced and self._ctx > 0:
             # 新建簇或样例升级 -> 开启样例后上下文待补
             pending[id(cluster.sample)] = {

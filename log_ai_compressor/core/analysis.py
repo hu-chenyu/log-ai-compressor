@@ -35,6 +35,7 @@ from log_ai_compressor.constants import (
     CASCADE_KEYWORDS,
     CHANGE_WINDOW_SEC,
     LEVEL_WEIGHT,
+    MAX_CAUSES_SHOWN,
     ROOT_CAUSE_KEYWORDS,
     is_noise_stack_frame,
 )
@@ -42,6 +43,7 @@ from log_ai_compressor.core.evidence import KIND_CAUSED_BY, derive_ref
 from log_ai_compressor.core.models import (
     AnalysisResult,
     ErrorCluster,
+    RootCauseVariant,
     RunStats,
     format_timestamp,
 )
@@ -81,72 +83,17 @@ COOC_WINDOW_SEC = 60.0         # 共现判定时间窗（±秒）
 COOC_WINDOW_LINES = 100        # 无时间戳时共现判定行距（±行）
 COOC_MIN_HITS = 2              # 至少同现次数（1 次可能是巧合）
 
-# 关键因果行（降噪时永不折叠）
-_CAUSED_BY_RE = re.compile(r"^\s*Caused by\s*[:：]", re.IGNORECASE)
-# Caused by 行里**异常本体**（`Caused by: java.io.IOException: boom` → 异常文本）
-_CAUSED_BY_TEXT = re.compile(r"^\s*Caused by\s*[:：]\s*(.+?)\s*$", re.IGNORECASE)
-# **行内** Caused by —— 单行异常形态。
-#
-# Android logcat / 部分移动端与嵌入式日志把整个异常压成一行：
-#   `E PushLog2824: com.x.PushException: boom  Caused by: java.net.SocketException: abort`
-# 上面两条正则都锚在 ^，于是这种链**整条看不见** —— 工具只能判 INSUFFICIENT。
-# 实测代价：Android_v1 上 131 条真实 Caused-by 链，召回率 **0%**，而同一份代码
-# 在 Hadoop 上是 91.4%。不是判断变保守了，是压根没看见链。
-#
-# 收紧点（防止把无关条目抬成 CONFIRMED）：行内 `Caused by:` 之后必须紧跟一个
-# **异常类名**（Exception/Error/Throwable/Fault 结尾）。消息里随口一句
-# "caused by: user input" 不满足该形状，不会触发。
-_CAUSED_BY_INLINE = re.compile(
-    r"Caused by\s*[:：]\s*"
-    r"(?P<sig>[A-Za-z_][\w.$]*(?:Exception|Error|Throwable|Fault)[^\n]*)",
-    re.IGNORECASE)
-
-
-def _causal_lines(entry) -> list:
-    """条目内所有可能承载因果链的文本：堆栈行 + 消息本体。
-
-    多行堆栈把 Caused by 放在 stack 里；单行异常（logcat）它落在 message 里。
-    两者都要看，否则单行形态永远漏。
-    """
-    if entry is None:
-        return []
-    out = list(getattr(entry, "stack", None) or [])
-    msg = getattr(entry, "message", None)
-    if msg:
-        out.append(msg)
-    return out
-
-
-def _has_caused_by(lines: Sequence[str]) -> bool:
-    return any(_CAUSED_BY_RE.match(ln) or _CAUSED_BY_INLINE.search(ln)
-               for ln in lines or [])
-
-
-def deepest_caused_by(stack: Sequence[str]) -> str:
-    """从堆栈里取**最内层**（最后一条）Caused by 的异常文本。
-
-    这才是真正的根因。Java 语义下：
-
-        java.lang.RuntimeException: query failed      <- 外层：症状
-        Caused by: java.sql.SQLTimeoutException: ... <- 内层：因
-        Caused by: java.lang.OutOfMemoryError: ...  <- 最内层：根因
-
-    同时认两种形态：行首 `Caused by:`（多行堆栈）与行内 `... Caused by: X`
-    （单行异常，见 `_CAUSED_BY_INLINE` 的说明）。
-
-    历史实现把「时间上紧邻在它之前的另一个错误簇」当成因，那是**时间相邻性**
-    —— 统计猜测，不是因果证明。现已改为只认本函数给出的链内证据。
-    """
-    deepest = ""
-    for line in stack or []:
-        m = _CAUSED_BY_TEXT.match(line)
-        if m:
-            deepest = m.group(1).strip()
-            continue
-        mi = _CAUSED_BY_INLINE.search(line)
-        if mi:
-            deepest = mi.group("sig").strip()
-    return deepest
+# 因果链识别的原语搬到 core/causal.py（v2.7.0）：摄入层也要用它们逐条累计
+# 簇内内层因，而 pipeline 若 import analysis 就与 core 形成环。此处再导出一次，
+# 是为了不破坏 `from log_ai_compressor.core.analysis import deepest_caused_by`
+# 这条既有引用（tests/test_logcat.py 等在用）。
+from log_ai_compressor.core.causal import (  # noqa: E402  (置于参数区之后更易读)
+    _CAUSED_BY_INLINE,
+    _CAUSED_BY_RE,
+    _causal_lines,
+    _has_caused_by,
+    deepest_caused_by,
+)
 
 _TRACEBACK_RE = re.compile(r"^Traceback \(|Backtrace:", re.IGNORECASE)
 _EXCEPTION_RE = re.compile(r"^[A-Za-z_][\w.$]*(?:Exception|Error|Fault|Interrupt)\s*[:({]")
@@ -596,15 +543,61 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
     # a) 同一条目内的 Caused-by 链 —— 唯一的确定性因果证据。
     #    根因是链上**最内层**的异常，证据就在这条目自己的堆栈里，
     #    与「时间上排在它前面的另一个错误」无关。
+    #
+    #    v2.7.0 修复「一簇只报一因」：此处此前只看 `c.sample` 那一条链。
+    #    簇按外层消息+堆栈指纹聚，同一簇里出现多个不同内层因是常态
+    #    （实测：两个 RuntimeException 外层、内层 First/Second 聚成一簇，
+    #    Second 一次都没被提起）。现在按 `c.cause_counts`（摄入期流式累计，
+    #    覆盖全量输入）排名取主因，并把其余内层因一并写进
+    #    `root_cause_variants` —— 漏报本身比"多报"更危险，因为用户会
+    #    照着唯一那条去查，查不到就以为系统没发现。
     for c in ordered:
-        deepest = deepest_caused_by(
-            _causal_lines(c.sample.entry) if c.sample else [])
-        if not deepest:
-            continue
+        ranked = sorted(c.cause_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        if not ranked:
+            # 回退：没有摄入期累计（簇不是由 pipeline 建出来的 —— 直接构造
+            # ErrorCluster 的调用方/测试会走到这里）时，仍看样例自身的链。
+            # 少这一条回退，结论就依赖「cause_counts 一定被填过」这个
+            # 隐含前提，字段一没填 CONFIRMED 会**静默**降级成 INSUFFICIENT ——
+            # 而 CONFIRMED 降级比多报更隐蔽：调用方看到的是"证据不足"。
+            sample_deepest = deepest_caused_by(
+                _causal_lines(c.sample.entry) if c.sample else [])
+            if not sample_deepest:
+                continue
+            ranked = [(sample_deepest, 1)]
         c.is_root_cause = True
         c.root_cause_confidence = CONF_CONFIRMED
-        c.root_cause_reason = f"Caused-by 因果链直连，根因：{deepest[:60]}"
-        _mark_causal_evidence(c, deepest)
+        top, top_n = ranked[0]
+        total = sum(n for _, n in ranked) + c.cause_overflow
+        if len(ranked) == 1:
+            # 单一内层因：与 v2.6.0 文案逐字一致，避免旧口径/回归对比漂移
+            c.root_cause_reason = f"Caused-by 因果链直连，根因：{top[:60]}"
+        else:
+            c.root_cause_reason = (
+                f"Caused-by 因果链直连，根因：{top[:60]}"
+                f"（本簇 {len(ranked)} 种内层因，主因 {top_n}/{total} 次）")
+        variants = []
+        existing = {r.evidence_id for r in c.evidence}
+        for reason, n in ranked[:MAX_CAUSES_SHOWN]:
+            ref = c.cause_evidence.get(reason)
+            if ref is not None and ref.evidence_id not in existing:
+                c.evidence.append(ref)
+                existing.add(ref.evidence_id)
+            variants.append(RootCauseVariant(reason=reason, count=n,
+                                             evidence=ref))
+        if c.cause_overflow:
+            variants.append(RootCauseVariant(
+                reason=f"（另有 {c.cause_overflow} 次的内层因超出单簇上限未展开）",
+                count=c.cause_overflow))
+        c.root_cause_variants = variants
+        # 主因的证据：优先用摄入期为**它自己**那次实例造的引用 —— 指向的
+        # 就是真正含这条内层因的原文行。造不出来（原文已滑出窗口）时，
+        # 仅当样例自身的链恰好就是这条原因，才从样例引用派生；否则宁可不挂 ——
+        # 一条指向别处的"证据"比没有证据更容易误导排查的人。
+        top_ref = c.cause_evidence.get(top)
+        if (top_ref is None or top_ref.evidence_id not in existing):
+            if deepest_caused_by(
+                    _causal_lines(c.sample.entry) if c.sample else []) == top:
+                _mark_causal_evidence(c, top)
 
     # b) 跨簇时间相邻：保留为边（用于「谁衍生自谁」的展示），但**绝不升级
     #    成 CONFIRMED** —— 前一个错紧接着出现，只是统计线索。

@@ -381,6 +381,29 @@ def _evidence_line(c: ErrorCluster) -> str:
     return "；".join(parts) + extra
 
 
+def _variants_line(c: ErrorCluster) -> str:
+    """簇内全部 Caused-by 内层因（次数降序）；无则返回空串。
+
+    为什么要单独一行：``root_cause_reason`` 只写**主因**一条。同簇的另一
+    个内层因（同样是日志里确凿的因果链）若不在这里列出，读者会以为这个
+    簇只有一个因 —— v2.6.0 正是这样把 `com.acme.Second` 整个吞掉的。
+    """
+    variants = [v for v in getattr(c, "root_cause_variants", ()) or ()]
+    real = [v for v in variants if not v.reason.startswith("（")]
+    tail = [v for v in variants if v.reason.startswith("（")]
+    # 只有一种内层因、且没有溢出记账时**不输出这一行**。
+    # 原因（第一版这里写错了）：只有一个因也照列一遍，看着无害，其实是噪音
+    # —— 报告里每多一行固定内容，读者真正该看的那几行就被推远一行。
+    if len(real) <= 1 and not tail:
+        return ""
+    parts = []
+    for v in real:
+        mark = "（主因）" if v is real[0] else ""
+        parts.append(f"{v.reason[:60]} × {v.count}{mark}")
+    parts.extend(v.reason for v in tail)
+    return "；".join(parts)
+
+
 def _fingerprint_line(result: AnalysisResult) -> str:
     """确定性指纹：同一份日志跑两遍，这个数必须一字不差。"""
     try:
@@ -435,6 +458,9 @@ def _cluster_detail_md(index: int, c: ErrorCluster,
         notes.append(f"异常：{_anomaly_label(c)}")
     if notes:
         out.append(f"- 智能分析：{'；'.join(notes)}")
+    vline = _variants_line(c)
+    if vline:
+        out.append(f"- 簇内全部内层因：{vline}")
     if c.change_context:
         # 变更时间窗关联：统计线索（先后共现），措辞刻意不写"因变更导致"
         out.append(f"- 变更关联：{c.change_context}（时间共现线索，非因果结论）")
@@ -538,6 +564,11 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
         "priority_label": c.priority_label,
         "root_cause": c.is_root_cause,
         "root_cause_reason": c.root_cause_reason,
+        # 簇内全部 Caused-by 内层因（含各自次数与首处引用）。
+        # 只报主因那条会让「同簇另一个内层因」在报告里彻底消失 —— 拿到
+        # JSON 的人也无从得知还有别的因，所以连精简模式也带上（几十字节）。
+        "root_cause_variants": [v.as_dict() for v in
+                                getattr(c, "root_cause_variants", ())],
         "anomaly": c.anomaly,
         # 变更时间窗关联（统计线索，非因果；措辞见 _attach_change_events）
         "change_context": c.change_context,
@@ -720,6 +751,9 @@ def _cluster_detail_txt(index: int, c: ErrorCluster,
         notes.append(f"异常：{_anomaly_label(c)}")
     if notes:
         out.append(f"    智能分析：{'；'.join(notes)}")
+    vline = _variants_line(c)
+    if vline:
+        out.append(f"    簇内全部内层因：{vline}")
     if c.change_context:
         out.append(f"    变更关联：{c.change_context}（时间共现线索，非因果结论）")
     if include_instances:
@@ -936,6 +970,10 @@ def to_html(result: AnalysisResult, top_n: Optional[int] = None,
             if notes:
                 out.append(f'<p class="notes"><b>智能分析：</b>'
                            f"{esc('；'.join(notes))}</p>")
+            vline = _variants_line(c)
+            if vline:
+                out.append(f'<p class="notes"><b>簇内全部内层因：</b>'
+                           f'{esc(vline)}</p>')
             if c.change_context:
                 out.append(f'<p class="notes"><b>变更关联：</b>'
                            f"{esc(c.change_context)}"

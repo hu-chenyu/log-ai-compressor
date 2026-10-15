@@ -126,6 +126,9 @@ class Outcome:
     # **点名了这条链的根因异常类名**。行区间覆盖只证明"位置对得上"，
     # 严格口径才回答"它说的是不是这一条"。两个数一起看才有意义。
     chains_matched_strict: int = 0
+    # 报告口径（v2.7.0 起**对外只认这个**）：覆盖该链的 CONFIRMED 簇，其
+    # 对外报告的根因文本点名了该链的根因异常类名。见 _reported_causes。
+    chains_matched_reported: int = 0
     confirmed: int = 0
     confirmed_ok: int = 0
     by_conf: dict = field(default_factory=lambda: defaultdict(int))
@@ -136,7 +139,14 @@ class Outcome:
 def _cluster_text(c) -> str:
     """簇自身携带的全部文本（典型样例完整条目 + 前后上下文 + 摘要）。
 
-    这是"这个簇到底说了什么"的全部依据 —— 报告里给人看的就是这些。
+    这是"这个簇**身上**有什么文字"的全部依据 —— 注意**不是**"这个簇
+    **报告了**什么"。两者差得很远，见 `_reported_causes`。
+
+    修复（v2.7.0）：此前此处读的是 `entry.stack_lines`，而模型字段叫
+    `entry.stack` —— 属性名写错，`getattr(..., None) or []` 静默返回空
+    列表，于是这个口径**从来没看过堆栈**，而 `Caused by` 全在堆栈里。
+    指标不报错、不告警，只是安静地退化成"只看摘要与上下文"，拿到的
+    0% 会被读成"工具没找到"，方向正好反了。
     """
     parts: list[str] = [c.summary or ""]
     s = getattr(c, "sample", None)
@@ -144,9 +154,26 @@ def _cluster_text(c) -> str:
         entry = getattr(s, "entry", None)
         if entry is not None:
             parts.append(getattr(entry, "message", "") or "")
-            parts.extend(getattr(entry, "stack_lines", None) or [])
+            parts.extend(getattr(entry, "stack", None) or [])
         parts.extend(getattr(s, "before", None) or [])
         parts.extend(getattr(s, "after", None) or [])
+    return "\n".join(parts).lower()
+
+
+def _reported_causes(c) -> str:
+    """簇**对外报告**的根因文本（root_cause_reason + 全部内层因变体）。
+
+    为什么必须单独有一个口径：`_cluster_text` 量的是「簇的样例原文里
+    出现过这个类名」，那只能证明**文本里有过它**，证明不了工具把这条因
+    **说了出来**。举例：一个簇的样例恰好是某次 `SocketException`，于是
+    后面 29 次同类的链全被算作"被点名"—— 可报告里根因那一行写的是
+    另一个类。用户照着报告去查，查的是报告，不是样例。
+    v2.6.0 的「一簇只报一因」缺陷正是这种指标的盲区：变体不存在，
+    指标照样满分。**只有这个口径能检测出那个缺陷**，所以对外只认它。
+    """
+    parts: list[str] = [getattr(c, "root_cause_reason", "") or ""]
+    for v in getattr(c, "root_cause_variants", None) or ():
+        parts.append(getattr(v, "reason", "") or "")
     return "\n".join(parts).lower()
 
 
@@ -312,19 +339,25 @@ def evaluate(path: Path, name: str = "") -> Outcome:
         else:
             o.false_conf.append(c)
 
-    # --- 召回率：两个口径一起给，只给一个就是误导 ---
+    # --- 召回率：三个口径一起给，只给一个就是误导 ---
     #
     # 口径 A（行区间覆盖，宽松）：这条链的最内层行，是否被任意一个
     #   CONFIRMED 簇的行区间盖住。只证明"位置对得上"，不证明"说的是这一条"。
     #   大文件上必然接近 100% —— 实测某文件 2,643 条链只有 12 个 CONFIRMED
     #   簇，12 个簇的行区间铺满全文件，于是 2,643 条链全被"认领"。
     #
-    # 口径 B（严格，本项目对外只认这个）：覆盖该链的 CONFIRMED 簇，其
-    #   自身携带的证据文本里必须**点名这条链的根因异常类名**。
+    # 口径 B（簇文本）：覆盖该链的 CONFIRMED 簇，其**样例原文**里出现过
+    #   该链的根因类名。比 A 强（要求类名对得上），但仍不等于"报告了"。
     #
-    # 只报 A 会让指标变成近乎恒真的谓词（换个工具只要至少吐一个
-    # CONFIRMED 看着也像 99.9%）。所以两个数都打出来，差多少一眼可见。
+    # 口径 C（报告口径，v2.7.0 起对外只认这个）：覆盖该链的 CONFIRMED 簇，
+    #   其**对外报告的根因文本**点名了该链的根因类名。答的是"用户照着报告
+    #   能不能查到这一条"，也就是这个工具真正承诺的那件事。
+    #
+    # 只报 A 会让指标变成近乎恒真的谓词；只报 B 则会在 v2.6.0 那种
+    # 「一簇只报一因」的缺陷下**照样满分** —— 指标看不见自己该管的缺陷，
+    # 比指标偏低更危险。
     cluster_text = {id(c): _cluster_text(c) for c in result.clusters}
+    reported_text = {id(c): _reported_causes(c) for c in result.clusters}
     for ch in chains:
         covering = [c for c in result.clusters
                     if c.root_cause_confidence == CONF_CONFIRMED
@@ -336,6 +369,8 @@ def evaluate(path: Path, name: str = "") -> Outcome:
         cls = ch.deepest_sig.partition(":")[0].strip().lower()
         if cls and any(cls in cluster_text[id(c)] for c in covering):
             o.chains_matched_strict += 1
+        if cls and any(cls in reported_text[id(c)] for c in covering):
+            o.chains_matched_reported += 1
 
     for c in result.clusters:
         o.by_conf[c.root_cause_confidence or "(空)"] += 1
@@ -360,9 +395,11 @@ def main() -> int:
         # 默认扫两处：Loghub-2.0 精简集（data/loghub/*_full.log）与
         # Loghub 全量（data/loghub_full/**/*.log，含真实 Java 异常栈）。
         #
-        # 以前只扫前者，于是 README / BENCHMARK 里"61 文件 / 5,921 链"那条
-        # 数字**没法用一条命令复现**（裸跑会报"没有找到含 Caused-by 因果链的
-        # 日志"）。本项目的门禁之一就是"每个数字一条命令可跑"，这条得修。
+        # 以前只扫前者，于是"61 文件 / 5,921 链"那条数字**没法用一条命令复现**
+        # （裸跑会报"没有找到含 Caused-by 因果链的日志"）。本项目的门禁之一就是
+        # "每个数字一条命令可跑"，这条得修。
+        # 注：那条 Hadoop 数字已在 v2.7.0 撤回（来源不可得，见 BENCHMARK），
+        # 但扫描范围仍要覆盖 loghub_full —— Android_v1 全量在那里。
         roots = [ROOT / "data" / "loghub", ROOT / "data" / "loghub_full"]
         candidates: set[Path] = set()
         for root in roots:
@@ -385,14 +422,17 @@ def main() -> int:
         print("         **非生产日志** —— 验证指标机制与回归，不替代真实数据集结论。")
     else:
         print(f"  [口径] 真实数据集，共 {len(named)} 个含链文件。")
-        print("         **两个口径都算都打，对外只认严格口径**：")
-        print("           · 宽松：链被任意 CONFIRMED 簇的行区间盖住最内层异常行即算认领，")
-        print("             不校验认的是不是同一条。大文件上簇行区间横跨数千行时，")
-        print("             几十上百条重复链会被同一个簇一次性'认领' —— 这个数只能")
-        print("             读作**覆盖率**，不是'工具找对了根因的比例'。")
-        print("           · 严格：簇必须点名这条链的根因类名，才算真的找对了。")
-        print("         两者之差就是伪指标的量：Hadoop 上宽松 99.9% vs 严格 91.4%，")
-        print("         差 8.6 个百分点 —— 只报宽松等于把指标换成近乎恒真的谓词。")
+        print("         **三个口径都算都打，对外只认「报告口径」**：")
+        print("           · 报告口径：CONFIRMED 簇**对外报告的根因文本**点名了这条")
+        print("             链的根因类名。答的是「用户照着报告能不能查到这一条」。")
+        print("           · 簇文本：簇的**样例原文**里出现过该类名。比报告口径宽 ——")
+        print("             文本里有过，不等于工具把它说了出来。")
+        print("           · 宽松：链被任意 CONFIRMED 簇的行区间盖住最内层异常行即算")
+        print("             认领。大文件上簇行区间横跨数千行时，几十上百条重复链会")
+        print("             被同一个簇一次性'认领' —— 只能读作**覆盖率**。")
+        print("         口径 B 高出 C 的部分，正是「簇身上有、报告里没说」的量：")
+        print("         v2.6.0 的「一簇只报一因」就藏在这个缝里，指标却显示满分。")
+        print("         **指标看不见自己该管的缺陷，比指标偏低更危险。**")
     print("=" * 78)
 
     tot = Outcome()
@@ -406,7 +446,10 @@ def main() -> int:
               f"   ({o.confirmed_ok}/{o.confirmed})")
         print(f"    自信错误率        : "
               f"{'—' if not o.confirmed else f'{(1 - o.confirmed_ok / o.confirmed) * 100:.1f}%'}")
-        print(f"    召回率·严格（点名了这条链）: "
+        print(f"    召回率·报告口径（报告点名了）: "
+              f"{'—' if not o.chains else f'{o.chains_matched_reported / o.chains * 100:.1f}%'}"
+              f"   ({o.chains_matched_reported}/{o.chains})")
+        print(f"    召回率·簇文本（含该类名）  : "
               f"{'—' if not o.chains else f'{o.chains_matched_strict / o.chains * 100:.1f}%'}"
               f"   ({o.chains_matched_strict}/{o.chains})")
         print(f"    召回率·宽松（仅行区间覆盖）: "
@@ -422,6 +465,7 @@ def main() -> int:
         tot.chains += o.chains
         tot.chains_matched += o.chains_matched
         tot.chains_matched_strict += o.chains_matched_strict
+        tot.chains_matched_reported += o.chains_matched_reported
         tot.confirmed += o.confirmed
         tot.confirmed_ok += o.confirmed_ok
 
@@ -432,17 +476,25 @@ def main() -> int:
           if tot.confirmed else "    精确率 —")
     print(f"    自信错误率 {(1 - tot.confirmed_ok / tot.confirmed) * 100:.1f}%"
           if tot.confirmed else "    自信错误率 —")
-    print(f"    召回率·严格 {tot.chains_matched_strict / tot.chains * 100:.1f}%"
+    print(f"    召回率·报告口径 {tot.chains_matched_reported / tot.chains * 100:.1f}%"
+          f" ({tot.chains_matched_reported}/{tot.chains})"
+          if tot.chains else "    召回率·报告口径 —")
+    print(f"    召回率·簇文本 {tot.chains_matched_strict / tot.chains * 100:.1f}%"
           f" ({tot.chains_matched_strict}/{tot.chains})"
-          if tot.chains else "    召回率·严格 —")
+          if tot.chains else "    召回率·簇文本 —")
     print(f"    召回率·宽松 {tot.chains_matched / tot.chains * 100:.1f}%"
           f" ({tot.chains_matched}/{tot.chains})"
           if tot.chains else "    召回率·宽松 —")
-    if tot.chains and tot.chains_matched_strict != tot.chains_matched:
-        gap = (tot.chains_matched - tot.chains_matched_strict) / tot.chains * 100
-        print(f"    两口径相差 {gap:.1f} 个百分点 —— 宽松口径高估的部分，")
-        print("    是'簇的行区间盖住了这条链'但'簇并没有点名这条链的根因'。")
-        print("    **对外只认严格口径。**")
+    if tot.chains and tot.chains_matched_strict != tot.chains_matched_reported:
+        gap = (tot.chains_matched_strict - tot.chains_matched_reported) / tot.chains * 100
+        print(f"    簇文本比报告口径{'高' if gap >= 0 else '低'} {abs(gap):.1f} 个百分点：")
+        if gap >= 0:
+            print("    多出来的部分是「簇的样例里有过这个类名，但报告的根因行")
+            print("    没有点名它」—— 用户照着报告查不到，对工具承诺而言等于漏报。")
+        else:
+            print("    少掉的部分是「报告点名了，但那条链所在簇的样例里没有它」")
+            print("    —— 簇文本口径不是报告口径的上界，两者不可互相替代。")
+        print("    **对外只认报告口径。**")
     return 0
 
 

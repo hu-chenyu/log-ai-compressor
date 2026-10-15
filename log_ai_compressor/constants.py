@@ -233,6 +233,15 @@ MAX_CLUSTER_INSTANCES_DETAILED = 200    # 每簇含完整详情的实例数上�
 MAX_CLUSTER_INSTANCES_META = 2000       # 每簇元数据实例数上限
 MAX_TOTAL_INSTANCES = 50000             # 全局实例记录总数上限
 
+# 每簇最多展开多少种**不同的** Caused-by 内层因（v2.7.0）。
+# 簇是按「外层消息+堆栈指纹」聚的，内层因理论上可以无限多（把变量都归一化
+# 掉即可）。不设上限就是拿内存换报告长度，且这种簇的变体清单对读者毫无价值。
+# 超出部分不静默丢弃，而是计入 ErrorCluster.cause_overflow —— 报告里如实写
+# 「另有 N 次的内层因未展开」。
+MAX_CAUSES_PER_CLUSTER = 32
+# 报告/导出里最多列出前几种变体（cause_counts 仍全量保留）
+MAX_CAUSES_SHOWN = 8
+
 # 时间直方图（自适应分桶）参数
 HIST_MAX_BUCKETS = 96                # 单簇直方图最大桶数，超出则扩宽桶宽
 GLOBAL_HIST_MAX_BUCKETS = 512        # 全局错误趋势直方图最大桶数
