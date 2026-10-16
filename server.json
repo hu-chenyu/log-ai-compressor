@@ -3,7 +3,7 @@
   "name": "io.github.hu-chenyu/log-ai-compressor",
   "title": "log-ai-compressor",
   "description": "Local log forensics: compress logs into citable evidence with root-cause confidence tiers.",
-  "version": "2.9.5",
+  "version": "2.9.6",
   "repository": {
     "url": "https://github.com/hu-chenyu/log-ai-compressor",
     "source": "github"
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "log-ai-compressor",
-      "version": "2.9.5",
+      "version": "2.9.6",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
@@ -77,7 +77,7 @@
       },
       "benchmark": {
         "source": "https://zenodo.org/record/8275861",
-        "note": "Measured on 5 Loghub-2.0 datasets (ISSTA'24) whose event templates are human-annotated. Output size stays bounded in the low hundreds of tokens regardless of log size (re-measured 313-788 tokens on 120k-180k line logs), whereas Drain3's output grows from 317 to 566,802 tokens. Full methodology and limitations: https://github.com/hu-chenyu/log-ai-compressor/blob/main/docs/BENCHMARK.md"
+        "note": "Measured on 10 Loghub-2.0 datasets (ISSTA'24) whose event templates are human-annotated. At an equal 32k-token budget, evidence retention vs Drain3 is 7 wins / 1 tie / 2 losses - the two losses (HPC, Mac) are documented with root causes rather than hidden. Output size stays bounded in the low hundreds of tokens regardless of log size (re-measured 313-788 tokens on 120k-180k line logs), whereas Drain3's output grows from 317 to 566,802 tokens. Full methodology and limitations: https://github.com/hu-chenyu/log-ai-compressor/blob/main/docs/BENCHMARK.md"
       }
     }
   }

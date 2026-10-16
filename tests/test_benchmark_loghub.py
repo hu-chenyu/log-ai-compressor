@@ -171,8 +171,20 @@ def test_pct_handles_zero_denominator():
 
 
 # ---------------------------------------------------------------------------
-# 「全级别」必须等于规范级别词表 —— 这条手写列表漂移过一次，代价很大
+# 「覆盖率必须和报告里真实出现的簇数是同一个口径」
+#
+# 这两条最初写成 `method_ours(mini_dataset, ..., top_n=1)` 不传 levels，
+# 而 mini_dataset 是 Proxifier 风格的三行、**一行 ERROR/FAIL 都没有** ——
+# 默认级别（排障档 ERROR/FAIL）下它正确地聚出 0 个簇，于是断言变成
+# `assert 0 < 0`，红在一条和被测性质完全无关的地方。
+#
+# 那是**测试写错，不是代码错**：默认档把非错误行过滤掉本来就是产品行为。
+# 但它顺带说明一件事 —— 拿一份「默认档下无簇」的日志去测覆盖率口径，
+# 什么也测不到。所以下面两条显式传全级别，让夹具真的聚出簇来。
 # ---------------------------------------------------------------------------
+ALL_LEVELS_ARG = ",".join(bench.ALL_LEVELS)
+
+
 def test_coverage_never_exceeds_clusters_shown(mini_dataset):
     """**覆盖率不得超过报告里真正出现的簇数** —— 这条曾经被破过。
 
@@ -185,8 +197,10 @@ def test_coverage_never_exceeds_clusters_shown(mini_dataset):
 
     判据很硬：覆盖事件数 <= 实际展示的簇数。传 top_n=1 时，覆盖率必须 <= 1。
     """
-    _text, covered, n_eff = bench.method_ours(mini_dataset, 10 ** 9, top_n=1)
-    assert n_eff == 1
+    _text, covered, n_eff = bench.method_ours(
+        mini_dataset, 10 ** 9, levels=ALL_LEVELS_ARG, top_n=1)
+    assert n_eff == 1, f"top_n=1 应只展示 1 个簇，实际 {n_eff}"
+    assert covered, "夹具在全级别下应当聚出簇；空集会让这条断言恒真"
     assert len(covered) <= 1, (
         f"top_n=1 时覆盖率报了 {len(covered)} 种事件 —— "
         f"指标在数报告里没出现的簇")
@@ -202,15 +216,22 @@ def test_full_scope_coverage_dominates_delivery_scope(mini_dataset):
     同时守住另一头：交付口径绝不能比全量口径更高（那说明两个口径算的
     根本不是同一个对象，而是各算各的）。
     """
-    _t1, cov_small, n_small = bench.method_ours(mini_dataset, 10 ** 9, top_n=1)
-    _t2, cov_big, n_big = bench.method_ours(mini_dataset, 10 ** 9, top_n=10 ** 9)
-    assert n_small < n_big, "两次调用的生效簇数应当不同，否则这条测试无效"
+    _t1, cov_small, n_small = bench.method_ours(
+        mini_dataset, 10 ** 9, levels=ALL_LEVELS_ARG, top_n=1)
+    _t2, cov_big, n_big = bench.method_ours(
+        mini_dataset, 10 ** 9, levels=ALL_LEVELS_ARG, top_n=10 ** 9)
+    assert n_small < n_big, (
+        f"两次调用的生效簇数应当不同（交付 {n_small} / 全量 {n_big}），"
+        f"否则这条测试无效")
     assert cov_small <= cov_big, (
         f"交付口径 {sorted(cov_small)} 不该多于全量口径 {sorted(cov_big)}")
     assert len(cov_small) <= n_small
     assert len(cov_big) <= n_big
 
 
+# ---------------------------------------------------------------------------
+# 「全级别」必须等于规范级别词表 —— 这条手写列表漂移过一次，代价很大
+# ---------------------------------------------------------------------------
 def test_all_levels_is_the_canonical_vocabulary():
     """ALL_LEVELS 必须直接等于 constants.LEVEL_ORDER，不允许手写。
 

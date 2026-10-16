@@ -326,6 +326,33 @@ def sweep_logslop(ds: Dataset, budgets: List[int]) -> List[Tuple[int, int, int]]
     return out
 
 
+def _clusters_for_budget(result, budget_tokens: int, n_eff: int) -> int:
+    """在 token 预算内最多能放多少个簇。
+
+    做法：用已经测出的 (top_n=n_eff, 实测 tokens) 反推「每簇边际成本」与
+    「固定开销」，再解出预算内的最大簇数。**不重新分析** —— 分析是贵的，
+    导出是便宜的。
+
+    为什么需要它：产品默认 `top_n=20` 对复杂日志是**明显的浪费** ——
+    Loghub 上 32k 预算里我们只用掉 682~1,318 token，剩下的全扔了，而
+    Drain3 在同一预算下用掉 10,051（HealthApp 甚至 566,802）。
+    README 宣称「同样 token 预算下」对比，而代码从来没按预算分配过。
+    """
+    total_clusters = len(result.clusters)
+    if total_clusters <= n_eff:
+        return total_clusters
+    sample = service.export_text(result, "summary", top_n=n_eff)
+    cost = max(estimate_tokens(sample), 1)
+    # 每多一个簇的边际成本：整份报告除以簇数会低估（固定开销摊薄），用
+    # 两个点做差分更准。退化时用「总额 / 簇数」兜底。
+    half = max(n_eff // 2, 1)
+    cost_half = estimate_tokens(service.export_text(result, "summary", top_n=half))
+    marginal = max((cost - cost_half) // max(n_eff - half, 1), 1)
+    fixed = max(cost - marginal * n_eff, 0)
+    room = max(budget_tokens - fixed, 0)
+    return max(min(total_clusters, room // marginal), n_eff)
+
+
 def method_ours(ds: Dataset, budget_tokens: int,
                 levels: Optional[str] = None,
                 similarity: str = "standard",
@@ -357,15 +384,17 @@ def method_ours(ds: Dataset, budget_tokens: int,
     """
     level_list = (levels.split(",") if levels else None)
     n_eff = top_n if top_n else DEFAULT_TOP_N
+    # 分析一次就够（分析贵、导出便宜）：用 top_n=10^9 把所有簇都建出来，
+    # 之后想按哪个口径导出/统计都只是切片。
     result = service.analyze(
         paths=[str(ds.log_path)],
-        params={"levels": level_list, "top_n": n_eff, "context_lines": 0,
+        params={"levels": level_list, "top_n": 10 ** 9, "context_lines": 0,
                 "similarity": similarity},
     )
-    # 文本与覆盖率都只算「报告里真的会出现的那 n_eff 个簇」——
-    # to_text 的实现就是 result.clusters[:n_eff]。
-    shown = result.clusters[:n_eff]
-    text = service.export_text(result, "summary", top_n=n_eff)
+    n_use = _clusters_for_budget(result, budget_tokens, n_eff) \
+        if top_n is None else min(n_eff, len(result.clusters))
+    shown = result.clusters[:n_use]
+    text = service.export_text(result, "summary", top_n=n_use)
     covered: Set[str] = set()
     for c in shown:
         sample = getattr(c, "sample", None)
@@ -374,7 +403,7 @@ def method_ours(ds: Dataset, budget_tokens: int,
         eid = ds.event_of_line_no(sample.entry.line_no)
         if eid:
             covered.add(eid)
-    return text, covered, n_eff
+    return text, covered, n_use
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +458,24 @@ def pct(num: int, den: int) -> str:
     return "—" if not den else f"{num / den * 100:.1f}%"
 
 
+def verdict(our_n: int, their_n: int, total: int) -> str:
+    """按**计数**判胜负，不拿四舍五入后的百分数比大小。
+
+    为什么必须这样：v2.9.6 之前比的是 `92.105... > 92.1`，把一个
+    **0.005 个百分点的舍入差判成了「胜」**。OpenSSH 两边其实都是
+    35/38，是平手。
+
+    报告保留 1 位小数，于是**小于半个末位（0.05pp）的差无法与舍入误差
+    区分** —— 落在容差里的一律平手。只要比较落在计数上，歧义就不存在。
+    """
+    eps = total * 0.0005          # 0.05pp 换算成计数
+    if our_n > their_n + eps:
+        return "胜"
+    if our_n < their_n - eps:
+        return "负"
+    return "平"
+
+
 def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
              use_drain: bool, use_logslop: bool = True) -> None:
     total_events = len(ds.events)
@@ -446,37 +493,55 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
     lop_text, lop_cov = method_logslop(ds, 10 ** 9) if use_logslop else ("", set())
     t_lop = time.time() - t0
 
+    lv_all = ",".join(ALL_LEVELS) if not levels else levels
+    # 同预算档与 tail/grep @32000tok 对齐：同一个数字，谁也别占便宜
+    BUDGET = max(DEFAULT_BUDGETS)
+
     t0 = time.time()
-    our_def_text, our_def_cov, _ = method_ours(ds, 10 ** 9, levels)
+    our_def_text, our_def_cov, n_def = method_ours(
+        ds, BUDGET, levels, top_n=DEFAULT_TOP_N)
     t_our_def = time.time() - t0
 
     t0 = time.time()
-    our_all_text, our_all_cov, n_eff = method_ours(
-        ds, 10 ** 9, ",".join(ALL_LEVELS) if not levels else levels)
-    t_our_all = time.time() - t0
+    our_del_text, our_del_cov, n_del = method_ours(
+        ds, BUDGET, lv_all, top_n=DEFAULT_TOP_N)
+    t_our_del = time.time() - t0
 
-    # 全量口径：top_n 取簇数本身 = 报告里给每个簇都留位置。
-    # 衡量的是**聚类质量上界**，不等于用户默认就拿得到 —— 两者必须分行报。
     t0 = time.time()
-    _, our_full_cov, _ = method_ours(
-        ds, 10 ** 9, ",".join(ALL_LEVELS) if not levels else levels,
-        top_n=10 ** 9)
+    our_bud_text, our_bud_cov, n_bud = method_ours(ds, BUDGET, lv_all)
+    t_our_bud = time.time() - t0
+
+    t0 = time.time()
+    our_full_text, our_full_cov, n_full = method_ours(
+        ds, BUDGET, lv_all, top_n=10 ** 9)
     t_our_full = time.time() - t0
 
+    # 每行必须用**自己那一份** text/cov —— 曾经这里四个口径全指向同一对变量，
+    # 于是「交付口径」和「全量口径」打印出同一个数字，看着像两行其实一行。
     rows: List[Tuple[str, str, str, str, str]] = []
-    for label, text, cov, secs in (
-            (f"log-ai-compressor 默认级别(排障, top{n_eff})",
-             our_def_text, our_def_cov, t_our_def),
-            (f"log-ai-compressor 全级别(交付口径 top{n_eff}) ←主指标",
-             our_all_text, our_all_cov, t_our_all),
-            ("log-ai-compressor 全级别(全量口径·聚类上界)",
-             our_all_text, our_full_cov, t_our_full),
-            ("Drain3（ICWS'17, 821★）", drain_text, drain_cov, t_drain),
-            ("LogsLop（AMD 2026-07）", lop_text, lop_cov, t_lop),
+    # 下面这张表要拿覆盖率跟 Drain3/LogsLop 逐档比，所以必须先确认**每一行
+    # 的覆盖率都没有超过这一行自己展示的数量**。两个基线的 n_shown 就是它们
+    # 覆盖数本身（报告里逐事件列模板），断言对它们恒真；ours 的 n_shown 是真正
+    # 生效的簇数，断言对它有意义 —— 将来谁把变量接错行，这里当场响。
+    for label, text, cov, secs, n_shown in (
+            (f"log-ai-compressor 默认级别(排障, top{n_del})",
+             our_def_text, our_def_cov, t_our_def, n_def),
+            (f"log-ai-compressor 全级别(交付口径 top{n_del})",
+             our_del_text, our_del_cov, t_our_del, n_del),
+            (f"log-ai-compressor 全级别(同预算 {BUDGET}tok, top{n_bud}) ←主指标",
+             our_bud_text, our_bud_cov, t_our_bud, n_bud),
+            (f"log-ai-compressor 全级别(全量口径·聚类上界 top{n_full})",
+             our_full_text, our_full_cov, t_our_full, n_full),
+            ("Drain3（ICWS'17, 821★）", drain_text, drain_cov, t_drain,
+             len(drain_cov)),
+            ("LogsLop（AMD 2026-07）", lop_text, lop_cov, t_lop, len(lop_cov)),
     ):
         if not text and not cov:
             continue
         n_tok = estimate_tokens(text)
+        assert len(cov) <= n_shown, (
+            f"{label}：覆盖率报了 {len(cov)} 种事件，"
+            f"超过这一行展示的 {n_shown} 个 —— 指标在数报告里没出现的东西")
         rows.append((label, f"{n_tok:,}", f"{ds.raw_tokens / max(n_tok, 1):,.0f}x",
                      pct(len(cov), total_events), f"{secs:.2f}s"))
 
@@ -493,6 +558,25 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
     for r in rows:
         print(f"  {r[0]:<34}{r[1]:>12}{r[2]:>10}{r[3]:>12}{r[4]:>8}")
 
+    # ---- 对照判定：三个口径各比一次，输赢按事件种数算 ----
+    # 不比四舍五入后的百分数。报告只有 1 位小数，0.05pp 以内的差和舍入误差
+    # 分不开，拿它判胜负等于让显示精度参与裁决（v2.9.5 就这么把平手判成了胜）。
+    scopes = (("交付口径 top%d" % n_del, our_del_cov),
+              ("同预算 %dtok" % BUDGET, our_bud_cov),
+              ("全量口径 top%d" % n_full, our_full_cov))
+    print()
+    print("  对照判定（按事件种数比；差 <0.05pp 记平 —— 落在报告舍入精度以内）")
+    print(f"  {'本项目口径':<22}{'vs Drain3':>12}{'vs LogsLop':>14}")
+    print("  " + "-" * 48)
+    for scope, cov in scopes:
+        vd = (verdict(len(cov), len(drain_cov), total_events)
+              if use_drain else "—")
+        vl = (verdict(len(cov), len(lop_cov), total_events)
+              if use_logslop else "—")
+        detail = (f"  ({len(cov)} vs {len(drain_cov)}/{len(lop_cov)} 种)"
+                  if use_drain and use_logslop else "")
+        print(f"  {scope:<22}{vd:>12}{vl:>14}{detail}")
+
     print()
     print(f"  朴素基线在同预算下的保留率曲线（事件类型 {total_events} 种）")
     print(f"  {'预算(tokens)':>14}{'tail 保留':>12}{'grep 保留':>12}"
@@ -502,7 +586,11 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
     sg = dict((b, c) for b, _, c in sweep_grep(ds, budgets))
     sl = dict((b, c) for b, _, c in sweep_logslop(ds, budgets)) if use_logslop else {}
     for b in budgets:
-        ours_at = pct(len(our_all_cov), total_events)
+        # 本项目**不在这条曲线上**：它是固定一次分析 + 按预算导出，不是每个
+        # 预算重新分析一次。之前这里在每一行都抄同一个数，读者横着一看会以为
+        # 「500 tok 时我们也有 X%」—— 交付口径本身就要 682~1,318 token。
+        # 所以只在预算真正等于 BUDGET 的那一行给数，其余行给 —。
+        ours_at = pct(len(our_bud_cov), total_events) if b == BUDGET else "—"
         print(f"  {b:>14,}{pct(st[b], total_events):>12}"
               f"{pct(sg[b], total_events):>12}"
               f"{(pct(sl[b], total_events) if use_logslop else '—'):>14}{ours_at:>16}")
