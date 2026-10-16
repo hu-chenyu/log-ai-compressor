@@ -132,29 +132,40 @@ jobs:
           if rc:
               sys.exit(rc)
 
-          # --cov-fail-under 只卡**地板**（90%）。README 工程指标表里写的是精确值，
-          # 地板过了不代表那个显示值没漂 —— 这正是 v2.9.1 连着抓到的第三个同形漂移
-          # （前两个：自证主张条数、测试用例数）。pytest 刚跑完，coverage.xml 已落盘，
-          # 是唯一能拿到它的时机；在测试内部取是取不到的（pytest-cov 会话结束才写）。
-          cov = Path("coverage.xml")
-          if not cov.exists():
-              print("找不到 coverage.xml，无法对账")
-              sys.exit(1)
-          rate = re.search(r'line-rate="([0-9.]+)"',
-                           cov.read_text(encoding="utf-8"))
-          if not rate:
-              print("coverage.xml 解析不出 line-rate")
-              sys.exit(1)
-          pct = round(float(rate.group(1)) * 100)
-          readme = Path("README.md").read_text(encoding="utf-8")
-          claimed = re.search(r"覆盖率\s*\*\*(\d+)%\*\*", readme)
-          if not claimed:
-              print("README 里找不到覆盖率写法，本门禁无法对账（别让它静默通过）")
-              sys.exit(1)
-          if int(claimed.group(1)) != pct:
-              print(f"README 写覆盖率 {claimed.group(1)}%，实测 {pct}%")
-              sys.exit(1)
-          print(f"覆盖率对账通过：README 与实测均为 {pct}%")
+          # --cov-fail-under 只卡**地板**（90%），三个矩阵都卡。
+          # 但 README 工程指标表里写的是**精确值**，而覆盖率是**平台相关**的：
+          # 同一个仓库在 ubuntu 与 windows 上测出的百分比分母一样、分子不一样
+          # （有跨平台 / 版本条件分支）。v2.9.1 第一次加这条时没想清楚，
+          # 结果 run #40 只有 windows-3.12 挂 —— 而那不是 windows 有问题，
+          # 是**我把一个平台相关的量当成了平台无关的**。
+          #
+          # 所以口径写死：README 那个数 = **ubuntu-3.12 的实测值**，
+          # 对账只在参考矩阵上做；其余矩阵照打不误地报出数字，不参与判定。
+          # 地板（90%）仍然三矩阵全卡 —— 真正的回归不会因此漏掉。
+          try:
+              pct = round(float(re.search(
+                  r'line-rate="([0-9.]+)"',
+                  cov.read_text(encoding="utf-8")).group(1)) * 100)
+          except (OSError, AttributeError, ValueError):
+              print("解析 coverage.xml 失败：文件不存在或格式不对")
+              if "${{ matrix.os }}" == "ubuntu-latest":
+                  sys.exit(1)
+              print("非参考矩阵，跳过判定")
+              pct = -1
+          if pct >= 0:
+              print(f"[${{ matrix.os }} ${{ matrix.python }}] 实测覆盖率 {pct}%")
+          if pct >= 0 and "${{ matrix.os }}" == "ubuntu-latest":
+              readme = Path("README.md").read_text(encoding="utf-8")
+              claimed = re.search(r"覆盖率\s*\*\*(\d+)%\*\*", readme)
+              if not claimed:
+                  print("README 里找不到覆盖率写法，本门禁无法对账（别让它静默通过）")
+                  sys.exit(1)
+              if int(claimed.group(1)) != pct:
+                  print(f"README 写覆盖率 {claimed.group(1)}%，"
+                        f"ubuntu-3.12 实测 {pct}% —— README 的覆盖率口径就是"
+                        f" ubuntu-3.12，二者必须相等")
+                  sys.exit(1)
+              print(f"覆盖率对账通过：README 与 ubuntu-3.12 实测均为 {pct}%")
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
