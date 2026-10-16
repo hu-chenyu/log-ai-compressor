@@ -456,7 +456,7 @@ log-ai-compressor verify app.log                        # 当场自检
 git clone https://github.com/hu-chenyu/log-ai-compressor.git
 cd log-ai-compressor
 pip install -r requirements-dev.txt
-python -m pytest                        # 1,059 个测试
+python -m pytest                        # 1,061 个测试
 python scripts/adversarial_eval.py      # 对抗性评测评分卡（CI 门禁之一）
 python scripts/benchmark_loghub.py      # 复现上面的实测表（需先下载数据集）
 ```
@@ -650,7 +650,7 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 | 指标 | 实测值 |
 | --- | --- |
 | 生产代码 | 7,575 行（32 个模块） |
-| 测试 | **1,059 用例**，覆盖率 **96%**（口径：ubuntu-3.12 实测，3,883 语句 / 漏行 156；覆盖率是**平台相关**的，三个矩阵各自卡 ≥90% 底线，README 这个数只对账 ubuntu-3.12），`ruff` 全绿 |
+| 测试 | **1,061 用例**，覆盖率 **96%**（口径：ubuntu-3.12 实测，3,883 语句 / 漏行 156；覆盖率是**平台相关**的，三个矩阵各自卡 ≥90% 底线，README 这个数只对账 ubuntu-3.12），`ruff` 全绿 |
 | CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**六道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性。其中自证脚本现已断言 **10 条**主张，含「README 工程指标与架构树必须与仓库一致」 |
 | 内存 | 与日志总行数无关，只与错误种类数相关 |
 | 硬依赖 | 仅 PyYAML（web / mcp / ai 全部为可选 extra） |

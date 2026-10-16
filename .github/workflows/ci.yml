@@ -118,6 +118,21 @@ jobs:
           import sys
           from pathlib import Path
 
+          # Windows runner 的控制台代码页是 cp1252，而下面要 print 中文。
+          # 不先把 stdout/stderr 切到 utf-8，`print("实测覆盖率 …")` 会抛
+          # UnicodeEncodeError，整个 step 直接红 —— 而红的原因跟覆盖率对账
+          # 毫无关系，极容易误判成「Windows 覆盖率不对」。
+          #
+          # 这是 v2.9.0 刚在 CLI 上修过的同一个坑（scripts/prove.py 与
+          # scripts/adversarial_eval.py 顶部都有这段重配），我把它搬进 CI 时
+          # 漏了，于是 run #43 的 windows-3.12 又挂在同一步上。
+          # tests/test_ci_step_execution.py 会在 cp1252 下真跑这段，别再退化回去。
+          for _stream in (sys.stdout, sys.stderr):
+              try:
+                  _stream.reconfigure(encoding="utf-8", errors="replace")
+              except (AttributeError, ValueError, OSError):
+                  pass
+
           # 地板已抬到 3.11，mcp / web / ai 三个 extra 在所有矩阵上都装得上，
           # 所以覆盖率口径统一用 pyproject 的配置，不再需要临时 coveragerc 分支
           # （那条分支是 Python 3.9 时代的产物：mcp 装不上时把 mcp 包移出统计，
