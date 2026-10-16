@@ -230,6 +230,31 @@ def test_full_scope_coverage_dominates_delivery_scope(mini_dataset):
 
 
 # ---------------------------------------------------------------------------
+# 交付口径的物理上限 —— 这一栏低是天花板低，不是「算法输了」
+# ---------------------------------------------------------------------------
+def test_delivery_ceiling_is_min_of_shown_and_total():
+    """上限 = min(展示簇数, 标注事件数) / 标注事件数。"""
+    assert bench.delivery_ceiling(20, 626) == pytest.approx(20 / 626 * 100)
+    assert bench.delivery_ceiling(20, 10) == pytest.approx(100.0)
+    # 簇数超过事件数时，上限封顶在 100%，不能算出 >100 的荒谬值
+    assert bench.delivery_ceiling(50, 10) == pytest.approx(100.0)
+    assert bench.delivery_ceiling(20, 0) == 0.0
+
+
+def test_delivery_coverage_never_exceeds_physical_ceiling(mini_dataset):
+    """实测覆盖率必须 ≤ 物理上限，否则说明「簇」与「事件」被搞混了。"""
+    total = 2                       # mini_dataset 有 E1 / E2 两种标注事件
+    _t, cov, n_del = bench.method_ours(
+        mini_dataset, 10 ** 9, levels=ALL_LEVELS_ARG,
+        top_n=bench.DEFAULT_TOP_N)
+    assert n_del <= bench.DEFAULT_TOP_N
+    assert len(cov) <= bench.delivery_ceiling(n_del, total) / 100 * total + 1e-9, (
+        f"实测 {len(cov)} 种超过上限 "
+        f"{bench.delivery_ceiling(n_del, total):.1f}%"
+        f"（展示 {n_del} 簇 / {total} 种事件）")
+
+
+# ---------------------------------------------------------------------------
 # 「全级别」必须等于规范级别词表 —— 这条手写列表漂移过一次，代价很大
 # ---------------------------------------------------------------------------
 def test_all_levels_is_the_canonical_vocabulary():
