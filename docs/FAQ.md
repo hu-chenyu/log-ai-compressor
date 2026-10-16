@@ -154,7 +154,7 @@ LLMLingua（Microsoft Research, arXiv:2310.05736）能把 prompt 压 20 倍，
 - 最差的一个数据集是 **OpenStack 证据保留率 50%**（全级别）——不是全胜。
 
 所以这个数字的正确用法是：**说明上限，不是说明常态**。
-日常用请看 §6.1 的逐数据集表，别只看最大的那个。
+日常用请看 README 里那张逐数据集的保留率表，别只看最大的那个。
 
 `docs/BENCHMARK.md` 里每一张表下面都写了「本文不能证明什么」，
 包括"单次运行、无重复实验、无显著性检验"和"Thunderbird 等 300MB+ 数据集未测"。
@@ -347,4 +347,4 @@ python scripts/eval_rootcause.py --repro        # 三个口径都打，对外只
 
 - 定位与差异化论证（含品类判断、四个"白地"、以及**这些判断在什么条件下会失效**）：[`POSITIONING.md`](POSITIONING.md)
 - 全部实测数据与复现命令：[`BENCHMARK.md`](BENCHMARK.md)
-- 完整的能力边界（比本文更细，含 6 条）：README §9
+- 完整的能力边界（比本文更细，含 6 条）：README「它做不到什么」一节
