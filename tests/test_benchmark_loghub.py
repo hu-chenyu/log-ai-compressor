@@ -171,6 +171,50 @@ def test_pct_handles_zero_denominator():
 
 
 # ---------------------------------------------------------------------------
+# 「全级别」必须等于规范级别词表 —— 这条手写列表漂移过一次，代价很大
+# ---------------------------------------------------------------------------
+def test_all_levels_is_the_canonical_vocabulary():
+    """ALL_LEVELS 必须直接等于 constants.LEVEL_ORDER，不允许手写。
+
+    曾经手写过一份，漏了 FAIL（真实级别）却收了 WARNING/FATAL/CRITICAL
+    三个归一后永远匹配不上的别名。后果是**「全级别」比默认的 ERROR/FAIL
+    还窄** —— 传全级别拿到的簇数少于什么都不传。
+    """
+    from log_ai_compressor.constants import LEVEL_ORDER
+    assert set(bench.ALL_LEVELS) == set(LEVEL_ORDER), (
+        f"ALL_LEVELS 与规范词表不一致：多 {set(bench.ALL_LEVELS)-set(LEVEL_ORDER)}，"
+        f"少 {set(LEVEL_ORDER)-set(bench.ALL_LEVELS)}")
+
+
+def test_every_canonical_level_survives_all_levels_filter():
+    """每个规范级别的行，在 ALL_LEVELS 下都必须成簇 —— 一个都不能被吞。"""
+    from log_ai_compressor.core.pipeline import analyze_text
+    from log_ai_compressor.constants import LEVEL_ORDER
+    dropped = []
+    for lvl in LEVEL_ORDER:
+        line = f"2024-01-01 10:00:00 {lvl} [svc] something happened"
+        r = analyze_text(line, levels=bench.ALL_LEVELS)
+        if not r.clusters:
+            dropped.append(lvl)
+    assert not dropped, f"ALL_LEVELS 下这些级别被整条丢弃：{dropped}"
+
+
+def test_all_levels_is_never_narrower_than_the_default():
+    """「全级别」≥ 默认 —— 一个只增不减的不变量。
+
+    这是本条 bug 最直白的症状：同一行日志，`--level 全级别` 拿到的结果
+    少于不传级别参数。语义上讲不通，所以必须由测试钉死。
+    """
+    from log_ai_compressor.core.pipeline import analyze_text
+    # 这行被判成 FAIL（关键词 Failed）—— 正是被漏掉的那一档
+    line = ("2024-01-01 10:00:00 ERROR [sshd] "
+            "Failed password for root from 10.0.0.1 port 22 ssh2")
+    assert analyze_text(line, levels=None).clusters, "默认档至少要认一行"
+    assert analyze_text(line, levels=bench.ALL_LEVELS).clusters, (
+        "全级别比默认档还窄 —— ALL_LEVELS 又漏级别了")
+
+
+# ---------------------------------------------------------------------------
 # 下载脚本与基准脚本的目录约定必须对得上
 # ---------------------------------------------------------------------------
 def _load_fetch():
