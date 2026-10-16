@@ -142,6 +142,7 @@ jobs:
           # 所以口径写死：README 那个数 = **ubuntu-3.12 的实测值**，
           # 对账只在参考矩阵上做；其余矩阵照打不误地报出数字，不参与判定。
           # 地板（90%）仍然三矩阵全卡 —— 真正的回归不会因此漏掉。
+          cov = Path("coverage.xml")
           try:
               pct = round(float(re.search(
                   r'line-rate="([0-9.]+)"',
