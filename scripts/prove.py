@@ -20,6 +20,7 @@ README 里写了压缩比、证据保留率、置信档位、确定性、评分�
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -181,25 +182,40 @@ def claim_readme_metrics() -> dict:
     **六道自证门禁没有一项拦它**。一个专门讲「不必相信作者，自己跑」
     的项目，README 里的数字却没有对应的可执行检查，这本身就是矛盾。
 
-    加了这条之后，README 数字再漂移就不是「读者自己发现」，而是 CI 变红。
+    v2.9.1 追加校「README 说自证脚本有 N 条主张」：这同样是 README 里的
+    一个数字，也同样一度是错的 —— v2.9.0 加了「接入层只经 service 触达
+    core/export」那条之后，README 两处仍写 9 条，而**上面这个门禁照样绿**，
+    因为它只校行数与模块数。
+
+    **同一个数字在 README 里出现几次，就校几处** —— 只校第一处，等于把
+    v2.8.1 那条「聚合值守住了、明细漏了」的教训换个方向再犯一遍。
     """
+    import re
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     m = _code_metrics()
     row = next((ln for ln in readme.splitlines()
                 if ln.strip().startswith("| 生产代码")), "")
-    import re
     got = re.search(r"([\d,]+)\s*行（(\d+)\s*个模块）", row)
     if not got:
         return claim("README 工程指标与仓库一致", False,
                      f"README 里找不到「生产代码」那一行：{row!r}")
     claimed_lines = int(got.group(1).replace(",", ""))
     claimed_modules = int(got.group(2))
-    ok = (claimed_lines == m["lines"] and claimed_modules == m["modules"])
+    metrics_ok = claimed_lines == m["lines"] and claimed_modules == m["modules"]
+
+    # 「自证脚本……N 条主张」与本文件实际登记的条数对账。
+    # 前向引用 _CLAIM_FNS：它在下方 gather() 之前定义，而调用发生在
+    # 模块加载完成之后，所以运行期一定拿得到。
+    expected = len(_CLAIM_FNS)
+    found = [int(x) for x in re.findall(r"\*\*(\d+)\s*条\*\*\s*主张", readme)]
+    counts_ok = bool(found) and all(n == expected for n in found)
+
     return claim(
-        "README 工程指标与仓库一致", ok,
+        "README 工程指标与仓库一致", metrics_ok and counts_ok,
         f"README 写 {claimed_lines} 行 / {claimed_modules} 个模块；"
         f"实测 {m['lines']} 行 / {m['modules']} 个模块"
-        f"（口径：log_ai_compressor/**/*.py 非空非注释行）")
+        f"（口径：log_ai_compressor/**/*.py 非空非注释行）；"
+        f"README 写自证主张 {found or '未找到'} 条，本文件实际登记 {expected} 条")
 
 
 def claim_readme_module_tree() -> dict:
@@ -305,19 +321,38 @@ KNOWN_GAPS = [
 ]
 
 
+# 主张清单是**唯一口径源**：README 里「自证脚本断言 N 条主张」的那个 N、
+# gather() 实际跑几条、CI 看到的条数，全部由它决定。
+#
+# 为什么提成模块级常量：以前 gather() 里是一份字面量列表，README 另写一个
+# 数字 —— **两处各写各的**。于是 v2.9.0 加了第 10 条之后 README 两处仍写
+# 9 条，而全部门禁绿着。这和 v2.8.1 那次是同一个形状：一个数字有不止一处
+# 来源，却只有一处被校。
+_CLAIM_FNS = (
+    claim_determinism,
+    claim_evidence,
+    claim_confidence,
+    claim_compression,
+    claim_scorecard,
+    claim_structured,
+    claim_optdeps,
+    claim_layering,
+    claim_readme_metrics,
+    claim_readme_module_tree,
+)
+
+
+def _run_claim(fn, path: Path) -> dict:
+    """带日志路径参数的主张要传 path，其余直接调。
+
+    用签名判断而不是另维护一张「谁要 path」的名单 —— 那张名单自己就会变成
+    第二个会漂移的地方，正是上面那条门禁要治的病。
+    """
+    return fn(path) if inspect.signature(fn).parameters else fn()
+
+
 def gather(path: Path) -> dict:
-    claims = [
-        claim_determinism(path),
-        claim_evidence(path),
-        claim_confidence(path),
-        claim_compression(path),
-        claim_scorecard(),
-        claim_structured(),
-        claim_optdeps(),
-        claim_layering(),
-        claim_readme_metrics(),
-        claim_readme_module_tree(),
-    ]
+    claims = [_run_claim(fn, path) for fn in _CLAIM_FNS]
     return {
         "subject": str(path.name),
         "claims": claims,

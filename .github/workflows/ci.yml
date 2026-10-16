@@ -113,20 +113,48 @@ jobs:
         # 在三个平台上行为一致。
         shell: python
         run: |
+          import re
           import subprocess
           import sys
+          from pathlib import Path
 
           # 地板已抬到 3.11，mcp / web / ai 三个 extra 在所有矩阵上都装得上，
           # 所以覆盖率口径统一用 pyproject 的配置，不再需要临时 coveragerc 分支
           # （那条分支是 Python 3.9 时代的产物：mcp 装不上时把 mcp 包移出统计，
           # 免得跑不了的代码把门槛拖到不及格。现在没有"跑不了"的矩阵了。）
-          sys.exit(subprocess.call([
+          rc = subprocess.call([
               sys.executable, "-m", "pytest",
               "--cov=log_ai_compressor",
               "--cov-report=term-missing",
               "--cov-report=xml",
               "--cov-fail-under=90",
-          ]))
+          ])
+          if rc:
+              sys.exit(rc)
+
+          # --cov-fail-under 只卡**地板**（90%）。README 工程指标表里写的是精确值，
+          # 地板过了不代表那个显示值没漂 —— 这正是 v2.9.1 连着抓到的第三个同形漂移
+          # （前两个：自证主张条数、测试用例数）。pytest 刚跑完，coverage.xml 已落盘，
+          # 是唯一能拿到它的时机；在测试内部取是取不到的（pytest-cov 会话结束才写）。
+          cov = Path("coverage.xml")
+          if not cov.exists():
+              print("找不到 coverage.xml，无法对账")
+              sys.exit(1)
+          rate = re.search(r'line-rate="([0-9.]+)"',
+                           cov.read_text(encoding="utf-8"))
+          if not rate:
+              print("coverage.xml 解析不出 line-rate")
+              sys.exit(1)
+          pct = round(float(rate.group(1)) * 100)
+          readme = Path("README.md").read_text(encoding="utf-8")
+          claimed = re.search(r"覆盖率\s*\*\*(\d+)%\*\*", readme)
+          if not claimed:
+              print("README 里找不到覆盖率写法，本门禁无法对账（别让它静默通过）")
+              sys.exit(1)
+          if int(claimed.group(1)) != pct:
+              print(f"README 写覆盖率 {claimed.group(1)}%，实测 {pct}%")
+              sys.exit(1)
+          print(f"覆盖率对账通过：README 与实测均为 {pct}%")
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4

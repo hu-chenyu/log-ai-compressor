@@ -456,7 +456,7 @@ log-ai-compressor verify app.log                        # 当场自检
 git clone https://github.com/hu-chenyu/log-ai-compressor.git
 cd log-ai-compressor
 pip install -r requirements-dev.txt
-python -m pytest                        # 1,043 个测试
+python -m pytest                        # 1,053 个测试
 python scripts/adversarial_eval.py      # 对抗性评测评分卡（CI 门禁之一）
 python scripts/benchmark_loghub.py      # 复现上面的实测表（需先下载数据集）
 ```
@@ -650,8 +650,8 @@ HealthApp 上 Drain3 压缩比只有 **9x**、耗时 **578 秒**，等于没压�
 | 指标 | 实测值 |
 | --- | --- |
 | 生产代码 | 7,575 行（32 个模块） |
-| 测试 | **1,043 用例**，覆盖率 **96%**（漏行 156 / 3,883 语句），`ruff` 全绿 |
-| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**六道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性。其中自证脚本现已断言 **9 条**主张，含「README 工程指标与架构树必须与仓库一致」 |
+| 测试 | **1,053 用例**，覆盖率 **96%**（漏行 156 / 3,883 语句），`ruff` 全绿 |
+| CI | Ubuntu 3.11 / Ubuntu 3.12 / Windows 3.12 三矩阵全绿，**六道门禁**：ruff / 单测+覆盖率 / 对抗性评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性。其中自证脚本现已断言 **10 条**主张，含「README 工程指标与架构树必须与仓库一致」 |
 | 内存 | 与日志总行数无关，只与错误种类数相关 |
 | 硬依赖 | 仅 PyYAML（web / mcp / ai 全部为可选 extra） |
 
@@ -759,8 +759,9 @@ CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
 `ubuntu-3.12`（最常用版本）、`windows-3.12`（行尾 / shell / 路径处理与
 unix 不同，且 `start.bat` 是 Windows 一等入口）。**六道门禁**：ruff →
 pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证脚本 → 构建可复现性。
-自证脚本内部已扩到 **9 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
-v2.8.1 再加「README 架构树必须列全包内模块」）。
+自证脚本内部已扩到 **10 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
+v2.8.1 再加「README 架构树必须列全包内模块」，v2.9.0 加「接入层只经 service
+触达 core/export」，v2.9.1 再把「README 写的条数」本身也纳入对账）。
 
 ### 启动脚本的硬约束
 
