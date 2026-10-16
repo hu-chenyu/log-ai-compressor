@@ -52,6 +52,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from log_ai_compressor import service                       # noqa: E402
+from log_ai_compressor.constants import LEVEL_ORDER          # noqa: E402
 from log_ai_compressor.export.reporters import (             # noqa: E402
     estimate_raw_tokens,
     estimate_tokens,
@@ -353,8 +354,27 @@ def method_ours(ds: Dataset, budget_tokens: int,
 # ---------------------------------------------------------------------------
 # 全级别集合：把工具从「错误分诊」模式切到「全量摘要」模式。
 # 两者都要报 —— 只报对自己有利的那一个是不诚实的。
-ALL_LEVELS = ["TRACE", "DEBUG", "INFO", "WARN", "WARNING",
-              "ERROR", "FATAL", "CRITICAL"]
+#
+# **必须从 constants.LEVEL_ORDER 派生，不能手写。** 曾经手写过一份：
+#   ["TRACE","DEBUG","INFO","WARN","WARNING","ERROR","FATAL","CRITICAL"]
+# 它有两处错，而且都静默生效：
+#
+#   1. **漏了 FAIL** —— 而 FAIL 是规范级别里真实的一档
+#      （constants.LEVEL_ORDER = ERROR/FAIL/WARN/INFO/DEBUG/TRACE）。
+#      `Failed password for root ...` 这类行按 level_hints 被判成 FAIL，
+#      于是被过滤掉 —— 结果是**「全级别」比默认的 ERROR/FAIL 还窄**，
+#      传全级别拿到的簇数少于什么都不传。
+#   2. 收了 WARNING / FATAL / CRITICAL 三个**别名**。它们经 LEVEL_ALIASES
+#      归一后是 WARN / ERROR / ERROR，永远不会作为 entry.level 出现 ——
+#      纯死配置，白占三个格子还让人以为覆盖了它们。
+#
+# 实测代价：Loghub OpenSSH 上约 43 万行（占 68%）被判 FAIL 或无级别而
+# 整批丢掉，该数据集的保留率被严重低估。本脚本曾据此把结论写成
+# 「OpenSSH 输给 Drain3」—— 那是**测量工具的错，不是产品的错**。
+#
+# CLI 侧早就有同样的防护：cli._parse_levels 用 canonical_level 归一，
+# 所以 `--level WARNING` 能正常工作。漂移只发生在这份手写列表上。
+ALL_LEVELS = list(LEVEL_ORDER)
 
 # 朴素基线的 token 预算档位（用于画保留率曲线）
 DEFAULT_BUDGETS = [500, 1000, 2000, 4000, 8000, 16000, 32000]
