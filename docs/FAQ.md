@@ -164,7 +164,7 @@ LLMLingua（Microsoft Research, arXiv:2310.05736）能把 prompt 压 20 倍，
   数据集来源不可得，见 [Q10](#q10-你那个-914-的召回率数据从哪来的--我已经把这个数字撤了)
 
 有的是：
-- 223 笔提交、1,001 个测试、覆盖率 96%、测试/主代码行数比 1.04
+- 223 笔提交、1,043 个测试、覆盖率 96%、测试/主代码行数比 1.04
 - 五道 CI 门禁（ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本）
 - 全历史 0 处密钥泄露
 - 每个对外数字都有复现命令
@@ -205,7 +205,7 @@ LLMLingua（Microsoft Research, arXiv:2310.05736）能把 prompt 压 20 倍，
 ```bash
 python scripts/prove.py            # 自证脚本：逐条核对本文每个对外主张，列出尚无数据的主张
 python scripts/adversarial_eval.py # 对抗评测：10 个专门设计来误导本工具的场景
-python -m pytest -q                # 1,001 个测试
+python -m pytest -q                # 1,043 个测试
 ```
 
 `prove.py` 的设计原则是：**尚无数据的主张要显式列出来，不藏**。

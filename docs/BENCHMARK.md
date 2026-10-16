@@ -589,8 +589,13 @@ API。评测框架的接口已留好（输入行列表 + 预算 → 输出文本
 - **Drain3 的保留率有测量偏袒**：它的输出是模板而非原始行，没有 LineId 可查，
   只能与标注模板做归一化模糊匹配（阈值 0.8）。这一项对 Drain3 略偏宽松，
   但也可能误判。
-- **只覆盖 5 / 14 个数据集**，且都是体积较小的。Loghub 还有 Spark / HDFS /
-  Thunderbird 等 300MB+ 的数据集未测。
+- **实测覆盖 5 / 14 个数据集**；`fetch_datasets.py` 自 v2.8.1 起可下 **10 个**
+  （新增 Linux / Mac / HPC / OpenSSH / Hadoop，合计约 16 MB），但**新增的 4 个
+  在本次开发环境里下不下来 —— zenodo.org 域名级不可达**（Python urllib /
+  PowerShell / curl 三条路径分别得到 Connection reset / 超时 / Recv failure，
+  而同环境访问 github、pypi 正常）。表里没有它们的数，因为**没跑过就不写数**。
+  换网络后 `python scripts/fetch_datasets.py --all && python scripts/benchmark_loghub.py`
+  即可补上。
 - **单次运行**，无重复实验、无显著性检验。
 
 ## 复现

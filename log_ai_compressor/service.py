@@ -21,6 +21,10 @@ from log_ai_compressor.core.analysis import cooccurring_clusters, simplify_stack
 from log_ai_compressor.core.clustering import extract_variable_distribution
 from log_ai_compressor.core.comparator import CompareResult, compare_files
 from log_ai_compressor.core.evidence import (
+    # `EvidenceRef as EvidenceRef` 是**显式再导出**：接入层只经 service 触达
+    # 取证 API（v2.7.0 起 cli / mcp 都改成用 S.EvidenceRef）。写成同名别名
+    # 而不是加 noqa，是为了让「这是故意再导出」这件事在类型检查器眼里也成立。
+    EvidenceRef as EvidenceRef,
     result_fingerprint,
     verify_refs,
 )

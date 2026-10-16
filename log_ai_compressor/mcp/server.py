@@ -23,7 +23,10 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from log_ai_compressor import __app_name__, __version__, service as S
-from log_ai_compressor.core.evidence import EvidenceRef, verify_refs
+# 取证 API 走 service 层（v2.8.1）：README 宣称的「service 是 core 与接入层
+# 之间唯一的转换点」此前是假的 —— cli 与 mcp 都在函数体里直接 import core.evidence。
+# 绕过 service 的真实风险不是「多一层间接」，而是**序列化逻辑会长出第二份**。
+# 见 scripts/prove.py 的分层门禁。
 
 INSTRUCTIONS = f"""\
 {__app_name__} {__version__} —— 本机日志取证层（数据不出网）。
@@ -401,7 +404,7 @@ def verify_evidence(
                 return {"ok": False, "error": f"报告文件不存在：{report_path}"}
             with open(rp, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
-            refs = [EvidenceRef(
+            refs = [S.EvidenceRef(
                 evidence_id=e.get("evidence_id", ""),
                 source=e.get("source", ""),
                 line_start=int(e.get("line_start", 0)),
@@ -417,7 +420,7 @@ def verify_evidence(
             if not refs:
                 return {"ok": False,
                         "error": "该报告里没有证据引用（旧版本导出或非本工具 JSON）"}
-            report = verify_refs(refs).as_dict()
+            report = S.verify_refs(refs).as_dict()
             report["source"] = os.path.basename(rp)
             report["mode"] = "report"
             citations = [{"evidence_id": e.evidence_id,

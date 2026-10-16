@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 import time
@@ -20,6 +21,31 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from log_ai_compressor import service as S
+
+# 内部异常要不要把 traceback 发到浏览器（v2.8.1 统一口径）。
+#
+# 此前三条路径三个行为，谁也没对齐：
+#   · SSE 早订阅者  —— 拿到完整 traceback
+#   · SSE 晚订阅者  —— 拿不到（补发帧只带 message）
+#   · REST 快照     —— 拿不到（snapshot() 有意不带）
+#
+# **不一致本身就是缺陷**：同一个故障，刷新一下页面信息就变少了，
+# 排查时先去开页面的人能看到栈、后去的人看不到，没有任何文档解释为什么。
+#
+# 现在统一成一个显式开关，默认**不发**。理由与 MCP 层一致：栈里有文件
+# 路径、函数名与内部状态，一旦被截图、被粘进工单、被自动摘要工具读走，
+# 就成了对外承诺的一部分。本工具默认只有 `message`（类型 + 描述）。
+# 需要排障时开 LOG_AI_TRACEBACK=1 —— 显式的、可查的，而不是「碰巧谁先打开」。
+def _traceback_enabled() -> bool:
+    return os.environ.get("LOG_AI_TRACEBACK", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _traceback_payload(job: "Job") -> Dict[str, Any]:
+    """按开关决定这条 error 事件里带不带 traceback。"""
+    if _traceback_enabled() and job.traceback:
+        return {"traceback": job.traceback}
+    return {}
 
 # 内存里保留的结果上限：超出后淘汰最旧的已完成任务
 MAX_RETAINED = 8
@@ -146,7 +172,7 @@ def _run_job(job: Job) -> None:
         job.error = f"{type(exc).__name__}: {exc}"
         job.traceback = traceback.format_exc()
         job._emit("error", message=job.error, kind="internal",
-                  traceback=job.traceback)
+                  **_traceback_payload(job))
     finally:
         job.finished = time.time()
         job._done.set()
@@ -202,6 +228,6 @@ def stream_events(job: Job, max_wait: float = 3600.0):
     # 订阅者可能错过了终态帧（eof 之前队列已清空），这里补一次
     if job.error:
         yield _frame("error", {"type": "error", "message": job.error,
-                               "kind": "internal"})
+                               "kind": "internal", **_traceback_payload(job)})
     elif job.done and job.payload_out is not None:
         yield _frame("done", {"type": "done", "result": job.payload_out})

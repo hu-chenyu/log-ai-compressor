@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -73,9 +74,12 @@ class TestStandaloneMcpEntryPoint:
         """
         code = ("from log_ai_compressor.cli import main_mcp; "
                 "import sys; sys.exit(main_mcp())")
+        # 显式给子进程设编码（v2.8.1 契约）：否则本地绿、cp1252 机器上乱码。
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        env.pop("PYTHONUTF8", None)
         p = subprocess.run(
             [sys.executable, "-c", code],
-            capture_output=True, timeout=30,
+            capture_output=True, timeout=30, env=env,
             stdin=subprocess.DEVNULL, text=True,
             encoding="utf-8", errors="replace",
         )

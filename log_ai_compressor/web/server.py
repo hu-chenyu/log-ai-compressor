@@ -352,22 +352,45 @@ def _ai_status() -> Dict[str, Any]:
         return {"available": False, "reason": f"AI 模块未就绪：{exc}"}
 
 
-def pick_port(host: str, port: int, tries: int = 20) -> int:
-    """找一个空闲端口：双击启动时 8765 常被上一次残留进程占着。
+def _port_in_use(host: str, port: int) -> bool:
+    """端口是否真的有人在用（v2.8.1 修 Windows 探测失效）。
 
-    逐个往后试，用 bind 探测而不是靠运气；全被占则抛 OSError。
+    此前是「bind + SO_REUSEADDR 探测」，那是错的：**Windows 上
+    SO_REUSEADDR 允许第二个 socket 绑到已被监听的端口** —— 实测第一个
+    socket 已经 `listen`，第二个照样 `bind` 成功。于是探测永远返回「空闲」，
+    `pick_port` 原样返回被占的端口，真正 bind 的 uvicorn 再抛一个
+    「address already in use」。
+
+    而「双击 start.bat、上一次残留进程还占着 8765」**正是本函数存在的理由**，
+    且 Windows 恰恰是 start.bat 的一等入口平台 —— 也就是说这个探测在它
+    唯一重要的平台上一直是坏的。
+
+    改成两道：先真连一下（有人在监听就连得上），再裸 bind 一次
+    （占了但没监听的端口 bind 会失败）。裸 bind **不加** SO_REUSEADDR。
     """
     import socket
 
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.2)
+        if s.connect_ex((host, port)) == 0:
+            return True
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))       # 刻意不设 SO_REUSEADDR
+        except OSError:
+            return True
+    return False
+
+
+def pick_port(host: str, port: int, tries: int = 20) -> int:
+    """找一个空闲端口：双击启动时 8765 常被上一次残留进程占着。
+
+    逐个往后试，用真连接探测而不是靠运气；全被占则抛 OSError。
+    """
     for offset in range(max(1, tries)):
         candidate = port + offset
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind((host, candidate))
-            except OSError:
-                continue
-        return candidate
+        if not _port_in_use(host, candidate):
+            return candidate
     raise OSError(f"{port}~{port + tries - 1} 端口都被占用，请用 --port 指定其它端口")
 
 

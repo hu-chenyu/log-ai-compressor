@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import gzip
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -200,12 +201,27 @@ class TestLoadRulesetFromFile:
 # ---------------------------------------------------------------------------
 # F. python -m log_ai_compressor（打包后的真实入口）
 # ---------------------------------------------------------------------------
+
+
+def _child_env() -> dict:
+    """子进程环境（v2.8.1 契约）。
+
+    不显式设编码就等于静默继承开发机环境：本地恰好是 UTF-8 时全绿，
+    换到 cp1252 的机器上解码成乱码。专门盯这件事的门禁在
+    `tests/test_subprocess_encoding_contract.py`。
+    """
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    env.pop("PYTHONUTF8", None)
+    return env
+
+
 class TestModuleEntryPoint:
     def test_dash_version(self):
         p = subprocess.run([sys.executable, "-m", "log_ai_compressor",
                             "--version"],
                            capture_output=True, timeout=60, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace",
+                           env=_child_env())
         assert p.returncode == 0, p.stderr
         assert "log-ai-compressor" in p.stdout
 
@@ -213,7 +229,8 @@ class TestModuleEntryPoint:
         """裸跑必须给出用法并以非 0 退出，而不是静默挂住。"""
         p = subprocess.run([sys.executable, "-m", "log_ai_compressor"],
                            capture_output=True, timeout=60, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace",
+                           env=_child_env())
         assert p.returncode != 0
         assert "usage" in (p.stdout + p.stderr).lower()
 
