@@ -43,6 +43,17 @@ def _sections(sections) -> set:
 _INSTANCE_LIST_LIMIT = 12   # ≤此数量则全部列出（排查小簇确实需要全量）
 _INSTANCE_EDGE = 5          # 超出时首尾各列几个
 
+# brief_summary 里逐条列出「变更关联」的上限。超出部分折成一行汇总。
+#
+# 依据是实测：macOS 系统日志（Loghub Mac，761 个簇）上 406 个簇都有变更
+# 关联，逐条列出占 14,666 token —— **全篇 33%**，而 201 个不同取值里
+# 绝大多数是同一条 netbiosd 网络不可达消息换个秒数。粘贴进 LLM 上下文时
+# 这是纯重复。同一条信息写成「406 个簇都落在它之后」反而更有用。
+#
+# 只收 **summary** 这一个格式：md / html 是给人读的完整报告，逐簇列出才对，
+# 它们的读者要的是能逐条回溯，不存在「上下文窗口」约束。
+_CHANGE_INLINE_MAX = 8
+
 
 def _instance_density(c: ErrorCluster) -> str:
     """行号间隔的中位数描述（回答「密不密」比列两千个行号有用）。
@@ -536,6 +547,17 @@ def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
         for g in (ev.get("gaps") or [])[:3]:
             out.append(f"  · 缺：{g.get('title')} —— {g.get('missing')}")
     out.append("")
+    # 「变更关联」在**这个格式**里收敛成一行汇总，md/html 仍逐簇列出。
+    #
+    # 为什么：这一行是统计共现、且明写着「非因果」，而 macOS 系统日志上
+    # 406 个簇的首发时间都落在同一条 netbiosd 网络不可达之后 1~263 秒内 ——
+    # 逐簇重复 406 遍，说的是**一件事**，却占了全篇 33%（14,666 / 44,264 token）。
+    # 粘贴给 LLM 时这是纯噪声：同样的信息一行就够，还更有用（「406 个簇都
+    # 落在它之后」本身才是信号）。给人读的完整报告不在收敛范围内。
+    cc_all = [c for c in result.clusters[:n] if c.change_context]
+    n_cc = sum(1 for c in result.clusters if c.change_context)
+    cc_inline = set(id(c) for c in cc_all[:_CHANGE_INLINE_MAX])
+    shown_cc = 0
     for i, c in enumerate(result.clusters[:n], 1):
         tags = [c.priority_label, c.level, f"×{c.count}"]
         if c.is_root_cause:
@@ -549,7 +571,17 @@ def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
         if c.is_root_cause:
             out.append(f"   -> {c.root_cause_reason}")
         if c.change_context:
-            out.append(f"   ~ 变更关联：{c.change_context}（时间共现线索，非因果）")
+            if id(c) in cc_inline:
+                out.append(f"   ~ 变更关联：{c.change_context}（时间共现线索，非因果）")
+                shown_cc += 1
+            elif shown_cc == 0:
+                # 第一个超额的也照样列出来 —— 收敛不能变成「整段消失」
+                out.append(f"   ~ 变更关联：{c.change_context}（时间共现线索，非因果）")
+                shown_cc += 1
+    if n_cc > shown_cc:
+        rest = n_cc - shown_cc
+        out.append(f"~ 另有 {rest} 个簇也存在变更关联（同类时间共现线索，非因果）；"
+                   f"逐簇完整列表见 markdown / html 导出。")
     # 优化缺陷R99：头部第二行插入 token 估算（粘贴投喂 AI 时自带
     # 压缩率；按最终文本长度估算，忽略本行自身的自引用误差）
     body = "\n".join(out)

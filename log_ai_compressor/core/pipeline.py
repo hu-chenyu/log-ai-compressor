@@ -599,9 +599,23 @@ class LogPipeline:
         # 之前** —— 发版/重启行多为 INFO 级，默认「只看 ERROR/FAIL」
         # 会把它们整条丢掉，"上线后开始报错"这类时间窗关联线索将不可
         # 见。此处只捕获、不改过滤行为（用户要的是错误，不混入报告）。
+        #
+        # **但 ERROR/FAIL 级的行一律不算变更事件。** CHANGE_EVENT_RE 的注释
+        # 写着「宁漏勿误 —— 把普通错误行当成发版会给出误导性的时间窗叙事」，
+        # 而它自己刚犯了这个错：macOS 系统日志里
+        #   `netbiosd[31128]: network_reachability_changed : network is not
+        #    reachable, netbiosd is shutting down`
+        # 整句命中 `shutting down`。那不是停机，是网络不可达导致 netbiosd
+        # 拆连接 —— 而且它**本身就是被当成错误报告的那一行**。于是报告里
+        # 出现了 406 条「错误首发在〈另一条错误〉后 41s」，还冠以「变更关联」
+        # 的标题：既不是变更，也不是新信息，只是把同一条错误换个 PID 复述一遍。
+        #
+        # 判据：**错误行不是变更事件。** 真正的发版/重启/上线行是 INFO/notice 级；
+        # 代价是漏掉「服务崩溃也算停机」这类确有排查价值的信号 —— 按本正则
+        # 自己声明的「宁漏勿误」，这个取舍是对的。
         if change_events is not None and len(change_events) < MAX_CHANGE_EVENTS:
             msg = entry.message or entry.raw or ""
-            if CHANGE_EVENT_RE.search(msg):
+            if entry.level not in ERROR_LEVELS and CHANGE_EVENT_RE.search(msg):
                 change_events.append(ChangeEvent(
                     ts=entry.timestamp,
                     module=entry.module or "",
