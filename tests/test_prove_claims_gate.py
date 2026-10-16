@@ -1,0 +1,216 @@
+# -*- coding: utf-8 -*-
+"""自证脚本自身的一致性 —— 门禁本身也得有人看着。
+
+背景：v2.9.0 加了第 10 条主张（接入层只经 service 触达 core/export），
+README 两处却仍写「9 条」，而**全部门禁绿着** —— 因为
+`claim_readme_metrics` 只校「生产代码」那一行的行数与模块数，
+「自证脚本有 N 条主张」这个 README 数字**没有任何东西在校**。
+
+一个数字有两处来源却只校一处，和 v2.8.1 那次（架构树只数总量不看名单）
+是同一个形状。v2.9.1 把它并进同一条门禁。
+
+本文件的作用是证明这条新门禁**真的会响**。一条恒为真的检查等于没有检查，
+所以这里大半用例都在**故意把 README 改坏**，断言门禁变红。
+"""
+from __future__ import annotations
+
+import importlib.util
+import pathlib
+import re
+import sys
+
+import pytest
+
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_REAL_README = (_ROOT / "README.md").read_text(encoding="utf-8")
+_MARKER = "条**主张"
+# 「1,043 个测试」与「**1,043 用例**」两种写法都算测试数
+_COUNT_RE = re.compile(r"([\d,]+)\s*(?:个测试|用例)")
+_DOCS = ("README.md", "docs/FAQ.md")
+
+
+def _load_prove():
+    """按文件路径加载 scripts/prove.py —— 它是脚本，不在包里，import 不到。"""
+    path = _ROOT / "scripts" / "prove.py"
+    spec = importlib.util.spec_from_file_location("prove_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["prove_under_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+prove = _load_prove()
+_REAL_METRICS = prove._code_metrics()
+_REAL_COUNT = len(prove._CLAIM_FNS)
+
+
+def _rewrite(text: str, old: str, new: str) -> str:
+    """把**全部**出现处换掉，并断言确实换到了 —— 防止测试自己悄悄空转。"""
+    assert old in text, f"README 里找不到 {old!r}，测试前提已失效"
+    return text.replace(old, new)
+
+
+@pytest.fixture
+def gate(tmp_path, monkeypatch):
+    """把 prove.ROOT 指向一个只含 README.md 的临时目录，返回该门禁函数。
+
+    同时把 _code_metrics 钉成**真实**值：临时目录里没有 log_ai_compressor/，
+    不钉住的话行数与模块数会算成 0，门禁会因为另一个原因变红 ——
+    那样测的就不是「条数对不对」，而是「目录存不存在」。
+    """
+    monkeypatch.setattr(prove, "_code_metrics", lambda: dict(_REAL_METRICS))
+
+    def _run(readme_text: str) -> dict:
+        (tmp_path / "README.md").write_text(readme_text, encoding="utf-8")
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        return prove.claim_readme_metrics()
+
+    return _run
+
+
+class TestReadmeClaimCountIsGated:
+    """README 写「自证脚本有 N 条主张」，那个 N 必须等于实际登记的条数。"""
+
+    def test_current_readme_passes(self):
+        """先证真：照现状跑是绿的。后面几条变红才有意义。"""
+        assert prove.claim_readme_metrics()["holds"] is True
+
+    def test_gate_is_not_a_noop(self, gate):
+        """故意把条数写错，门禁必须变红 —— 这是本文件存在的主要理由。"""
+        c = gate(_rewrite(_REAL_README, f"**{_REAL_COUNT} 条**主张",
+                          f"**{_REAL_COUNT + 989} 条**主张"))
+        assert c["holds"] is False
+        assert str(_REAL_COUNT) in c["detail"], "失败信息必须报出实测条数"
+
+    def test_every_occurrence_is_checked(self, gate):
+        """同一个数字出现两次，就两处都要校。
+
+        只校第一处 = 改第二处能溜过去。v2.9.0 的漂移恰恰是这种形状：
+        §6.2 表格与 §8 正文各写了一个 9，只改一处不该让门禁变绿。
+        """
+        at = _REAL_README.rfind(f"**{_REAL_COUNT} 条**主张")
+        assert at > 0, "README 里至少要有第二处待校"
+        broken = (_REAL_README[:at]
+                  + f"**{_REAL_COUNT - 3} 条**主张"
+                  + _REAL_README[at + len(f"**{_REAL_COUNT} 条**主张"):])
+        assert gate(broken)["holds"] is False
+
+    def test_omitting_the_count_also_fails(self, gate):
+        """README 不再声明条数也算漂移，不能因为「正则没匹配上」就静默通过。"""
+        c = gate(_rewrite(_REAL_README, f"**{_REAL_COUNT} 条**", "**若干条**"))
+        assert c["holds"] is False
+        assert "未找到" in c["detail"]
+
+    def test_metrics_still_checked_alongside_count(self, gate):
+        """条数对了也不能放过行数 —— 两种漂移必须一起红。
+
+        注意按 README 的**真实写法**（带千分位的「7,575 行」）去改：
+        门禁正则会先去掉逗号再比对，所以拿 `7575 行` 去 replace 是空转的。
+        本条测试第一版就是这么写的 —— 它绿着，而它本该红。
+        """
+        import re
+        assert gate(_REAL_README)["holds"] is True
+
+        row = re.search(r"\| 生产代码 \| ([\d,]+) 行（(\d+) 个模块）", _REAL_README)
+        assert row, "README 的「生产代码」那一行格式变了，先更新本测试"
+        claimed = row.group(1)
+        bumped = f"{int(claimed.replace(',', '')) + 1:,}"
+        broken = _REAL_README.replace(row.group(0),
+                                     row.group(0).replace(claimed, bumped, 1))
+        assert broken != _REAL_README, "重写没生效，测试会空转"
+
+        c = gate(broken)
+        assert c["holds"] is False
+        assert str(_REAL_METRICS["lines"]) in c["detail"]
+
+
+class TestSingleSourceOfTruth:
+    """主张清单必须只有一个口径源，否则条数只是换了个地方漂。"""
+
+    def test_every_claim_function_is_registered(self):
+        """新写了 claim_xxx() 却忘了登记 = 它永远不跑，且没人会发现。
+
+        这是本条门禁真正的盲点：README 的 N 和 _CLAIM_FNS 的长度会一致，
+        但两者可能一起漏掉了某条主张。
+        """
+        declared = {n for n in dir(prove)
+                    if n.startswith("claim_") and callable(getattr(prove, n))}
+        registered = {fn.__name__ for fn in prove._CLAIM_FNS}
+        assert declared == registered, (
+            f"未登记：{sorted(declared - registered)}；"
+            f"已登记但不存在：{sorted(registered - declared)}")
+
+    def test_gather_runs_exactly_the_registered_claims(self, monkeypatch):
+        """gather() 必须逐条跑 _CLAIM_FNS —— 用替身验，不真跑（真跑很贵）。"""
+        seen: list[str] = []
+
+        def _make(name):
+            def _fake(*_a, **_k):
+                seen.append(name)
+                return {"claim": name, "holds": True, "detail": ""}
+            _fake.__name__ = name
+            return _fake
+
+        fakes = tuple(_make(fn.__name__) for fn in prove._CLAIM_FNS)
+        monkeypatch.setattr(prove, "_CLAIM_FNS", fakes)
+        res = prove.gather(prove.SAMPLE)
+        assert seen == [fn.__name__ for fn in fakes]
+        assert res["all_hold"] is True
+
+    def test_claim_names_are_unique(self):
+        """重名会让「哪一条红了」变得没法读。"""
+        names = [fn.__name__ for fn in prove._CLAIM_FNS]
+        assert len(names) == len(set(names))
+
+
+def _is_full_run(config) -> bool:
+    """只在全量运行时对账。
+
+    `-k` / `-m` / `--ignore` / `--lf` 都会让收集数天然变小，那时红是假的。
+    与其猜一堆组合，不如只认「没带筛选器」这一种情况。
+    """
+    opt = config.option
+    if getattr(opt, "keyword", "") or getattr(opt, "markexpr", ""):
+        return False
+    for flag in ("lf", "ff", "failed_first", "last_failed"):
+        if getattr(opt, flag, False):
+            return False
+    for lst in ("ignore", "ignore_glob", "deselect"):
+        if getattr(opt, lst, None):
+            return False
+    return True
+
+
+class TestReadmeTestCountIsGated:
+    """README / FAQ 写的测试用例数必须等于实际收集到的用例数。
+
+    v2.9.1 抓到的第二个同形漂移：README 与 FAQ 都写「1,043 个测试」，
+    而实测收集 **1,044** —— 同样是「一个对外数字，没有任何东西校它」。
+
+    固定点说明：本用例自己也在被数的用例里，所以**先加测试、再回填数字**。
+    顺序反了就会差 1 —— 那正好是它要抓的那种错。
+    """
+
+    def test_test_count_matches_every_doc(self, request):
+        if not _is_full_run(request.config):
+            pytest.skip("子集运行：收集数天然更小，对账无意义")
+        # 用 request.session 而不是 `session` 参数：实测 pytest 7.4.4 里
+        # `session` **不是**可直接注入的 fixture（最小复现：单独写
+        # `def test(session)` 报 fixture not found），session 挂在 request 上。
+        actual = len(request.session.items)
+        for name in _DOCS:
+            path = _ROOT / name
+            text = path.read_text(encoding="utf-8")
+            found = [int(x.replace(",", "")) for x in _COUNT_RE.findall(text)]
+            assert found, f"{name} 里找不到测试数 —— 格式变了，先更新本测试"
+            for claimed in found:
+                assert claimed == actual, (
+                    f"{name} 写 {claimed} 个测试，实际收集 {actual} 个"
+                    f"（新增/删除测试后必须同步回填）")
+
+
+# 覆盖率**不在**本文件校：pytest-cov 在 session 结束时才落 coverage.xml，
+# 用例跑到时它还不存在 —— 硬写进去就是一条永远 skip 的假覆盖，看起来有
+# 覆盖、实际不响，那比没有更糟。对账放在 CI 的 pytest 那一步之后
+# （`.github/workflows/ci.yml`，`Unit & integration tests with coverage`），
+# 那里是唯一拿得到它的时机。
