@@ -458,6 +458,24 @@ def pct(num: int, den: int) -> str:
     return "—" if not den else f"{num / den * 100:.1f}%"
 
 
+def delivery_ceiling(n_shown: int, total_events: int) -> float:
+    """交付口径的**物理上限**（百分比）。
+
+    产品默认只给 `n_shown` 个簇，而人工标注事件有 `total_events` 种，
+    于是证据保留率最多 `min(n_shown, total_events) / total_events`。
+
+    **这个上限与聚类算法好坏无关** —— 它只反映「报告里放得下几个簇」。
+    Mac 有 626 种事件、交付口径给 20 个簇，天花板就是 3.2%，实测也是 3.2%：
+    那一栏低是天花板低，不是「没做到位」。
+
+    报达成度（覆盖率 / 上限）是为了让读者自己看出这件事；不给上限的话，
+    「1 胜 9 负」会被读成「算法输了 9 个」，而它不是这个意思。
+    """
+    if not total_events:
+        return 0.0
+    return min(n_shown, total_events) / total_events * 100
+
+
 def verdict(our_n: int, their_n: int, total: int) -> str:
     """按**计数**判胜负，不拿四舍五入后的百分数比大小。
 
@@ -576,6 +594,27 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
         detail = (f"  ({len(cov)} vs {len(drain_cov)}/{len(lop_cov)} 种)"
                   if use_drain and use_logslop else "")
         print(f"  {scope:<22}{vd:>12}{vl:>14}{detail}")
+
+    # ---- 交付口径的物理上限与达成度 ----
+    # 为什么要有这段：交付口径那一栏对 Drain3 是「1 胜 9 负」，但那个数字
+    # **极易被误读成「算法输了 9 个」**。它其实量的是「产品给多少个簇」：
+    # 报告只装 n_del 个簇，而标注事件有 total 种，于是覆盖率的上限就是
+    # min(n_del, total)/total —— **这个上限跟聚类算法好坏无关**。
+    #
+    # Drain3 没有这个旋钮（它把有多少模板就吐多少），所以两栏根本不是
+    # 同一条起跑线 —— 这也是为什么主指标是「同预算 32k」而不是交付口径。
+    #
+    # 报「达成度」= 覆盖率 / 上限，是为了让读者一眼看出：这一栏低是因为
+    # 天花板低，不是因为我们没做到位。Zookeeper / Hadoop / Mac 三个是
+    # 顶格 100% —— 一个簇不多给就已经摸到上限。
+    cap_n = min(n_del, total_events)
+    ceiling = delivery_ceiling(n_del, total_events)
+    got = len(our_del_cov) / total_events * 100 if total_events else 0.0
+    print()
+    print(f"  交付口径的物理上限：min({n_del}, {total_events})/{total_events} "
+          f"= {ceiling:.1f}%   （产品只给 {n_del} 个簇，与算法无关）")
+    print(f"  实测 {got:.1f}%  ->  达成度 "
+          f"{(len(our_del_cov) / cap_n * 100) if cap_n else 0:.0f}%")
 
     print()
     print(f"  朴素基线在同预算下的保留率曲线（事件类型 {total_events} 种）")
