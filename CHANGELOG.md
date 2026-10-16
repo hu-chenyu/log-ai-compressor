@@ -113,11 +113,40 @@ run #41 三个矩阵全挂。原因是第二次编辑时 `old_string` 从注释�
 **这正是它当初被写出来的原因**（v2.9.0 修 CLI cp1252 崩溃时顺手加的，
 当时抓出 3 处存量隐患）。现在它抓的是我自己当天写的新代码。
 
+### 🔥 第三次：而且它是我 v2.9.0 刚修过的那个坑
+
+上面那个修好之后 run #43 又只有 windows-3.12 挂。既然判定逻辑在非参考
+矩阵上根本不 `exit`，那失败的就不是对账 —— 是**打印**。
+
+把 CI 那段抽出来、在 `PYTHONIOENCODING=cp1252` 下本地跑，复现得一模一样：
+
+```
+print(f"[windows-latest ...] 实测覆盖率 {pct}%")
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 36-40
+```
+
+**Windows runner 的控制台代码页是 cp1252，`shell: python` 的 stdout 跟随
+控制台代码页。** 而 `scripts/prove.py` 与 `scripts/adversarial_eval.py`
+顶部都有那段 stdout 重配 —— **v2.9.0 为此专门修过 CLI 在 cp1252 下崩溃** ——
+我把它搬进 CI 时忘了搬重配，于是同一个坑当天又踩了一次。
+
+这一条最难查的地方在于：**失败原因与失败位置无关**。step 名字是
+「Unit & integration tests with coverage」，红在覆盖率那一步，
+真因却在几行之前的 print。我第一反应还是「Windows 覆盖率不对」。
+
+修法同样是让本地能验：harness 现在**在 cp1252 下真跑**这段（把敌对
+控制台搬进本地 = v2.9.0 修 CLI 用的同一招，只不过对象从 CLI 换成了 CI），
+外加一条静态兜底查 `reconfigure` 还在不在。两条都留着 —— 只留一条，
+另一条就成了单点。
+
+> 对照实验也做了：把重配那几行去掉后同一条用例确实红（rc=1，
+> UnicodeEncodeError），所以这条测试**有鉴别力**，不是恒真。
+
 ### 📊 数字
 
-测试 **1,043 → 1,059**（新增 `test_prove_claims_gate.py` 9 条 +
-`test_ci_step_execution.py` 5 条 + 编码契约那条按文件参数化自动多出的 1 例）；
-覆盖率 96%（3,883 语句 / 156 漏行，ubuntu-3.12 口径）不变；
+测试 **1,043 → 1,061**（新增 `test_prove_claims_gate.py` 9 条 +
+`test_ci_step_execution.py` 7 条 + 编码契约那条按文件参数化自动多出的 2 例）；
+覆盖率 96%（3,883 语句 / 156 漏行，**ubuntu-3.12 口径**）不变；
 生产代码 7,575 行 / 32 个模块不变。
 
 FAQ 的「223 笔提交」改成「200+ 笔提交」：**任何精确的提交笔数在提交这次
