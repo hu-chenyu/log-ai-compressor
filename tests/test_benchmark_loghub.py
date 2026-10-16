@@ -173,6 +173,44 @@ def test_pct_handles_zero_denominator():
 # ---------------------------------------------------------------------------
 # 「全级别」必须等于规范级别词表 —— 这条手写列表漂移过一次，代价很大
 # ---------------------------------------------------------------------------
+def test_coverage_never_exceeds_clusters_shown(mini_dataset):
+    """**覆盖率不得超过报告里真正出现的簇数** —— 这条曾经被破过。
+
+    v2.9.4 的 bug：调用方传 `top_n: 0` 想表达"不限簇数"，而 pipeline 的
+    `top_n if top_n else DEFAULT` 把 0 当成 falsy，**回落到 20**。
+    于是报告里只有前 20 个簇，覆盖率却按 `result.clusters` **全部**统计。
+
+    实测后果：OpenSSH 在「严格档」下切出 1,831 个簇、覆盖率因此报到 100%，
+    而报告只有 809 个 token —— 装不下 1,831 行。**指标在数用户没收到的东西。**
+
+    判据很硬：覆盖事件数 <= 实际展示的簇数。传 top_n=1 时，覆盖率必须 <= 1。
+    """
+    _text, covered, n_eff = bench.method_ours(mini_dataset, 10 ** 9, top_n=1)
+    assert n_eff == 1
+    assert len(covered) <= 1, (
+        f"top_n=1 时覆盖率报了 {len(covered)} 种事件 —— "
+        f"指标在数报告里没出现的簇")
+
+
+def test_full_scope_coverage_dominates_delivery_scope(mini_dataset):
+    """全量口径的覆盖率必须 ⊇ 交付口径 —— 超集关系。
+
+    这是"指标在数用户没收到的东西"的**反向可观测信号**：如果某个改动
+    让全量口径的数字远超交付口径（v2.9.4 的 1,831 簇 vs 报告 20 簇就是
+    这种形态），它就会在这里露出来，而不必等人工去数报告里有几行。
+
+    同时守住另一头：交付口径绝不能比全量口径更高（那说明两个口径算的
+    根本不是同一个对象，而是各算各的）。
+    """
+    _t1, cov_small, n_small = bench.method_ours(mini_dataset, 10 ** 9, top_n=1)
+    _t2, cov_big, n_big = bench.method_ours(mini_dataset, 10 ** 9, top_n=10 ** 9)
+    assert n_small < n_big, "两次调用的生效簇数应当不同，否则这条测试无效"
+    assert cov_small <= cov_big, (
+        f"交付口径 {sorted(cov_small)} 不该多于全量口径 {sorted(cov_big)}")
+    assert len(cov_small) <= n_small
+    assert len(cov_big) <= n_big
+
+
 def test_all_levels_is_the_canonical_vocabulary():
     """ALL_LEVELS 必须直接等于 constants.LEVEL_ORDER，不允许手写。
 
