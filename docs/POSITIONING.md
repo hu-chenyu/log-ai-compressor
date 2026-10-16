@@ -14,7 +14,7 @@ v2 写下这份文档时，P0 里四条只完成了两条。v3 的状态：
 | 证据 ID + 报告可追溯 | ✅ 已完成 | `core/evidence.py`：evidence_id（确定性 sha256）+ 文件 + 行号区间 + 原文摘要；`log-ai-compressor verify --report` 重读原文逐条核对，日志被改/被删报 `TAMPERED`（退出码 1） |
 | 对抗性评测集 + 评分卡进 CI | ✅ 已完成 | `scripts/adversarial_eval.py`：10 场景 35 项，100% 正确弃权、0% 自信错误率；CI 门禁 |
 | MCP 工具描述重写成 Agent 剧本 | ✅ 已完成 | `INSTRUCTIONS` 从功能清单改成使用剧本（教 Agent **不要**自己 grep、不要把 LIKELY 说成根因、不要把共现说成因果）+ `SKILL.md` |
-| 接 Loghub 2.0 打榜 | ✅ 已完成 | `scripts/benchmark_loghub.py`，10 个数据集实测 **9 胜 1 平 1 负**（HPC 低于 Drain3、OpenSSH 打平，见 README「证据保留率 vs Drain3」一节） |
+| 接 Loghub 2.0 打榜 | ✅ 已完成 | `scripts/benchmark_loghub.py`，10 个数据集实测 **严格档 10 胜 / 默认档 8 胜 2 负**（两档都报，见 README「证据保留率 vs Drain3」一节） |
 
 v3 新增的三件事（v2 没识别的缺口）：
 
@@ -365,7 +365,7 @@ Top-3 命中率        : XX%（对比 Loghub 2.0 人工标注）
 
 ### P0 —— 决定生死 ✅ 已全部完成（2026-10）
 
-1. ~~**接 Loghub 2.0 打榜**~~ ✅ `scripts/benchmark_loghub.py`，10 个数据集实测，9 胜 1 平 1 负
+1. ~~**接 Loghub 2.0 打榜**~~ ✅ `scripts/benchmark_loghub.py`，10 个数据集实测，严格档 10 胜 / 默认档 8 胜 2 负
 2. ~~**证据 ID + 报告可追溯**~~ ✅ `core/evidence.py` + `verify --report`
 3. ~~**MCP 工具描述重写成 Agent 使用剧本**~~ ✅ `INSTRUCTIONS` + `SKILL.md`
 4. ~~**对抗性评测集 + 评分卡进 CI**~~ ✅ `scripts/adversarial_eval.py`，10 场景 35 项
