@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -167,3 +168,89 @@ def test_pct_handles_zero_denominator():
     """分母为 0 时不能 ZeroDivisionError —— 数据集无标注时应优雅显示。"""
     assert bench.pct(3, 0) == "—"
     assert bench.pct(1, 4) == "25.0%"
+
+
+# ---------------------------------------------------------------------------
+# 下载脚本与基准脚本的目录约定必须对得上
+# ---------------------------------------------------------------------------
+def _load_fetch():
+    spec = importlib.util.spec_from_file_location(
+        "fetch_datasets", ROOT / "scripts" / "fetch_datasets.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["fetch_datasets"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_discover_accepts_fetch_datasets_output_layout(tmp_path, monkeypatch):
+    """fetch_datasets.py 解出来的目录，必须能被 discover() 找到。
+
+    这条不是洁癖：v2.9.2 之前 `fetch_datasets.unpack()` 解到
+    `data/loghub_full/`，而 `discover()` 只扫 `data/loghub/`。
+    照 README「先 fetch 再 benchmark」跑的人**必然**得到
+    「没有可用数据集。请先下载 Loghub 2.0 到 data/loghub/」——
+    而那句话反过来指着一个 fetch 根本不会写进去的目录。
+
+    复现门槛应该长在「做不做得成」上，不是长在「知道怎么做」上。
+
+    这里走的是 fetch **真实的** unpack()，不是照着它的目录规则另写一遍
+    —— 后者只能校我自己那份副本，恰恰漏掉真正要防的分叉。
+    """
+    fetch = _load_fetch()
+
+    zip_path = tmp_path / "Demo.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("Demo/Demo_full.log",
+                    "2024-01-01 10:00:00 ERROR [svc] boom\n")
+        zf.writestr("Demo/Demo_full.log_structured.csv",
+                    "LineId,Content,EventTemplate,EventId\n1,boom,E1,E1\n")
+
+    monkeypatch.setattr(fetch, "DATA", tmp_path)
+    # unpack() 结尾会 out.relative_to(ROOT) 打一行日志；不把 ROOT 一起挪走，
+    # 临时目录下的路径就 relative_to 不动，测试挂在**打印**上而不是断言上。
+    monkeypatch.setattr(fetch, "ROOT", tmp_path)
+    fetch.unpack(zip_path, "Demo")
+
+    monkeypatch.setattr(bench, "DATA_DIRS",
+                        (tmp_path / "loghub", tmp_path / "loghub_full"))
+    found = bench.discover(None)
+    assert [d.name for d in found] == ["Demo"], (
+        "fetch 的产物 discover 认不出来 —— 复现链断了")
+
+
+def test_discover_dedups_same_name_across_roots(tmp_path, monkeypatch):
+    """两个根里同名时只取一份，且**先到的有效副本**优先。"""
+    for root in ("loghub", "loghub_full"):
+        d = tmp_path / root / "Demo" / "Demo"
+        d.mkdir(parents=True)
+        (d / "Demo_full.log").write_text("x\n", encoding="utf-8")
+        (d / "Demo_full.log_structured.csv").write_text(
+            "LineId,Content,EventTemplate,EventId\n1,x,E1,E1\n", encoding="utf-8")
+    monkeypatch.setattr(bench, "DATA_DIRS",
+                        (tmp_path / "loghub", tmp_path / "loghub_full"))
+    found = bench.discover(None)
+    assert len(found) == 1, f"同名数据集重复收录：{[d.name for d in found]}"
+
+
+def test_discover_does_not_let_a_bad_copy_shadow_a_good_one(tmp_path, monkeypatch):
+    """坏副本不能遮蔽好副本。
+
+    `seen` 只在**真正收进来**之后才记 —— 否则 data/loghub/ 里一个
+    没有标注的残缺副本，会让 loghub_full/ 里完好的那份永远不被看见，
+    而报错只说「标注事件类型为 0」，完全看不出是被遮蔽了。
+    """
+    good = tmp_path / "loghub" / "Demo" / "Demo"
+    good.mkdir(parents=True)
+    (good / "Demo_full.log").write_text("x\n", encoding="utf-8")
+    (good / "Demo_full.log_structured.csv").write_text(
+        "LineId,Content,EventTemplate,EventId\n1,x,E1,E1\n", encoding="utf-8")
+
+    bad = tmp_path / "loghub_full" / "Demo" / "Demo"
+    bad.mkdir(parents=True)
+    (bad / "Demo_full.log").write_text("x\n", encoding="utf-8")   # 没有 csv
+
+    monkeypatch.setattr(bench, "DATA_DIRS",
+                        (tmp_path / "loghub_full", tmp_path / "loghub"))
+    found = bench.discover(None)
+    assert [d.name for d in found] == ["Demo"], "被坏副本遮蔽了"

@@ -58,8 +58,17 @@ Drain3 做对照，并提出 SURCL 指标）。实测证据保留率：
 | OpenStack | **50.0%** | 41.7% | 18.8% |
 | Proxifier | **100.0%** | 72.7% | 27.3% |
 | Zookeeper | **92.1%** | 76.4% | 23.6% |
+| Linux | **86.4%** | 66.6% | 55.6% |
+| Mac | **84.3%** | 72.2% | 16.1% |
+| HPC | 81.1% | **87.8%** | 4.1% |
+| OpenSSH | 71.1% | **92.1%** | 34.2% |
 
-**本项目 5/5 全部第一，Drain3 全部第二，LogsLop 全部落后于 Drain3。**
+**本项目 9 个数据集里 7 胜 2 负**（v2.9.2 补测后）。**HPC 与 OpenSSH 两负** ——
+这个 FAQ 的答案就是「凭什么比 Drain3 强」，所以先说清楚：**有两个数据集比不过它**。
+病因也查了（见 BENCHMARK「两处落后及其病因」）：HPC 是欠聚类（70 个簇对 74 种事件，
+物理上限 94.6%），OpenSSH 是过度合并（56 个簇对 38 种事件却只覆盖 71%）。
+
+LogsLop 在全部 9 个数据集上都落后于 Drain3。
 
 对照口径对它是公平的，不是为了让它输：
 
@@ -164,7 +173,7 @@ LLMLingua（Microsoft Research, arXiv:2310.05736）能把 prompt 压 20 倍，
   数据集来源不可得，见 [Q10](#q10-你那个-914-的召回率数据从哪来的--我已经把这个数字撤了)
 
 有的是：
-- 200+ 笔提交、1,061 个测试、覆盖率 96%（CI 卡 ≥90% 底线）、测试/主代码行数比 ≈1.1（同为非空非注释行口径）
+- 200+ 笔提交、1,064 个测试、覆盖率 96%（CI 卡 ≥90% 底线）、测试/主代码行数比 ≈1.1（同为非空非注释行口径）
 - **六道** CI 门禁（ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性）
 - 全历史 0 处密钥泄露
 - 每个对外数字都有复现命令
@@ -191,7 +200,8 @@ LLMLingua（Microsoft Research, arXiv:2310.05736）能把 prompt 压 20 倍，
 所以「独一无二」这个说法，本文档只认领**一个**具体主张：
 
 > 在「同一 token 预算下保住多少根因证据」这个轴上，
-> 本项目在 Loghub 5 个数据集 + Android_v1 上全部优于 Drain3，且复现命令公开。
+> 本项目在 Loghub 9 个数据集 + Android_v1 上测过，**7 胜 2 负**
+> （HPC 与 OpenSSH 低于 Drain3），且复现命令公开。
 >
 > 其余一切差异化主张（本地优先、零出网、MCP 接入、Agent Skill）
 > 都是**行业里越来越多人在做的事**，不是护城河。
@@ -205,7 +215,7 @@ LLMLingua（Microsoft Research, arXiv:2310.05736）能把 prompt 压 20 倍，
 ```bash
 python scripts/prove.py            # 自证脚本：逐条核对本文每个对外主张，列出尚无数据的主张
 python scripts/adversarial_eval.py # 对抗评测：10 个专门设计来误导本工具的场景
-python -m pytest -q                # 1,061 个测试
+python -m pytest -q                # 1,064 个测试
 ```
 
 `prove.py` 的设计原则是：**尚无数据的主张要显式列出来，不藏**。
@@ -226,7 +236,7 @@ python -m pytest -q                # 1,061 个测试
 | Loghub 1.0 `HDFS_v1.zip` | 8 个条目，主文件是单个 `HDFS.log` |
 | 两个 Zenodo 记录的完整文件清单 | **都不含 YARN** |
 | `logpai/loghub` 仓库根目录（v2.7.0 补查） | 15 个数据集目录：Android / Apache / BGL / HDFS / HPC / Hadoop / HealthApp / Linux / Mac / OpenSSH / OpenStack / Proxifier / Spark / Thunderbird / Windows / Zookeeper —— **没有 YARN** |
-| 本项目 `data/` 下全部真实日志（v2.7.0 逐文件实测） | Apache / HealthApp / OpenStack / Proxifier / Zookeeper / Hadoop_full 的 `Caused by` 出现次数**全是 0**；**只有 Android_v1 有链（131 条）** |
+| 本项目 `data/` 下全部真实日志（v2.9.2 重扫 1,760,767 行） | Apache / HealthApp / OpenStack / Proxifier / Zookeeper / Hadoop_full / **Linux / Mac / HPC / OpenSSH** 的 `Caused by` 出现次数**全是 0**；**只有 Android_v1 有链（131 条）** |
 
 描述中的数据形态是「真实生产集群容器日志 `application_*/container_*.log`，
 共 978 个文件」—— YARN/HDFS 容器的命名风格。它不在任何一个公开下载路径里。
