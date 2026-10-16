@@ -327,17 +327,26 @@ def sweep_logslop(ds: Dataset, budgets: List[int]) -> List[Tuple[int, int, int]]
 
 
 def method_ours(ds: Dataset, budget_tokens: int,
-                levels: Optional[str] = None) -> Tuple[str, Set[str]]:
+                levels: Optional[str] = None,
+                similarity: str = "standard") -> Tuple[str, Set[str]]:
     """本项目：压缩摘要报告 + 证据卡片。
 
     证据保留口径 = **簇样例保留的原始行**对应的标注事件。
     样例行是未改动的原始日志（LogEntry.raw），可用 line_no 精确回查，
     因此不会因为我们的占位符重写而虚高或虚低。
+
+    `similarity` 决定聚类粒度（strict 0.95 / standard 0.85 / loose 0.70）。
+    **基准必须同时报默认档与严格档**：指标问的是「能保住多少种事件类型」，
+    而 Loghub 的标注会把只差一个词的行算成两种（`action start ... wait`
+    vs `action start ... boot`）—— 簇粒度比标注粗就会丢事件。只报默认档
+    等于拿错尺子量自己，这跟 v2.9.3 的 `ALL_LEVELS` 是同一类错误。
+    而 Drain3 没有这个旋钮 —— **这个不对称必须写在报告里，不能藏。**
     """
     level_list = (levels.split(",") if levels else None)
     result = service.analyze(
         paths=[str(ds.log_path)],
-        params={"levels": level_list, "top_n": 0, "context_lines": 0},
+        params={"levels": level_list, "top_n": 0, "context_lines": 0,
+                "similarity": similarity},
     )
     text = service.export_text(result, "summary")
     covered: Set[str] = set()
@@ -429,10 +438,20 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
         ds, 10 ** 9, ",".join(ALL_LEVELS) if not levels else levels)
     t_our_all = time.time() - t0
 
+    # 严格档必须一起报 —— 见 method_ours 的 docstring。只报默认档等于
+    # 拿错尺子量自己；只报严格档则是不诚实。两个都列出来，读者自己判断。
+    t0 = time.time()
+    our_strict_text, our_strict_cov = method_ours(
+        ds, 10 ** 9, ",".join(ALL_LEVELS) if not levels else levels,
+        similarity="strict")
+    t_our_strict = time.time() - t0
+
     rows: List[Tuple[str, str, str, str, str]] = []
     for label, text, cov, secs in (
             ("log-ai-compressor 默认级别(排障)", our_def_text, our_def_cov, t_our_def),
-            ("log-ai-compressor 全级别(摘要)", our_all_text, our_all_cov, t_our_all),
+            ("log-ai-compressor 全级别(摘要, 0.85)", our_all_text, our_all_cov, t_our_all),
+            ("log-ai-compressor 全级别(严格档 0.95)", our_strict_text, our_strict_cov,
+             t_our_strict),
             ("Drain3（ICWS'17, 821★）", drain_text, drain_cov, t_drain),
             ("LogsLop（AMD 2026-07）", lop_text, lop_cov, t_lop),
     ):
