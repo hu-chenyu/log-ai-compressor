@@ -36,6 +36,14 @@ Android_v1 只在 1.0 里 —— v2.5.0 补 Android 全量时踩过这个坑：
 
    绕过办法：挂代理（`HTTPS_PROXY`）后重试；若代理也拒绝该域名
    （CONNECT 返回 500），说明是白名单而非配置问题，只能换网络。
+
+   **v2.9.2 更新**：同一台机器上该限制已消失（`Invoke-WebRequest
+   https://zenodo.org/record/8275861` 返回 HTTP 200），本脚本一次跑通，
+   补上了 Linux / Mac / HPC / OpenSSH 四个数据集。所以这条限制是
+   **环境侧的、而且是会变的** —— 别把「上次下不下来」当成「下不下来」。
+
+   代价写在 README 里：覆盖面从 5 个扩到 9 个之后，保留率结论
+   从「全部领先」变成「**7 胜 2 负**」。
 """
 from __future__ import annotations
 

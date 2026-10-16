@@ -58,6 +58,12 @@ from log_ai_compressor.export.reporters import (             # noqa: E402
 )
 
 DATA_DIR = ROOT / "data" / "loghub"
+# 两个根目录都要扫。`fetch_datasets.py` 解到 data/loghub_full/，
+# 而历史上那批数据集在 data/loghub/ —— 两者一直并存，但 benchmark 过去
+# 只认后者，于是**照 README 跑一遍必然撞上「没有可用数据集」**：
+# 复现门槛又长在「知道怎么做」上，而不是长在「做不做得成」上。
+# eval_rootcause.py 早就同时扫这两个根，这里跟它对齐。
+DATA_DIRS = (DATA_DIR, ROOT / "data" / "loghub_full")
 
 # grep 基线的关键词 —— 这是人工排障时最常见的第一手动作
 GREP_PATTERN = re.compile(
@@ -157,27 +163,38 @@ class Dataset:
 
 
 def discover(names: Optional[List[str]] = None) -> List[Dataset]:
-    """扫描 data/loghub/<Name>/<Name>/<Name>_full.log。"""
-    if not DATA_DIR.is_dir():
+    """扫描 data/{loghub,loghub_full}/<Name>/<Name>/<Name>_full.log。
+
+    两个根都扫、同名只取先命中的那个（见 DATA_DIRS 处的说明）。
+    只有**真正收进来**的才记进 seen —— 否则一个坏副本会把另一个根里的
+    好数据挡掉，而报错信息只会说「标注事件类型为 0」，看不出是被遮蔽了。
+    """
+    roots = [d for d in DATA_DIRS if d.is_dir()]
+    if not roots:
         raise SystemExit(
-            f"找不到数据集目录：{DATA_DIR}\n"
-            f"请先按 README 下载 Loghub 2.0 并解压到该目录。")
+            f"找不到数据集目录：{' 或 '.join(str(d) for d in DATA_DIRS)}\n"
+            f"请先跑 python scripts/fetch_datasets.py --all")
     out: List[Dataset] = []
-    for log_path in sorted(DATA_DIR.glob("*/*/*_full.log")):
-        name = log_path.name[: -len("_full.log")]
-        if names and name not in names:
-            continue
-        csv_path = log_path.with_name(log_path.name.replace(
-            "_full.log", "_full.log_structured.csv"))
-        if not csv_path.is_file():
-            print(f"  跳过 {name}：缺少结构化标注 {csv_path.name}")
-            continue
-        ds = Dataset(name, log_path, csv_path)
-        if not ds.events:
-            print(f"  跳过 {name}：标注事件类型为 0")
-            continue
-        out.append(ds)
-    return out
+    seen: Set[str] = set()
+    for root in roots:
+        for log_path in sorted(root.glob("*/*/*_full.log")):
+            name = log_path.name[: -len("_full.log")]
+            if name in seen:
+                continue
+            if names and name not in names:
+                continue
+            csv_path = log_path.with_name(log_path.name.replace(
+                "_full.log", "_full.log_structured.csv"))
+            if not csv_path.is_file():
+                print(f"  跳过 {name}：缺少结构化标注 {csv_path.name}")
+                continue
+            ds = Dataset(name, log_path, csv_path)
+            if not ds.events:
+                print(f"  跳过 {name}：标注事件类型为 0")
+                continue
+            seen.add(name)
+            out.append(ds)
+    return sorted(out, key=lambda d: d.name)
 
 
 # ---------------------------------------------------------------------------
