@@ -444,6 +444,11 @@ def _attach_change_events(clusters: List[ErrorCluster],
         if gap > CHANGE_WINDOW_SEC:
             continue
         src = f"{prev.source}:L{prev.line_no}" if prev.source else f"L{prev.line_no}"
+        # 同一份文件就不重复报路径 —— 报告头部已经写了「【日志分析摘要】<源文件>」。
+        # Mac 上 406 条变更关联行各自重复一遍完整路径，实测约 6,000 token
+        # （占全文 12.5%）纯粹是同一串字符的复制，**零信息**。
+        if prev.source and result.stats.source and prev.source == result.stats.source:
+            src = f"L{prev.line_no}"
         c.change_context = (f"错误首发在「{prev.text[:40]}」后 "
                             f"{gap:.0f}s（{src}）")
 
