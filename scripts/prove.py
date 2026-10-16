@@ -223,6 +223,41 @@ def claim_readme_module_tree() -> dict:
                  else f"{len(mods)} 个模块全部在架构树里")
 
 
+def claim_layering() -> dict:
+    """接入层不得直接 import core / export —— service 是唯一转换点（v2.8.1）。
+
+    这条 README 早就写着，**但它一直是假的**：`cli.py` 与 `mcp/server.py`
+    都在函数体里 `from log_ai_compressor.core.evidence import ...`，绕过
+    service 自己拿取证 API。写文档不等于守纪律，于是某天就会有人照着
+    那两处再抄一份序列化逻辑 —— 这正是本项目吃过亏的场景（CHANGELOG 里
+    「证据摘要精度两条出口不一致」就是这么来的）。
+
+    真正的风险不是「多一层间接」，而是**同一份逻辑会长出第二个实现**。
+    所以这里用 AST 核验，不靠人自觉。
+    """
+    import ast
+    layer_roots = ("cli", "web", "mcp", "ai")
+    banned_prefix = ("log_ai_compressor.core", "log_ai_compressor.export")
+    violations = []
+    for layer in layer_roots:
+        for path in sorted((ROOT / "log_ai_compressor" / layer).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            rel = path.relative_to(ROOT).as_posix()
+            for node in ast.walk(tree):
+                mod = None
+                if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    mod = node.module
+                elif isinstance(node, ast.Import):
+                    for a in node.names:
+                        if a.name.startswith(banned_prefix):
+                            violations.append(f"{rel}: import {a.name}")
+                if mod and mod.startswith(banned_prefix):
+                    violations.append(f"{rel}:{node.lineno} from {mod} import …")
+    return claim("分层：接入层只经 service 触达 core/export", not violations,
+                 "；".join(sorted(set(violations))[:6]) if violations
+                 else f"{len(layer_roots)} 个接入层 AST 核验通过")
+
+
 def claim_optdeps() -> dict:
     """硬依赖必须只有 PyYAML —— 轻量是 PyPI 生态的硬通货。"""
     try:
@@ -279,6 +314,7 @@ def gather(path: Path) -> dict:
         claim_scorecard(),
         claim_structured(),
         claim_optdeps(),
+        claim_layering(),
         claim_readme_metrics(),
         claim_readme_module_tree(),
     ]

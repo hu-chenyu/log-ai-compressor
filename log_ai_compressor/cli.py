@@ -364,7 +364,6 @@ def cmd_verify(args) -> int:
         成立吗」的答案 —— 那必然成立，因为它就是拿这份日志算的。
     """
     from log_ai_compressor import service as S
-    from log_ai_compressor.core.evidence import EvidenceRef
 
     refs: List = []
     fingerprint = ""
@@ -382,7 +381,7 @@ def cmd_verify(args) -> int:
             return EXIT_ERROR
         for c in payload.get("clusters") or []:
             for e in c.get("evidence") or []:
-                refs.append(EvidenceRef(
+                refs.append(S.EvidenceRef(
                     evidence_id=e.get("evidence_id", ""),
                     source=e.get("source", ""),
                     line_start=int(e.get("line_start", 0)),
@@ -425,8 +424,7 @@ def cmd_verify(args) -> int:
         fingerprint = S.result_fingerprint(result)
         source_label = result.stats.source
 
-    from log_ai_compressor.core.evidence import verify_refs
-    report = verify_refs(refs).as_dict()
+    report = S.verify_refs(refs).as_dict()
     report["fingerprint"] = fingerprint
     report["source"] = source_label
     report["mode"] = "report" if args.report else "self-check"
@@ -701,7 +699,28 @@ def cmd_ai_explain(args) -> int:
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
+def _force_utf8_stdio() -> None:
+    """把 stdout/stderr 切到 UTF-8，并对编不出的字符降级（v2.8.1）。
+
+    为什么 CLI 也要做这件事（门禁脚本早就做了，CLI 一直漏着）：
+    本工具的帮助文本、级别名、报告全是中文。Windows 上 Python 的标准流
+    默认跟随**控制台代码页**——一旦是 cp1252（英文区域设置的 Windows、
+    Git Bash、Docker 里 `LANG=C`、CI runner），`print("中文")` 直接抛
+    UnicodeEncodeError，用户看到的是一整页栈回溯，而不是用法说明。
+
+    症状极具迷惑性：**退出码是对的**（argparse 自己也是 2），崩的是输出。
+    所以只看返回值的测试永远抓不到它。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):  # pragma: no cover
+            # 老解释器 / 已被替换的流：放弃重配，而不是让整个 CLI 起不来
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _force_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

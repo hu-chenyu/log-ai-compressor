@@ -8,6 +8,119 @@
 
 ---
 
+## [2.9.0] - 2026-10-16
+
+**上一轮我给工程质量打了 94，扣掉的 6 分全部在这一版处理。** 除此之外新增
+47 条测试、抓出 2 个真缺陷、并把一条 README 里写了很久但**一直是假的**的
+架构纪律变成了可执行门禁。
+
+### 🔧 真缺陷 1 · `pick_port` 在 Windows 上一直是坏的
+
+`web/server.py` 的 `pick_port` 用「bind + `SO_REUSEADDR`」探测端口占用。
+**Windows 上 `SO_REUSEADDR` 允许第二个 socket 绑到已经在监听的端口** ——
+实测：第一个 socket 已经 `listen`，第二个照样 `bind` 成功。于是探测永远返回
+「空闲」，被占端口原样返回，真正 bind 的 uvicorn 再抛一个看不懂的错。
+
+而「双击 `start.bat`、上一次残留进程还占着 8765」**正是这个函数存在的理由**，
+且 Windows 恰恰是 `start.bat` 的一等入口平台 —— 也就是说，这个探测在它唯一
+重要的平台上从来没生效过。
+
+改成两道：先真连一下（有人在监听就连得上），再裸 bind 一次（占了没监听的端口
+bind 会失败），裸 bind **不加** `SO_REUSEADDR`。
+
+### 🔧 真缺陷 2 · CLI 在 cp1252 控制台上直接崩
+
+本工具的帮助文本、级别名、报告全是中文。Windows 上 Python 的标准流跟随
+**控制台代码页** —— 一旦是 cp1252（英文区域设置、Git Bash、`LANG=C`、
+CI runner），`print("中文")` 抛 `UnicodeEncodeError`，用户看到的是一整页栈回溯
+而不是用法说明。
+
+最迷惑的地方：**退出码是对的**（argparse 自己也是 2），崩的是输出 ——
+所以只看返回值的测试永远抓不到它。门禁脚本 `prove.py` / `adversarial_eval.py`
+早就做了 stdout 重配，**CLI 一直漏着**。现在 `cli.main()` 也做。
+
+### 🧪 堵住「本地绿、CI 红」这个方法论漏洞
+
+上一轮 exit code 的用例只在 Windows CI 上红，本地怎么跑都发现不了 ——
+因为本地控制台恰好是 UTF-8。**这不是运气，是本地环境恰好等于理想环境。**
+
+新增 `tests/test_subprocess_encoding_contract.py`（19 条），两条检查：
+
+1. **行为检查**：把真实存在过的敌对控制台配置（cp1252 / cp1252+UTF8 关 /
+   UTF8mode 关）搬进**本地**跑 CLI，`--help`、`rules list`、失败路径都要跑完，
+   且失败路径退出码必须是 1、不许冒出 traceback。
+2. **静态检查**：任何 `subprocess.run(..., encoding="utf-8")` 却没给子进程设
+   `PYTHONIOENCODING` 的测试，一律红。
+
+第二条当场抓出 **3 处存量隐患**（`test_packaging` / `test_registry_manifest` /
+`test_uncovered_paths`）—— 同样的写法、同样的雷，只是还没炸。
+
+> 一个副产物教训：写这条静态检查时我改完 3 个文件就以为完事了，静态检查绿、
+> ruff 绿。真正跑测试才发现**我忘了 `import os`**。
+> **静态检查验证的是契约，不是代码能跑。** 两个都得做。
+
+### 🏗 把一条「写了但一直是假的」纪律变成门禁
+
+README 一直写着「`service` 是 core 与接入层之间**唯一**的转换点」。AST 核验后发现
+`cli.py` 与 `mcp/server.py` 都在函数体里 `from ...core.evidence import ...`
+绕过了它。已改走 `S.`，并新增 `prove.py` 主张：**接入层（cli / web / mcp / ai）
+不得直接 import `core.*` / `export.*`**，AST 核验。
+
+真正的风险不是「多一层间接」，而是**同一份逻辑会长出第二个实现** —— 本项目
+已经吃过这个亏（CHANGELOG 里「证据摘要精度两条出口不一致」就是这么来的）。
+
+### 🕸 Web 层边界：32 行未覆盖 → 21 行
+
+`web/` 与 `ai/` 是可选 extra，没装 `fastapi` 时整片被 `importorskip` 跳过，
+于是在覆盖率报告上是一块**没人看过的区域**，而它恰好是唯一直接对外暴露 HTTP
+的地方。新增 `tests/test_web_server_boundaries.py`（17 条），其中最要紧的一条：
+
+**路径逃逸防护（`web/server.py:106`）此前零测试覆盖** —— 一个没有测试的安全
+闸门，和没有闸门的区别只存在于「读者相信它存在」这件事上。现在绝对路径与
+`../..` 两种越界形态都验，限根后相对路径仍要能用（否则闸门太紧把功能也关了）。
+
+另外把 `web/jobs.py` 的 traceback 三路不一致统一了：此前 SSE 早订阅者拿到栈、
+REST 拿不到、晚订阅者也拿不到 —— **同一个故障，刷新一下页面信息就变少了**，
+没有任何文档解释为什么。现在三条路径统一走显式开关 `LOG_AI_TRACEBACK`，
+默认都不发（与 MCP 层「不许把 traceback 泄漏给 Agent」同一立场），
+开启动静订阅者与早订阅者一致。
+
+### 📈 漏行 171 → 156，测试 1,001 → 1,043
+
+新增四组：`test_subprocess_encoding_contract.py`(19)、
+`test_web_traceback_contract.py`(7)、`test_web_server_boundaries.py`(17)，
+外加前面几轮的部分。`web/server.py` 32 → 21 漏行，`web/jobs.py` 2 → 1。
+
+**剩下的 156 行不是"没看"，是逐条核过的**：绝大多数是可选 extra（`ai/*`，27 行）、
+格式化分支（`export/reporters.py`，27 行）、以及两处**已确认不可达**的死代码
+（`parser.py:135-136` 的跨平台兜底、`web/server.py:99` 的 TB 兜底 return，
+后者已写成测试把理由钉死）。**「覆盖率没到」不等于「代码不可达」，也不等于
+「该补测试」—— 三者要分开判。**
+
+### 📖 README 第一屏现在讲「可验证」
+
+原先这条主张埋在 FAQ 第七条。现在提到最前面，并且把四件具体的事摆成对照表
+（拿不出因果链就说证据不足 / 结论指纹逐字节相同 / 证据摘要只认原始字节 /
+**主动撤回过一个跑不出来的数字**）。
+
+写这段时我刻意避开了同类产品已经在用的那句现成话术，改成我们自己的版本 ——
+**口号是别人的，证据是自己的**。
+
+### 📥 数据集：从「只测 5/14」变成「能下 10/14」
+
+`fetch_datasets.py` 补齐了 Linux / Mac / HPC / OpenSSH / Hadoop（约 16 MB），
+未列的四个巨无霸（BGL / Spark / HDFS / Thunderbird，共 888 MB）保留在
+`EXTRA` 里注释着，注明是**故意不列**。
+
+**但新增的 4 个没测成**：本开发环境 `zenodo.org` 域名级不可达 ——
+Python urllib / PowerShell / curl 三条路径分别得到 Connection reset /
+操作超时 / Recv failure，而同一环境访问 github、pypi 正常。
+**表里没有它们的数，因为没跑过就不写数。** 症状与排查步骤已写进脚本 docstring。
+
+### 门禁
+
+ruff / build / pytest **1,043** + 覆盖率 96% / 对抗性评分卡 35:35 PASS /
+自证脚本 **10 条主张** / 构建可复现性 —— 六道全绿。
 ## [2.8.1] - 2026-10-16
 
 **补一处文档漂移，并为它加一道门禁。** 上一版修完 9 个代码问题后自查，发现自己

@@ -11,6 +11,7 @@ pyproject 把 web / mcp / ai 拆成了 extras，硬依赖只有 PyYAML
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 import sys
 import textwrap
@@ -41,10 +42,14 @@ CORE_MODULES = ["log_ai_compressor.core.pipeline",
 
 
 def _run(code: str) -> subprocess.CompletedProcess:
+    # 必须显式给子进程设编码（v2.8.1 契约）：不设就静默继承开发机的环境，
+    # 本地恰好是 UTF-8 时全绿，换到 cp1252 的机器上就解码成乱码。
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    env.pop("PYTHONUTF8", None)
     return subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
         cwd=str(BASE), capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=120,
+        errors="replace", timeout=120, env=env,
     )
 
 
