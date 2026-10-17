@@ -284,14 +284,39 @@ _FINGERPRINT_CLUSTER_FIELDS = (
     "root_cause_reason", "anomaly", "change_context",
     "root_cause_variants", "cause_overflow", "root_timeline",
     "related_clusters", "traces", "first_seen", "last_seen",
-    "evidence_ids",
+    # 是簇字段 `evidence`；它以路径无关身份（起止行+类型+摘要）入指纹，
+    # 所以这个名单里不能叫 evidence_ids —— 那会让人以为指纹用的是 ID。
+    "evidence",
 )
+
+
+def _fingerprint_ref(ref) -> tuple:
+    """证据引用的**路径无关**身份：哪一段原文（起止行 + 类型 + 原文摘要）。
+
+    为什么不用 `evidence_id`：它由 `(source, 起止行, 类型, 摘要)` 派生，
+    而 `source` 是**调用方传入的路径字符串**。同一份日志用绝对路径和相对
+    路径打开，`evidence_id` 全都不同，于是结论指纹也跟着变 ——
+    而指纹对外承诺的是「同一份日志跑两遍逐字节相同」。
+
+    v2.11.0 实测（未改之前）：
+
+        绝对路径 examples/sample_system.log  ->  856b49a807c1bc171…
+        相对路径 examples/sample_system.log  ->  2adae7d0a62c5d53…
+
+    两次分析的是**逐字节相同**的一份日志，逐字段 diff 只有路径不同。
+    CI 的确定性门禁用**同一个字面路径**连跑三次，结构上就检测不到这一维。
+
+    摘要 `digest` 已经在里面，所以判别力与 `evidence_id` 等价 ——
+    唯一丢掉的是路径，而路径不是「结论」。
+    """
+    return () if ref is None else (ref.line_start, ref.line_end,
+                                   ref.kind, ref.digest)
 
 
 def _fingerprint_variants(cluster) -> tuple:
     """簇内全部内层因的稳定摘要（原因 / 次数 / 各自的首处证据引用）。"""
     return tuple(
-        (v.reason, v.count, v.evidence.evidence_id if v.evidence else "")
+        (v.reason, v.count, _fingerprint_ref(v.evidence))
         for v in (getattr(cluster, "root_cause_variants", None) or ())
     )
 
@@ -316,10 +341,23 @@ def result_fingerprint(result) -> str:
 
     集合型字段（`related_clusters` / `traces`）按**排序后的元组**入指纹：
     它们语义上是集合，而集合的存储顺序不该让同一份日志的指纹漂移。
+
+    **路径不是结论**（v2.11.0）
+    ------------------------
+    指纹刻意不取 `stats.source`，证据也刻意不以 `evidence_id` 入指纹 ——
+    两者都含调用方传入的路径字符串，于是同一份日志用绝对路径和相对路径
+    打开会得到两个不同的指纹，而对外承诺是「同一份日志跑两遍逐字节相同」。
+    证据改用**路径无关身份**（起止行 + 类型 + 原文摘要）入指纹，判别力不变。
+    这条边界同时写进了 AGENTS.md §4b 的表里 —— 「不写进去的边界，
+    下一个人只会当成 bug 或者当成承诺」。
     """
     s = result.stats
+    # 刻意**不取** `s.source`：它是调用方传入的路径字符串（绝对/相对/软链接/
+    # 大小写都可以），而同一份日志用不同写法打开，分析结果逐字段相同。
+    # 取了它，指纹就成了「你怎么写的这个路径」的函数 —— 对外承诺的
+    # 「同一份日志跑两遍逐字节相同」当场不成立。
     stats = {
-        "source": s.source, "rule": s.rule_name, "total_lines": s.total_lines,
+        "rule": s.rule_name, "total_lines": s.total_lines,
         "entry_lines": s.entry_lines, "error_lines": s.error_lines,
         "error_entries": s.error_entries, "ts_entries": s.ts_entries,
         "level_counts": dict(sorted(s.level_counts.items())),
@@ -344,7 +382,8 @@ def result_fingerprint(result) -> str:
             tuple(sorted(c.traces)),
             round(c.first_seen, 3) if c.first_seen is not None else None,
             round(c.last_seen, 3) if c.last_seen is not None else None,
-            tuple(e.evidence_id for e in c.evidence),
+            # 证据用**路径无关身份**入指纹（见 _fingerprint_ref）
+            tuple(_fingerprint_ref(e) for e in c.evidence),
         ))
     blob = repr((stats, payload))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
