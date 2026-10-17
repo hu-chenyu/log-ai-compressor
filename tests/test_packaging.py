@@ -303,3 +303,107 @@ class TestGracefulDegradation:
             print("WEB_OK")
         """))
         assert "WEB_OK" in r.stdout, r.stdout + r.stderr
+
+
+# ---------------------------------------------------------------------------
+# 直接 import 的依赖，必须直接声明（v2.11.0）
+# ---------------------------------------------------------------------------
+# 背景：`log_ai_compressor/web/server.py` 里写着 `from pydantic import
+# BaseModel, Field`，而 `pydantic` 从来没在 pyproject 里出现过 —— 它一直
+# 是**靠 fastapi 顺带装上**的。
+#
+# 「靠顺带」是本项目最该警惕的一种依赖：它今天能跑，于是没人发现它没被
+# 声明；哪天有人 `pip install --no-deps`，或者 FastAPI 换了底层实现，
+# 第一个炸的是 `web/server.py:22` 一个裸 ImportError，而不是一条能照做的
+# 依赖说明。所以凡是包内**直接** import 的第三方，必须在 pyproject 里点名。
+#
+# 这条门禁的存在还有一个理由：`pip` 不会告诉你「你 import 了一个你没声明
+# 的东西」，Python 也不会 —— 只有把两者对起来看才能发现。
+
+
+_MODULE_TO_DIST = {
+    "fastapi": "fastapi",
+    "httpx": "httpx",
+    "mcp": "mcp",
+    "pydantic": "pydantic",
+    "sse_starlette": "sse-starlette",
+    "uvicorn": "uvicorn",
+    "yaml": "PyYAML",
+}
+
+
+def _third_party_imports():
+    """(顶层模块名, 所属层) —— 按 AST 静态扫，不真的 import。"""
+    import ast
+
+    pkg = BASE / "log_ai_compressor"
+    out = set()
+    for path in sorted(pkg.rglob("*.py")):
+        layer = path.relative_to(pkg).parts[0]
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    out.add((a.name.split(".")[0], layer))
+            elif isinstance(node, ast.ImportFrom):
+                # level > 0 是包内相对导入，不涉及第三方
+                if not node.level and node.module:
+                    out.add((node.module.split(".")[0], layer))
+    stdlib = set(sys.stdlib_module_names) | {"log_ai_compressor"}
+    return {(m, lay) for m, lay in out if m not in stdlib}
+
+
+def _declared() -> set:
+    import tomllib
+
+    meta = tomllib.loads((BASE / "pyproject.toml").read_text(encoding="utf-8"))
+    names = set()
+    for spec in meta["project"].get("dependencies", []):
+        names.add(re.split(r"[<>=!\[\s]", spec, 1)[0].strip().lower())
+    for extra in meta["project"].get("optional-dependencies", {}).values():
+        for spec in extra:
+            names.add(re.split(r"[<>=!\[\s]", spec, 1)[0].strip().lower())
+    return names
+
+
+def test_every_direct_third_party_import_is_declared():
+    """包内直接 import 的第三方，必须在 pyproject 里声明（硬依赖或某个 extra）。"""
+    declared = _declared()
+    undeclared = sorted(
+        f"{mod}（{dist}，{_MODULE_TO_DIST.get(mod, '?未在映射表里?')}）"
+        for mod, _layer in _third_party_imports()
+        for dist in [_MODULE_TO_DIST.get(mod, mod)]
+        if dist.lower() not in declared and mod.lower() not in declared
+    )
+    assert not undeclared, (
+        "这些模块在包内被直接 import，却没有在 pyproject 里声明："
+        f"{undeclared}。如果它们是某个 extra 的传递依赖，也要显式写出来。")
+
+
+def test_module_to_distribution_map_is_complete():
+    """映射表漏了新依赖，这条门禁就会**悄悄放过**它。
+
+    所以映射表本身要被守：包里出现的每个第三方顶层模块都必须有对应条目。
+    """
+    unknown = sorted({m for m, _ in _third_party_imports()
+                      if m not in _MODULE_TO_DIST})
+    assert not unknown, (
+        f"这些顶层模块不在 _MODULE_TO_DIST 里：{unknown}。"
+        "先确认它来自哪个发行包，再补进映射表 —— "
+        "漏补的话上一条会直接放过它。")
+
+
+def test_pydantic_is_declared_explicitly():
+    """`web/server.py` 直接 import pydantic，它就得写进 web extra。
+
+    单独钉一条，是因为它是本轮修的那个具体漏洞：靠 fastapi 顺带装上的
+    依赖最难发现，单独钉住才不会被下一次「顺手清理 pyproject」抹掉。
+    """
+    import tomllib
+
+    meta = tomllib.loads((BASE / "pyproject.toml").read_text(encoding="utf-8"))
+    web = meta["project"]["optional-dependencies"]["web"]
+    assert any(re.split(r"[<>=!\[\s]", s, 1)[0].strip().lower() == "pydantic"
+               for s in web), (
+        f"web extra 里没有显式声明 pydantic：{web}。"
+        "web/server.py 直接 import 它，就不能只靠 fastapi 顺带装。")
