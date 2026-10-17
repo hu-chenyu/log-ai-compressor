@@ -227,6 +227,47 @@ def test_sdist_contains_changelog(sdist: tarfile.TarFile | None) -> None:
         "sdist 里没有 CHANGELOG.md —— 源码交付不带变更记录说不过去")
 
 
+def test_sdist_contains_contributor_guides(sdist: tarfile.TarFile | None) -> None:
+    """AGENTS.md / CONTRIBUTING.md 必须在包里。
+
+    与 CHANGELOG 同理：README 未必链接它们，但源码交付的读者要能查到
+    「怎么在这个仓库里干活」。它们在**仓库根目录**，不在任何
+    ``recursive-include`` 能扫到的位置，只能靠裸 ``include`` ——
+    少了那两行，这条测试就会抓到（MANIFEST.in 里已经显式 include）。
+    """
+    if sdist is None:
+        pytest.skip("dist/ 下没有 sdist，跳过产物层校验")
+    names = _sdist_names(sdist)
+    missing = [p for p in ("AGENTS.md", "CONTRIBUTING.md") if p not in names]
+    assert not missing, f"sdist 里缺少贡献指南：{missing}"
+
+    uncovered = [p for p in ("AGENTS.md", "CONTRIBUTING.md")
+                 if not _covered_by_manifest(p)]
+    assert not uncovered, (
+        f"MANIFEST.in 的规则收不进这些根级文件：{uncovered}。"
+        "根目录的 .md 不会被 recursive-include 命中，必须裸 include。")
+
+
+def test_sdist_contains_benchmark_baseline(sdist: tarfile.TarFile | None) -> None:
+    """``docs/benchmark_baseline.json`` 必须在包里。
+
+    ``scripts/prove.py`` 随 sdist 一起交付，而它有一条主张要读这份基线
+    对账 README 的基准表。基线不进包 = **从 sdist 里跑自证脚本必然那条红**。
+
+    这就是「检查器自己会坏」：一条需要外部状态才成立的门禁，在别人手里
+    是坏的，比没有更让人误解。
+    """
+    if sdist is None:
+        pytest.skip("dist/ 下没有 sdist，跳过产物层校验")
+    assert "docs/benchmark_baseline.json" in _sdist_names(sdist), (
+        "sdist 里没有基准基线 —— 从源码交付里跑 scripts/prove.py 时，"
+        "「README 基准表与实测一致」这条主张必然失败")
+    assert _covered_by_manifest("docs/benchmark_baseline.json"), (
+        "MANIFEST.in 的 docs 规则没覆盖 *.json —— 基准基线收不进包")
+
+
+
+
 def test_sdist_excludes_bulk_dataset(sdist: tarfile.TarFile | None) -> None:
     """Loghub 数据集 178 MB，绝不能进 sdist（会卡死上传）。"""
     if sdist is None:
