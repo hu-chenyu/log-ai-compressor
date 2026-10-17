@@ -407,3 +407,50 @@ def test_pydantic_is_declared_explicitly():
                for s in web), (
         f"web extra 里没有显式声明 pydantic：{web}。"
         "web/server.py 直接 import 它，就不能只靠 fastapi 顺带装。")
+
+
+# ---------------------------------------------------------------------------
+# 版本号：CHANGELOG 顶格 与 pyproject 必须对得上
+# ---------------------------------------------------------------------------
+# 这条门禁是本轮踩出来的：写完 v2.11.0 的 CHANGELOG 条目才发现 pyproject 与
+# `__init__.__version__` 还停在 2.10.0，于是文档声称存在一个代码里不存在的
+# 版本 —— 按 AGENTS.md §2.1「不许造数字」，那和编一个实测值没区别。
+#
+# 允许「未发布」标记暂时领先（沿用 v2.9.5「未发布，并入 v2.9.6」的写法）：
+# 写条目和发版本来就不是同一时刻。但**没有**该标记时就必须严格相等 ——
+# 那意味着「这个版本已经发出去了」，代码里的版本号没跟上就是缺陷。
+
+
+def _changelog_top_section() -> str:
+    import re as _re
+
+    text = (BASE / "CHANGELOG.md").read_text(encoding="utf-8")
+    m = _re.search(r"^## \[([^\]]+)\](.*)$", text, _re.M)
+    assert m, "CHANGELOG.md 里找不到任何 `## [x.y.z]` 版本段"
+    return m.group(1), m.group(2)
+
+
+def test_changelog_top_version_matches_pyproject_unless_marked_unreleased():
+    import tomllib
+
+    meta = tomllib.loads((BASE / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = meta["project"]["version"]
+    version, tail = _changelog_top_section()
+    if "未发布" in tail:
+        pytest.skip(f"CHANGELOG 顶格 {version} 标了「未发布」，发版时再对账")
+    assert version == declared, (
+        f"CHANGELOG 顶格是 {version}（看起来已发布），"
+        f"而 pyproject 写的是 {declared} —— 文档声称了一个代码里不存在的版本")
+
+
+def test_pyproject_and_package_version_agree():
+    """pyproject 与 `__ai_compressor.__version__` 不能各说各话。"""
+    import tomllib
+
+    meta = tomllib.loads((BASE / "pyproject.toml").read_text(encoding="utf-8"))
+    sys.path.insert(0, str(BASE))
+    import log_ai_compressor
+
+    assert log_ai_compressor.__version__ == meta["project"]["version"], (
+        f"pyproject 写 {meta['project']['version']}，"
+        f"而 __version__ 是 {log_ai_compressor.__version__}")
