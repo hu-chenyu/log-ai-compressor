@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -245,32 +246,267 @@ def claim_readme_metrics() -> dict:
         f"README 写自证主张 {found or '未找到'} 条，本文件实际登记 {expected} 条")
 
 
+# 「本项目」自己的口径列。它们的存在本身就说明这是一张**证据保留率**表。
+_BENCH_OWN = (("交付", "delivery"), ("同预算", "budget32k"), ("全量", "full"))
+# 对照臂列，单独分组：docs/BENCHMARK.md 里还有两张以它们为主角的
+# **token 压缩比**表，语义与保留率毫无关系，见 _bench_columns。
+_BENCH_ARMS = (("Drain3", "drain3"), ("LogsLop", "logslop"))
+_BENCH_COLUMNS = _BENCH_OWN + _BENCH_ARMS
+_BENCH_SKIP_CELLS = ("交付上限", "达成度")   # 公式列，不是实测值
+
+# 胜负场次单独校：它是 README 第一屏就被引用的那句话（「同预算档 8 胜 1 平
+# 1 负」），而且**从来没有被任何东西校过**。docs/BENCHMARK.md 的「三个
+# 口径」那张表里，交付口径写的是「1 胜 9 负」—— 多算一场胜、把 Proxifier
+# 那场平（72.7% vs 72.7%）整个漏掉，与同仓库 README、docs/FAQ.md 写的
+# 「0 胜 1 平 9 负」直接矛盾，而三份文档都在门禁射程之内。
+#
+# 小数点漂移和这个不是一回事：**多报一个不存在的胜**，比错一个百分点严重
+# 得多 —— 它是这类项目最容易被追问、也最经不起追问的一句话。
+_VERDICT_RE = re.compile(r"(\d+)\s*胜(?:\s*(\d+)\s*平)?\s*(\d+)\s*负")
+_BENCH_VERDICTS = (("交付", "verdict_delivery"),
+                   ("同预算", "verdict_budget"),
+                   ("全量", "verdict_full"))
+
+
+def _bench_verdict_counts(datasets: dict) -> dict:
+    """从基线里每个数据集的 `verdict_*` 重算三个口径对 Drain3 的场次。"""
+    out = {}
+    for label, key in _BENCH_VERDICTS:
+        tally = {"胜": 0, "平": 0, "负": 0}
+        for rec in datasets.values():
+            v = rec.get(key)
+            if v in tally:
+                tally[v] += 1
+        out[label] = tally
+    return out
+
+
+def _bench_verdict_problems(doc_name: str, doc_text: str, counts: dict):
+    """把文档里「N 胜 N 平 N 负」的断言逐处与重算结果比对。
+
+    口径标签与场次**必须同一行**：靠固定字符窗口跨行匹配，会在
+    「交付上限」「全级别」这些含「交付」「全量」的词上乱抓 ——
+    一条会误报的门禁比没有门禁更糟，它把真漂移淹没在噪音里。
+
+    一行里同一口径可能出现多次（同预算 + 全量都是 8/1/1），
+    所以只要**有一个**场次对得上就算过 —— 要求「全中」会逼着作者
+    删掉合法的重复表述。
+    """
+    problems: list = []
+    seen: dict = {}
+    checked = 0
+    for lineno, line in enumerate(doc_text.splitlines(), 1):
+        for label, _key in _BENCH_VERDICTS:
+            at = line.find(label)
+            if at < 0:
+                continue
+            found = [_verdict_triple(m) for m in _VERDICT_RE.finditer(line, at)]
+            if not found:
+                continue
+            seen.setdefault(label, []).append(lineno)
+            checked += 1
+            want = counts[label]
+            expect = (want["胜"], want["平"], want["负"])
+            if expect not in found:
+                got = found[0]
+                problems.append(
+                    f"{doc_name}:{lineno} {label} 胜负：文档 "
+                    f"{got[0]} 胜 {got[1]} 平 {got[2]} 负 vs 实测 "
+                    f"{expect[0]} 胜 {expect[1]} 平 {expect[2]} 负")
+    return problems, seen, checked
+
+
+def _verdict_triple(m) -> tuple:
+    """`1 胜 9 负` 是合法的写法：没写平就是零平。"""
+    return (int(m.group(1)), int(m.group(2) or 0), int(m.group(3)))
+
+# 每一处**当前**结论的副本都要对账。v2.11.0 才发现第三份：docs/FAQ.md 的
+# Q2 有一张同口径的表，v2.10.0 那条只认 README 的门禁照样放过它。
+_BENCH_DOCS = ("README.md", "docs/BENCHMARK.md", "docs/FAQ.md")
+# 刻意排除的文档，附理由。没有理由的豁免等于给自己开后门。
+_BENCH_DOC_EXEMPT = {"CHANGELOG.md": "历史快照，AGENTS.md §2.4 明说刻意不重写"}
+
+
+def _bench_columns(header: str) -> dict:
+    """按**表头**给每个指标列定列号，返回 {基线字段: 列号}；不是基准表返回 {}。
+
+    为什么不能写死「第几列」：README 的表有 5 个百分数列，
+    docs/BENCHMARK.md 的同名表多出 `tail @32k` / `grep @32k` 两列；
+    而 BENCHMARK.md 里还有七八张以「| 数据集 |」开头但列义完全不同的表
+    （行数/token 数、达成度、词元 Jaccard…）。按位置取会把它们一起吃进来，
+    然后报一堆根本没漂移的「漂移」—— 比漏报更糟，因为它会让真漂移被淹没。
+
+    识别判据为什么是「有事件数列 **或** 有两个以上本项目口径列」
+    --------------------------------------------------------
+    只认「标注事件」那一列会放过 `docs/FAQ.md` 的第三份副本 ——
+    它那张表是同口径的，只是没列事件数。**而「只堵了半边」正是这条门禁
+    自己诞生的原因**：v2.10.0 补 README 时没看 BENCHMARK.md，
+    v2.11.0 补 BENCHMARK.md 时差点又漏掉 FAQ.md。
+
+    反过来也不能放宽成「出现 Drain3 就算」：BENCHMARK.md 里有两张以 Drain3
+    为主角的 **token 压缩比**表，吃进来只会报出一堆根本不存在的漂移，
+    而真漂移会被淹没。判据要卡在「本项目口径」这一侧。
+    """
+    cells = [c.strip().replace("**", "").strip()
+             for c in header.strip().strip("|").split("|")]
+    has_events = "标注事件" in cells
+    own = [key for token, key in _BENCH_OWN
+           if any(token in c for c in cells)]
+    if not has_events and len(own) < 2:
+        return {}
+    out: dict = {}
+    if has_events:
+        out["events"] = cells.index("标注事件")
+    for idx, cell in enumerate(cells):
+        if any(bad in cell for bad in _BENCH_SKIP_CELLS):
+            continue
+        for token, key in _BENCH_COLUMNS:
+            if token in cell:
+                out.setdefault(key, idx)
+                break
+    return out
+
+
+# Markdown 表格的表头下一行必须长这样：只由 | - : 空格组成。
+# 少了这条判据，「含有『数据集』三个字的一行」会被当成表头 ——
+# 而 README「我们不能证明」那张表的**数据行**里恰好同时出现了
+# 「同预算档」「交付口径」「全量口径」，于是整张表被当成基准表校一遍，
+# 报出「表里有、基线里没有的数据集：在所有日志形态上都优于 Drain3」。
+_MD_SEP_RE = re.compile(r"^[|\s:-]+$")
+
+
+def _bench_tables(doc_text: str):
+    """找出文档里所有基准表，返回 [(列号表, 数据行), ...]。"""
+    lines = doc_text.splitlines()
+    out = []
+    i = 0
+    while i < len(lines) - 1:
+        line = lines[i]
+        if (line.lstrip().startswith("|") and "数据集" in line
+                and _MD_SEP_RE.match(lines[i + 1])):
+            cols = _bench_columns(line)
+            body, j = [], i + 2          # i+1 是 |---| 分隔行
+            while j < len(lines) and lines[j].lstrip().startswith("|"):
+                body.append(lines[j])
+                j += 1
+            if cols:
+                out.append((cols, body))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def _pct(cell: str):
+    """把 `**100.0%**` 解析成 1.0；不是百分数就返回 None。"""
+    m = re.search(r"(-?[\d.]+)\s*%", cell)
+    return float(m.group(1)) / 100 if m else None
+
+
+def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
+                         eps_pp: float = 0.05):
+    """对**一份**文档里的所有基准表逐格对账，外加口径胜负场次。
+
+    返回 (表内行数, 校验过的百分数格数, 校验过的胜负处数, 问题列表)。
+    三档计数都单独报出来，是因为「扫了 0 个却报通过」比报错更危险 ——
+    摘要里必须看得出这一轮到底校了多少东西。
+
+    单独抽出来是为了能测：门禁本尊 `claim_benchmark_table()` 从磁盘读文件，
+    而测试要能喂一段"故意改坏的表格"进去 —— 这是本仓库的硬规矩，
+    **一条从不曾变红过的门禁等于没有门禁**。
+
+    注意 `claim_benchmark_table` **不能**加参数：`prove.py::_run_claim` 见到
+    任何带参数的 claim 就会把命令行 path 塞进去当成"从别的目录读基线"。
+    """
+    problems: list = []
+    rows_total = 0
+    checked = 0
+    tables = _bench_tables(doc_text)
+    if not tables:
+        return 0, 0, 0, [f"{doc_name} 里找不到基准表（表头需含「标注事件」或两个以上本项目口径列）"]
+    for cols, body in tables:
+        for raw in body:
+            cells = [c.strip().replace("**", "") for c in raw.strip().strip("|").split("|")]
+            name = cells[0].strip()
+            # 合计/平均这类聚合行不是数据集，拿它跟基线比毫无意义
+            if any(agg in name for agg in ("合计", "总计", "小计", "平均")):
+                continue
+            rec = datasets.get(name)
+            if rec is None:
+                problems.append(f"{doc_name} 表里有、基线里没有的数据集：{name}")
+                continue
+            rows_total += 1
+            if any(idx >= len(cells) for idx in cols.values()):
+                problems.append(f"{doc_name} {name} 那行列数不足")
+                continue
+            # 缺哪列就不查哪列：BENCHMARK.md 里那张「达成度」表也带「标注事件」，
+            # 但只有交付一列，按名字硬取会直接 KeyError —— 一条门禁崩掉虽然也是红的，
+            # 却红得没有信息。
+            for label, key in (("交付", "delivery"), ("同预算", "budget32k"),
+                               ("全量", "full"), ("Drain3", "drain3"),
+                               ("LogsLop", "logslop")):
+                if key not in cols:
+                    continue
+                claimed = _pct(cells[cols[key]])
+                actual = rec.get(key)
+                if claimed is None or actual is None:
+                    continue
+                checked += 1
+                # 在**百分点**上比，并给浮点表示留一丝余量。
+                # 写成 `abs(a - b) > 0.0005` 会在边界上误判：OpenStack 的
+                # LogsLop 实测是 0.1875、文档写 18.8%，而
+                # `0.188 - 0.1875` 在二进制下是 0.0005000000000000004，
+                # 刚好「大于」0.0005 —— 一条完全正确的表格被判成漂移。
+                if abs(claimed - actual) * 100 > eps_pp + 1e-9:
+                    problems.append(
+                        f"{doc_name} {name} {label}：文档 {claimed * 100:.1f}% vs "
+                        f"实测 {actual * 100:.1f}%")
+            if "events" not in cols:
+                continue                    # FAQ 那张表没列事件数，不查这一格
+            got = cells[cols["events"]].strip().replace(",", "")
+            if got.isdigit() and int(got) != rec["events"]:
+                problems.append(
+                    f"{doc_name} {name} 标注事件：文档 {got} vs 实测 {rec['events']}")
+    v_problems, _seen, v_checked = _bench_verdict_problems(
+        doc_name, doc_text, _bench_verdict_counts(datasets))
+    problems.extend(v_problems)
+    return rows_total, checked, v_checked, problems
+
+
 def claim_benchmark_table() -> dict:
-    """README 的基准表必须与最近一次全量实测逐格相等（v2.10.0 新增门禁）。
+    """**每一处**公开的基准表都必须与最近一次全量实测逐格相等。
 
     为什么单列一条
     --------------
     `claim_readme_metrics` 校的是**工程指标**（行数 / 模块数 / 主张条数），
-    README 里另一张更显眼的表 —— 十行数据集 × 六个百分数 —— **从来没有被
+    文档里另一张更显眼的表 —— 十行数据集 × 六个百分数 —— **从来没有被
     任何东西校过**。后果不是理论上的：v2.9.9 修了 `mask_text` 的两处误伤
     （`read/write`、`input/output` 被误判成路径），那次改动是正确的，
     但它**改变了聚类结果**，于是
 
         HPC          76 簇 / 85.1%   ->  79 簇 / 81.1%
         Zookeeper    83 簇 / 92.1%   ->  83 簇 / 91.0%
+        Proxifier   117 簇 / 81.8%   ->  115 簇 / 72.7%
 
-    README 与 docs/BENCHMARK.md 仍写着修复前的数字，六道门禁全绿。
-    「唯一负例只差 2 个事件」也一并变成了 5 个 —— 一条会误导读者的结论
-    被原样留在了最重要的那张表上。
+    全部门禁绿着，而 README、docs/BENCHMARK.md 与「唯一负例只差 2 个事件」
+    一起原地不动。
 
-    这与 v2.9.5 撤回的那次是**同一个病**：对外数字，没有任何东西在校它。
+    v2.11.0 补上第二半
+    ------------------
+    v2.10.0 加这条门禁时**只对账 README**，把同一张表在 `docs/BENCHMARK.md`
+    里的那份副本放过了 —— 而那份副本上**至今仍挂着被撤回的 85.1%**，
+    并且正文还主动写着「下面是修正口径后的重测」。
+
+    这不是"补一个洞"，是**同一个洞只堵了半边**：事故驱动的门禁，
+    只堵住了自己第一眼看见的那个文件。所以这里对**所有**含基准表的文档
+    一视同仁 —— 少一份副本，就少一个能悄悄漂移的地方。
 
     怎么修才不会复发
     ----------------
     全量基准要跑两小时，进不了 CI。所以这里不重跑，而是对账：
 
-        docs/benchmark_baseline.json   ← --write-baseline 生成的实测快照
-        README 的表                     ← 人类维护的展示层
+        docs/benchmark_baseline.json             ← --write-baseline 生成的实测快照
+        README.md 与 docs/BENCHMARK.md 的表       ← 人类维护的展示层
 
     改了任何影响聚类的代码，两者就不一致，这条主张变红。重新实测的办法
     写在 detail 里，不需要猜：
@@ -280,76 +516,48 @@ def claim_benchmark_table() -> dict:
     容差取 0.05pp：报告只有一位小数，0.05 以内的差与显示舍入分不开 ——
     与 `verdict()` 用的判平容差是同一个数，口径一致。
     """
-    import json
-    import re
-
     baseline_path = ROOT / "docs" / "benchmark_baseline.json"
     if not baseline_path.is_file():
-        return claim("README 基准表与实测一致", False,
+        return claim("基准表与实测一致", False,
                      f"缺 {baseline_path.name}：没有实测基线就无法对账。"
                      "跑 python scripts/benchmark_loghub.py --budgets 32000 "
                      "--write-baseline 生成")
     try:
         base = json.loads(baseline_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return claim("README 基准表与实测一致", False,
+        return claim("基准表与实测一致", False,
                      f"{baseline_path.name} 解析失败：{exc}")
 
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    # 表头形如：| 数据集 | 标注事件 | 交付 top20 | **同预算 32k** | 全量 | Drain3 | ...
-    rows = re.findall(
-        r"^\|\s*([A-Za-z0-9_]+)\s*\|(\s*\d+\s*)\|([^|]*)\|([^|]*)\|([^|]*)\|"
-        r"([^|]*)\|([^|]*)\|", readme, re.M)
-    if not rows:
-        return claim("README 基准表与实测一致", False,
-                     "README 里找不到基准表（扫不到任何 `| 数据集 | 标注事件 |` 行）")
-
-    def num(cell: str):
-        m = re.search(r"(-?[\d.]+)\s*%", cell)
-        return float(m.group(1)) / 100 if m else None
-
-    eps_pp = 0.05        # 0.05pp，与 verdict() 的判平容差同口径
-    problems: list[str] = []
+    datasets = base.get("datasets", {})
+    problems: list = []
+    rows_total = 0
     checked = 0
-    for name, events, delivery, budget, full, drain, logslop in rows:
-        rec = base.get("datasets", {}).get(name)
-        if rec is None:
-            continue                      # 表里有、基线里没有 -> 下面单独报
-        fields = (("交付", num(delivery), rec["delivery"]),
-                  ("同预算", num(budget), rec["budget32k"]),
-                  ("全量", num(full), rec["full"]),
-                  ("Drain3", num(drain), rec["drain3"]),
-                  ("LogsLop", num(logslop), rec["logslop"]))
-        for label, claimed, actual in fields:
-            if claimed is None or actual is None:
-                continue
-            checked += 1
-            # 在**百分点**上比，并给浮点表示留一丝余量。
-            # 写成 `abs(a - b) > 0.0005` 会在边界上误判：OpenStack 的
-            # LogsLop 实测是 0.1875、README 写 18.8%，而
-            # `0.188 - 0.1875` 在二进制下是 0.0005000000000000004，
-            # 刚好「大于」0.0005 —— 一条完全正确的表格被判成漂移。
-            diff_pp = abs(claimed - actual) * 100
-            if diff_pp > eps_pp + 1e-9:
-                problems.append(
-                    f"{name} {label}：README {claimed * 100:.1f}% vs "
-                    f"实测 {actual * 100:.1f}%")
-        want_events = rec["events"]
-        got_events = int(events.strip())
-        if want_events != got_events:
-            problems.append(f"{name} 标注事件：README {got_events} vs 实测 {want_events}")
-
-    only_table = sorted({r[0] for r in rows} - set(base.get("datasets", {})))
-    if only_table:
-        problems.append(f"README 表里有、基线里没有的数据集：{only_table}")
+    verdicts = 0
+    seen_docs = []
+    for doc_name in _BENCH_DOCS:
+        doc_path = ROOT / doc_name
+        if not doc_path.is_file():
+            problems.append(f"{doc_name} 不存在")
+            continue
+        text = doc_path.read_text(encoding="utf-8")
+        n_tables = len(_bench_tables(text))
+        r, c, v, probs = _bench_doc_problems(doc_name, text, datasets)
+        rows_total += r
+        checked += c
+        verdicts += v
+        seen_docs.append(f"{doc_name}×{n_tables}")
+        problems.extend(probs)
 
     return claim(
-        "README 基准表与实测一致", not problems,
-        f"逐格对账 {len(rows)} 行 × {checked} 格（容差 0.05pp）；"
+        "基准表与实测一致", not problems,
+        f"对账 {'、'.join(seen_docs) or '无'} 共 {rows_total} 行："
+        f"{checked} 格百分数 + {verdicts} 处胜负场次"
+        f"（容差 0.05pp）；"
         + ("；".join(problems[:6]) if problems else "全部一致")
         + ("；…" if len(problems) > 6 else "")
         + "｜重跑：python scripts/benchmark_loghub.py --budgets 32000 "
           "--write-baseline")
+
 
 def claim_readme_module_tree() -> dict:
     """架构树必须列全包内模块（v2.8.1 新增门禁）。
