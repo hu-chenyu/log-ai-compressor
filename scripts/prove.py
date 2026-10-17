@@ -608,6 +608,19 @@ def claim_layering() -> dict:
       1. 遍历 `pkg/**/*.py` 再按路径前缀筛接入层 —— 不再假设某层是目录；
       2. detail 报**实际扫描的文件数**，且扫描数为 0 时直接判失败。
          「扫了 0 个文件还通过」必须是红的，不能是绿的。
+
+    **v2.11.0 修的两处同类盲区**（同一个家族：门禁在自己声称修好的
+    那一类写法上，又漏掉了另一种写法）：
+      3. **相对导入被整条丢掉**。原来写的是
+         `isinstance(node, ast.ImportFrom) and node.module and not node.level`
+         —— `not node.level` 把 `from ..core.evidence import …` 全部丢弃。
+         而它在 `mcp/server.py` 里运行时完全合法、门禁却报「核验通过」。
+         现在按文件的包路径解析 level：`from ..core.evidence` 在
+         `log_ai_compressor.mcp` 里解析成 `log_ai_compressor.core.evidence`。
+      4. **`from log_ai_compressor import core` 看不到越层**。`node.module`
+         只是 `log_ai_compressor`，不以禁用前缀开头，于是整条放行 ——
+         而它拿到的 `core` 正是 core 层。现在判定导入的**基名是不是包**：
+         是包就把每个被 import 的名字当成可能的子模块一起校。
     """
     import ast
     layer_roots = ("cli", "web", "mcp", "ai")
@@ -625,21 +638,75 @@ def claim_layering() -> dict:
         return parts[0][:-3] if len(parts) == 1 and parts[0].endswith(".py") \
             else parts[0]
 
+    def _package_of(p: Path) -> str:
+        """该文件**所在的包** —— 相对导入的基准点。
+
+        `log_ai_compressor/mcp/server.py` 的包是 `log_ai_compressor.mcp`
+        （不是 `log_ai_compressor.mcp.server`），`log_ai_compressor/cli.py`
+        的包就是 `log_ai_compressor`。
+
+        这一格算错，`from ..core.x import …` 就会解析到别处去，
+        而错的方向恰好是「解析不出越层」—— 也就是门禁失能。
+        我第一版把模块自己的名字也算进了包里，于是 level 多退一级，
+        相对导入一条都抓不到：**门禁仍然绿着，却什么都没校**。
+        """
+        parts = list(p.relative_to(pkg).parts)
+        if parts[-1] != "__init__.py":
+            parts = parts[:-1]          # 模块文件的包是它所在的那个目录
+        return ".".join(["log_ai_compressor", *parts])
+
+    def _is_package(dotted: str) -> bool:
+        """``dotted`` 是不是一个包（有 ``__init__.py`` 的目录）。"""
+        rel = Path(*dotted.split(".")) if dotted else None
+        return bool(rel) and (ROOT / rel / "__init__.py").is_file()
+
+    def _banned(mod: str) -> bool:
+        # 必须按**包边界**比：`log_ai_compressor.corefoo` 不是 core 层。
+        # 用裸 startswith 会把同前缀的无关模块一起禁掉。
+        return any(mod == p or mod.startswith(p + ".") for p in banned_prefix)
+
+    def _resolve(node, package: str) -> list:
+        """列出这个 import 节点引入的**全限定模块名**。"""
+        if isinstance(node, ast.Import):
+            return [a.name for a in node.names]
+        if node.level == 0:
+            base = node.module or ""
+        else:
+            parts = package.split(".")
+            keep = len(parts) - (node.level - 1)   # level=1 是「当前包」
+            if keep < 1:
+                return []                          # 相对导入越出包根，无法解析
+            base = ".".join(parts[:keep])
+            if node.module:
+                base = f"{base}.{node.module}"
+        if not node.module:
+            return [f"{base}.{a.name}" if base else a.name for a in node.names]
+        out = [base]
+        if _is_package(base):
+            # `from log_ai_compressor import core` / `from .. import core`：
+            # 被 import 的名字本身可能就是越层的子模块。
+            out.extend(f"{base}.{a.name}" for a in node.names)
+        return out
+
     targets = sorted(p for p in pkg.rglob("*.py") if _layer_of(p) in layer_roots)
     violations = []
     for path in targets:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         rel = path.relative_to(ROOT).as_posix()
+        package = _package_of(path)
         for node in ast.walk(tree):
-            mod = None
-            if isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                mod = node.module
-            elif isinstance(node, ast.Import):
-                for a in node.names:
-                    if a.name.startswith(banned_prefix):
-                        violations.append(f"{rel}: import {a.name}")
-            if mod and mod.startswith(banned_prefix):
-                violations.append(f"{rel}:{node.lineno} from {mod} import …")
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            for mod in _resolve(node, package):
+                if _banned(mod):
+                    if isinstance(node, ast.ImportFrom):
+                        # 按**原文写法**报，而不是按解析后的全限定名 ——
+                        # `.. import core` 报成 `..` 等于什么都没说
+                        shown = ("." * node.level + (node.module or "")
+                                 + " import " + ",".join(a.name for a in node.names))
+                    else:
+                        shown = mod
+                    violations.append(f"{rel}:{node.lineno} {shown}")
     # 扫到 0 个文件还判「通过」，本身就是失能 —— 门禁必须对此敏感。
     scanned_empty = not targets
     per_layer = {}

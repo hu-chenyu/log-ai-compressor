@@ -223,6 +223,136 @@ class TestLayeringGateCanActuallyFail:
         assert c["holds"] is False, "扫到 0 个接入层文件却判通过"
 
 
+class TestLayeringGateSeesEveryImportSpelling:
+    """v2.11.0：相对导入与 `from pkg import sub` 曾整条绕过门禁。
+
+    这两处与 v2.9.9 的「扫 0 个文件却报通过」是同一个家族 —— 门禁在自己
+    声称修好的那一类写法上，又漏掉了另一种写法。原来的判据是
+
+        isinstance(node, ast.ImportFrom) and node.module and not node.level
+
+    `not node.level` 把 `from ..core.evidence import …` 全部丢弃；而
+    `from log_ai_compressor import core` 的 `node.module` 只是
+    `log_ai_compressor`，不以禁用前缀开头，于是整条放行 —— 它拿到的
+    `core` 正是 core 层。两种写法在运行时都完全合法，门禁却报「核验通过」。
+    """
+
+    @staticmethod
+    def _repo(tmp_path, files: dict) -> None:
+        pkg = tmp_path / "log_ai_compressor"
+        (pkg / "core").mkdir(parents=True)
+        (pkg / "export").mkdir(parents=True)
+        (pkg / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "core" / "__init__.py").write_text("", encoding="utf-8")
+        (pkg / "core" / "evidence.py").write_text("x = 1\n", encoding="utf-8")
+        (pkg / "core" / "corefoo.py").write_text("x = 1\n", encoding="utf-8")
+        (pkg / "export" / "__init__.py").write_text("", encoding="utf-8")
+        for rel, body in files.items():
+            target = pkg / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if rel.endswith("__init__.py"):
+                target.write_text("", encoding="utf-8")
+            else:
+                target.write_text(body, encoding="utf-8")
+
+    def _check(self, tmp_path, monkeypatch, files: dict) -> dict:
+        self._repo(tmp_path, files)
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        return prove.claim_layering()
+
+    def test_parent_relative_import_into_core_is_caught(self, tmp_path, monkeypatch):
+        """`from ..core.evidence import …` —— 运行时合法，门禁曾报通过。"""
+        c = self._check(tmp_path, monkeypatch, {
+            "mcp/__init__.py": "",
+            "mcp/server.py": "from ..core.evidence import evidence_payload\n",
+        })
+        assert c["holds"] is False, "相对导入越层未被抓住 —— 门禁失能"
+        assert "server.py" in c["detail"], c["detail"]
+
+    def test_relative_dot_import_into_export_is_caught(self, tmp_path, monkeypatch):
+        """`from ..export import …` 同样要红，且要能看出是哪个模块。"""
+        c = self._check(tmp_path, monkeypatch, {
+            "web/__init__.py": "",
+            "web/app.py": "from ..export import json_export\n",
+        })
+        assert c["holds"] is False
+        assert "export" in c["detail"], c["detail"]
+
+    def test_bare_relative_import_of_a_name_is_caught(self, tmp_path, monkeypatch):
+        """`from .. import core` —— `node.module` 是 None，最容易漏。"""
+        c = self._check(tmp_path, monkeypatch, {
+            "ai/__init__.py": "",
+            "ai/reader.py": "from .. import core\n",
+        })
+        assert c["holds"] is False, "`from .. import core` 未被抓住"
+        assert "core" in c["detail"], c["detail"]
+
+    def test_relative_import_inside_own_layer_stays_green(self, tmp_path, monkeypatch):
+        """同层内的相对导入是**合法**的，不能因为修了盲区就一起判死。"""
+        c = self._check(tmp_path, monkeypatch, {
+            "mcp/__init__.py": "",
+            "mcp/util.py": "x = 1\n",
+            "mcp/server.py": "from .util import x\nfrom . import util\n",
+        })
+        assert c["holds"] is True, f"同层相对导入被误判成越层：{c['detail']}"
+
+    def test_layers_outside_the_contract_are_not_scanned(self, tmp_path, monkeypatch):
+        """core 内部的相对导入不归这条门禁管 —— 但接入层必须在场。
+
+        没有接入层文件时门禁会报「扫到 0 个文件」判失败，那是**另一个**
+        失能模式，不能拿它来证明「core 不在射程内」。
+        """
+        c = self._check(tmp_path, monkeypatch, {
+            "core/sub/__init__.py": "",
+            "core/sub/x.py": "from ..evidence import evidence_payload\n",
+            "cli.py": "from log_ai_compressor.service import analyze_file\n",
+        })
+        assert c["holds"] is True, c["detail"]
+
+    def test_from_package_import_submodule_is_caught(self, tmp_path, monkeypatch):
+        """`from log_ai_compressor import core` —— 绝对写法的同一类漏洞。"""
+        c = self._check(tmp_path, monkeypatch, {
+            "cli.py": "from log_ai_compressor import core\n",
+        })
+        assert c["holds"] is False, "`from pkg import core` 未被抓住"
+        assert "core" in c["detail"], c["detail"]
+
+    def test_from_package_import_export_is_caught(self, tmp_path, monkeypatch):
+        c = self._check(tmp_path, monkeypatch, {
+            "cli.py": "from log_ai_compressor import export\n",
+        })
+        assert c["holds"] is False, "`from pkg import export` 未被抓住"
+
+    def test_similar_prefix_module_is_not_banned(self, tmp_path, monkeypatch):
+        """`log_ai_compressor.corefoo` 不是 core 层 —— 边界不能糊。"""
+        c = self._check(tmp_path, monkeypatch, {
+            "cli.py": "from log_ai_compressor.corefoo import x\n",
+        })
+        assert c["holds"] is True, f"同前缀的无关模块被误判成越层：{c['detail']}"
+
+    def test_importing_service_is_fine(self, tmp_path, monkeypatch):
+        """正常路径没被写坏：接入层 import service 必须还是绿的。"""
+        c = self._check(tmp_path, monkeypatch, {
+            "cli.py": ("from log_ai_compressor.service import analyze_file\n"
+                       "from log_ai_compressor.rules.engine import load_rules\n"),
+        })
+        assert c["holds"] is True, c["detail"]
+
+    def test_violation_is_reported_with_file_and_line(self, tmp_path, monkeypatch):
+        """报错要能定位到行 —— 不然「红」了也不知道红在哪。"""
+        c = self._check(tmp_path, monkeypatch, {
+            "mcp/__init__.py": "",
+            "mcp/server.py": "x = 1\ny = 2\nfrom ..core.evidence import payload\n",
+        })
+        assert c["holds"] is False
+        assert "mcp/server.py:3" in c["detail"], c["detail"]
+
+    def test_current_repo_still_clean_after_the_fix(self):
+        """改完门禁，本仓库必须还是绿的 —— 不能把正常路径一起判死。"""
+        c = prove.claim_layering()
+        assert c["holds"] is True, c["detail"]
+
+
 class TestConfidenceGateCanActuallyFail:
     """`claim_confidence` 曾是 `... if not has_chain else True` 的恒真分支。"""
 
