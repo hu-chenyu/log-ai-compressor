@@ -12,6 +12,7 @@ venv/
 # 测试与覆盖率
 .pytest_cache/
 .coverage
+.coverage.*        # pytest-xdist 并行模式留的分片，跑一次测试就会攒下一堆
 coverage.xml
 htmlcov/
 .ruff_cache/
@@ -24,6 +25,15 @@ data/
 # 工具产物
 *.log.tmp
 perf_bench_*.log
+
+# CLI 默认报告：run 不带 -o 时写在输入日志旁边，compare 不带 -o 时写在当前目录。
+# 后缀清单对着 cli.py::_SUFFIX_FORMAT —— 那边加了新格式，这边忘了补，
+# 用户就会看到 git status 里凭空多一条自己没造过的文件（tests 里有一条测试在守这个同步）。
+*_report.md
+*_report.markdown
+*_report.json
+*_report.txt
+*_report.text
 
 # IDE
 .vscode/
