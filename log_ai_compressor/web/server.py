@@ -6,8 +6,10 @@
 本服务只绑定 127.0.0.1，且只读用户自己机器上的文件。
 - 没有鉴权是有意的：它等价于「本机进程」，任何能访问 127.0.0.1 端口的
   程序本来就能读这些文件（浏览器同源策略也阻止远端页面打这个端口）。
-- 文件浏览接口限制在用户主目录内，避免误扫整盘；分析接口接受任意绝对
-  路径，因为用户是显式指定自己要分析哪个文件的。
+- 文件浏览接口**默认**从用户主目录起步，但范围是**可选**的：设了
+  LOG_AI_FS_ROOT 才限定在该根目录内，没设就**刻意不限范围**（理由见
+  下方「关于范围限制」注释，它同时管住 /api/fs/list 与 /api/fs/file）。
+- 分析接口接受任意绝对路径 —— 用户是显式指定自己要分析哪个文件的。
 """
 from __future__ import annotations
 
@@ -173,6 +175,11 @@ def create_app() -> FastAPI:
     def fs_file(path: str = Query(..., description="文件绝对路径")):
         """单文件信息：用于输入框自动补全与大小提示。"""
         p = Path(path).expanduser()
+        # 与 _list_dir 同一个闸门。此前只有 /api/fs/list 受 LOG_AI_FS_ROOT
+        # 约束，这个接口绕开它 —— 旋钮存在却不同时管住两个接口，等于名不副实。
+        # 顺序：先查根、再查存在性。反过来会泄露「根外路径是否存在」。
+        if FS_ROOT and not _within_root(p):
+            raise HTTPException(400, f"只能访问 {FS_ROOT} 内的文件")
         if not p.is_file():
             raise HTTPException(404, f"文件不存在：{p}")
         info = _fs_entry(p)

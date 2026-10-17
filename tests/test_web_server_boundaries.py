@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import importlib
 import pathlib
 import socket
 
@@ -31,6 +32,38 @@ from log_ai_compressor.web import server as S  # noqa: E402
 def client():
     with TestClient(S.create_app()) as c:
         yield c
+
+
+@pytest.fixture()
+def fs_root_env(tmp_path, monkeypatch):
+    """把 LOG_AI_FS_ROOT **真的塞进环境变量**再重新加载模块。
+
+    为什么不用 ``monkeypatch.setattr(S, "FS_ROOT", ...)``（本文件其它用例
+    就是那么写的）：setattr 只测「FS_ROOT 为真值时闸门生效」，把
+    `server.py:68` 那根 ``os.environ.get("LOG_AI_FS_ROOT")`` 接线整个绕过去
+    了 —— 哪天环境变量被改名、或那行被删，setattr 的用例照样全绿。
+    reload 让这根接线也落进被守范围（下面那句 assert 就是它的守门）。
+
+    为什么 reload 是安全的：``importlib.reload`` **复用同一个 module
+    对象**（只重新执行代码），别处持有的 S 引用不会失效成旧壳；
+    而 FS_ROOT 会在 teardown 里再 reload 一次还原，避免污染后续用例。
+    """
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "inside.log").write_text("TOPSECRET-CONTENT-MARKER\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.log").write_text("s3cret\n", encoding="utf-8")
+    monkeypatch.setenv("LOG_AI_FS_ROOT", str(root))
+    importlib.reload(S)
+    # 这条断言本身就是被守对象：环境变量没能变成 FS_ROOT，下面的
+    # 400 断言就变成了「没设限根时的行为」，测试会给出误导性的绿。
+    assert S.FS_ROOT == str(root), "LOG_AI_FS_ROOT 没有变成 FS_ROOT"
+    try:
+        yield root
+    finally:
+        monkeypatch.undo()          # 先撤环境变量
+        importlib.reload(S)          # 再让 FS_ROOT 回到环境的真实值
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +116,82 @@ def test_fs_root_allows_relative_under_root(client, tmp_path, monkeypatch) -> No
     r = client.get("/api/fs/list", params={"path": "sub"})
     assert r.status_code == 200, r.text
     assert "a.log" in r.text
+
+
+def test_fs_file_blocks_escape(fs_root_env, client) -> None:
+    """/api/fs/file 也必须受 LOG_AI_FS_ROOT 约束 —— 旋钮不能只管一个接口。
+
+    此前这个接口根本不调 `_within_root`，于是设了根目录之后，
+    /api/fs/list 挡住越界、/api/fs/file 照样把根外文件的元数据端出去。
+    已知威胁模型下不可利用（只绑 127.0.0.1，且只回元数据不回内容），
+    但「提供了限根旋钮」与「旋钮名不副实」是两回事。
+
+    用 `fs_root_env`（真设环境变量 + reload）而不是 monkeypatch FS_ROOT：
+    这里要连 `server.py:68` 那根环境变量接线一起守住。
+    """
+    outside = fs_root_env.parent / "outside" / "secret.log"
+    bad = client.get("/api/fs/file", params={"path": str(outside)})
+    assert bad.status_code == 400, bad.text
+    detail = bad.json()["detail"]
+    assert str(fs_root_env) in detail and "只能访问" in detail, detail
+
+
+def test_fs_file_inside_root_still_works(fs_root_env, client) -> None:
+    """闸门不能紧到把功能也关掉：根内的文件必须照常返回元数据。
+
+    与上一条成对（AGENTS.md §6.3）：只测「该拒的拒了」，闸门写成
+    「恒返回 400」测试照样是绿的。
+    """
+    ok = client.get("/api/fs/file",
+                    params={"path": str(fs_root_env / "inside.log")})
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert body["is_dir"] is False
+    assert body["size"] > 0
+    assert body["big"] is False
+    # 文件内容里埋了标记：元数据接口不得把正文带出来
+    assert "TOPSECRET-CONTENT-MARKER" not in ok.text, \
+        "本接口只回元数据，不该带出文件内容"
+
+
+def test_fs_file_escape_not_leaking_existence(fs_root_env, client) -> None:
+    """根外的**不存在**路径也必须 400，不能退化成 404。
+
+    顺序反了（先 is_file 再查根）的话，404 与 400 的差别就成了一个
+    存在性探测器：这个接口在本机就能问出任意路径存不存在。
+    """
+    ghost = fs_root_env.parent / "outside" / "definitely-not-here.log"
+    r = client.get("/api/fs/file", params={"path": str(ghost)})
+    assert r.status_code == 400, r.text
+
+
+def test_fs_file_dotdot_escape_blocked(fs_root_env, client) -> None:
+    """`..` 形式同样要拦住，且它指向的文件必须真实存在。
+
+    没有「文件真的存在」这个前提，400 可能只是因为 404 —— 那这条测试
+    什么都没证明。
+    """
+    inside = client.get("/api/fs/file",
+                        params={"path": str(fs_root_env / "sub" / ".." / ".."
+                                            / "outside" / "secret.log")})
+    assert inside.status_code == 400, inside.text
+
+
+def test_can_go_up_reflects_fs_root(fs_root_env, client) -> None:
+    """限根后 can_go_up 必须跟着根变 —— 这是修 fs_file 时最容易顺手改坏的一行。
+
+    `root` 的父目录在根外 → 不能往上；`root/sub` 的父目录就是 root →
+    可以往上。写反了会出现「越界按钮照样能点」或「根目录里寸步难行」。
+    """
+    at_root = client.get("/api/fs/list", params={"path": str(fs_root_env)})
+    assert at_root.status_code == 200, at_root.text
+    assert at_root.json()["can_go_up"] is False, \
+        "根目录的父目录在根外，can_go_up 应为 False"
+
+    in_sub = client.get("/api/fs/list", params={"path": str(fs_root_env / "sub")})
+    assert in_sub.status_code == 200, in_sub.text
+    assert in_sub.json()["can_go_up"] is True, \
+        "子目录的父目录仍在根内，can_go_up 应为 True"
 
 
 def test_file_path_falls_back_to_parent_dir(client, tmp_path, monkeypatch) -> None:
