@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sys
 import time
@@ -495,7 +496,7 @@ def verdict(our_n: int, their_n: int, total: int) -> str:
 
 
 def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
-             use_drain: bool, use_logslop: bool = True) -> None:
+             use_drain: bool, use_logslop: bool = True) -> Dict[str, object]:
     total_events = len(ds.events)
     print()
     print("=" * 78)
@@ -634,6 +635,36 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
               f"{pct(sg[b], total_events):>12}"
               f"{(pct(sl[b], total_events) if use_logslop else '—'):>14}{ours_at:>16}")
 
+    # 返回结构化结果，供 main() 汇总进基线文件（--write-baseline）。
+    # 百分比一律存**比率**而不是百分数：0.811 和 81.1 在 JSON 里都是合法
+    # 浮点，但只有前者能拿来做容差比较 —— README 写的是一位小数，
+    # 对账时必须允许"同一数字的不同写法"通过，否则门禁自己就成了噪声源。
+    return {
+        "events": total_events,
+        "delivery": len(our_del_cov) / total_events if total_events else 0.0,
+        "budget32k": len(our_bud_cov) / total_events if total_events else 0.0,
+        "full": len(our_full_cov) / total_events if total_events else 0.0,
+        "clusters": n_full,
+        "n_delivery": n_del,
+        "n_budget": n_bud,
+        "drain3": (len(drain_cov) / total_events
+                   if (use_drain and drain_cov and total_events) else None),
+        "logslop": (len(lop_cov) / total_events
+                    if (use_logslop and lop_cov and total_events) else None),
+        "verdict_budget": (verdict(len(our_bud_cov), len(drain_cov), total_events)
+                           if use_drain else None),
+        "verdict_delivery": (verdict(len(our_del_cov), len(drain_cov), total_events)
+                             if use_drain else None),
+        "verdict_full": (verdict(len(our_full_cov), len(drain_cov), total_events)
+                         if use_drain else None),
+        "verdict_budget_logslop": (verdict(len(our_bud_cov), len(lop_cov),
+                                           total_events) if use_logslop else None),
+        "verdict_delivery_logslop": (verdict(len(our_del_cov), len(lop_cov),
+                                             total_events) if use_logslop else None),
+        "verdict_full_logslop": (verdict(len(our_full_cov), len(lop_cov),
+                                         total_events) if use_logslop else None),
+    }
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Loghub 2.0 公开基准")
@@ -646,7 +677,24 @@ def main() -> int:
     ap.add_argument("--no-drain3", action="store_true", help="跳过 Drain3 对照")
     ap.add_argument("--no-logslop", action="store_true",
                     help="跳过 AMD LogsLop 对照（未装 logslop 时可显式关掉）")
+    ap.add_argument("--write-baseline", action="store_true",
+                    help="把本次实测结果写进 docs/benchmark_baseline.json")
     args = ap.parse_args()
+
+    # 写基线的前置条件**先查**，别跑完两小时才发现白跑。
+    #
+    # 为什么这么严：基线一旦不完整，`claim_benchmark_table` 就会拿残缺的
+    # 基线去判 README —— 没跑到的数据集要么被当成没这回事，要么反过来
+    # 把「这次没测」固化成「产品就是这样」。两种都是把缺失误写成事实。
+    if args.write_baseline:
+        if args.no_drain3 or args.no_logslop:
+            print("拒绝写基线：基线要含 Drain3 / LogsLop 对照臂，"
+                  "缺了就没法对账胜负。去掉 --no-drain3 / --no-logslop 再跑。")
+            return 1
+        if args.datasets.strip():
+            print("拒绝写基线：只跑了子集。基线必须覆盖全部 10 个数据集，"
+                  "否则没测到的会被当成测过的。去掉 --datasets 再跑。")
+            return 1
 
     names = [n.strip() for n in args.datasets.split(",") if n.strip()] or None
     budgets = ([int(b) for b in args.budgets.split(",") if b.strip()]
@@ -661,12 +709,34 @@ def main() -> int:
     print("数据来源：https://zenodo.org/record/8275861")
     print("标注依据：Loghub-2.0 (ISSTA'24) 人工标注 event template")
 
+    records: Dict[str, object] = {}
     for ds in datasets:
         try:
-            run_one(ds, budgets, args.levels or None, not args.no_drain3,
-                    not args.no_logslop)
+            rec = run_one(ds, budgets, args.levels or None, not args.no_drain3,
+                          not args.no_logslop)
         except Exception as exc:                     # 单个数据集失败不中断全局
             print(f"\n  {ds.name} 基准失败：{type(exc).__name__}: {exc}")
+            continue
+        if rec is not None:
+            records[ds.name] = rec
+
+    if args.write_baseline:
+        missing = [d.name for d in datasets if d.name not in records]
+        if missing:
+            print(f"\n  拒绝写基线：{missing} 没跑成功。"
+                  "基线必须覆盖全部数据集，否则没测到的会被当成测过的。")
+            return 1
+        out = ROOT / "docs" / "benchmark_baseline.json"
+        out.write_text(json.dumps({
+            "_comment": ("由 scripts/benchmark_loghub.py --write-baseline 生成；"
+                         "scripts/prove.py 的 claim_benchmark_table 用它对账 "
+                         "README 的基准表。改过任何影响聚类的代码后必须重跑。"),
+            "budget": max(budgets),
+            "datasets": records,
+        }, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"\n  基线已写入 {out}")
+        print("  接着按新数字回填 README / docs/BENCHMARK.md，"
+              "然后跑 python scripts/prove.py 对账。")
 
     return 0
 
