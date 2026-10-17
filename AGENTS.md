@@ -118,7 +118,8 @@ README 里写的那个数就是 ubuntu-3.12 的实测值。地板（90%）三矩
 
 ### 基准数字有一条独立的对账链
 
-`prove.py` 除了校工程指标，还逐格校 **README 的十行基准表**——
+`prove.py` 除了校工程指标，还逐格校 **每一处十行基准表**（README、
+docs/BENCHMARK.md、docs/FAQ.md 各一份，白名单本身有看门狗）——
 对照 `docs/benchmark_baseline.json`（`benchmark_loghub.py --write-baseline`
 生成的实测快照），容差 0.05pp。
 
