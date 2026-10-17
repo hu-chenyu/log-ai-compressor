@@ -36,7 +36,8 @@ pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证�
 自证脚本内部已扩到 **11 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
 v2.8.1 再加「README 架构树必须列全包内模块」，v2.9.0 加「接入层只经 service
 触达 core/export」，v2.9.1 再把「README 写的条数」本身也纳入对账，
-v2.10.0 加「**README 基准表逐格对账实测基线**」）。
+v2.10.0 加「**基准表逐格对账实测基线**」，v2.11.0 从只校 README 扩到**每一份副本**
+（README / docs/BENCHMARK.md / docs/FAQ.md），并把「N 胜 N 平 N 负」的场次也纳入重算）。
 
 ### 基准数字的对账链
 
@@ -46,8 +47,10 @@ v2.10.0 加「**README 基准表逐格对账实测基线**」）。
 python scripts/benchmark_loghub.py --budgets 32000 --write-baseline
 ```
 
-生成。`prove.py` 的 `claim_benchmark_table` 拿它与 README 的十行基准表
-**逐格对账**（容差 0.05pp，与判胜的容差同口径）。
+生成。`prove.py` 的 `claim_benchmark_table` 拿它与**三份文档**里的十行基准表
+**逐格对账**（容差 0.05pp，与判胜的容差同口径），并从 `verdict_*` 字段重算
+「N 胜 N 平 N 负」的场次。少一份副本就变红 —— `_BENCH_DOCS` 白名单本身
+也被 `tests/test_benchmark_table_gate.py::test_every_benchmark_copy_is_listed` 守着。
 
 **为什么需要它**：v2.9.9 修了 `mask_text` 的两处误伤，改动本身是对的，
 但它改变了聚类结果 —— HPC 76 簇 / 85.1% 变成 79 簇 / 81.1%、
