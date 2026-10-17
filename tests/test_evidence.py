@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from log_ai_compressor import service as S
 from log_ai_compressor.core.analysis import (
     CONF_CONFIRMED,
@@ -19,11 +17,28 @@ from log_ai_compressor.core.analysis import (
     CONF_LIKELY,
     assess_evidence,
 )
+from log_ai_compressor.core.models import ErrorCluster, RunStats
 from log_ai_compressor.core.pipeline import analyze_file, analyze_text
 from log_ai_compressor.export.reporters import brief_summary, to_markdown, to_text
 
 BASE = Path(__file__).resolve().parent.parent
 SAMPLE = BASE / "examples" / "sample_system.log"
+
+
+def _cluster(cid: int, summary: str, priority: float,
+             confidence: str) -> ErrorCluster:
+    """现造一个簇。
+
+    「造出来」而不是「从示例日志里找」：依赖语料的用例会随语料一起腐烂，
+    而腐烂的形式是**静默跳过**，比测试失败更难发现。
+    """
+    return ErrorCluster(cluster_id=cid, template=f"tp{cid}",
+                        message_template=f"tp{cid}", level="ERROR",
+                        module="probe", summary=summary, count=1,
+                        first_line=1, last_line=1, priority=priority,
+                        root_cause_confidence=confidence,
+                        is_root_cause=confidence == CONF_CONFIRMED,
+                        root_cause_reason=f"probe {cid}")
 
 # 关键词根因特征（不含 Caused-by 链）—— 只能到 LIKELY
 LIKELY_LOG = """
@@ -183,19 +198,39 @@ class TestSerialization:
         于是同一份报告里，标题说「根因是 A」、候选清单首位却是 B。
         端到端跑不出来（`analyze_clusters` 恰好先排序再调用），但
         `assess_evidence` 是**公开函数**，测试就直接调它。
+
+        **场景在这里现造，不靠语料碰运气**（v2.11.0）。此前这条写的是
+        「若 sample_system.log 里没有 CONFIRMED 簇就 skip」—— 那是
+        **数据相关的 skip**：哪天有人改了示例日志，这个用例就静默不再
+        执行，而它守护的 bug 一秒钟就能回来，且不会有任何人发现。
+        一条会自己关掉自己的门禁，和没有门禁的差别只在于它还占着 CI 一行绿。
         """
-        r = analyze_file(str(SAMPLE), levels=["ERROR", "FAIL"])
-        if not any(c.root_cause_confidence == CONF_CONFIRMED
-                   for c in r.clusters):
-            pytest.skip("这份语料没有 CONFIRMED 簇，构造不出矛盾场景")
-        forward = assess_evidence(r.clusters, r.stats)
-        backward = assess_evidence(list(reversed(r.clusters)), r.stats)
+        stats = RunStats()
+        # 故意让「入参里第一个」与「优先级最高」不是同一个簇：
+        # 旧的 `confirmed[0]` 写法会取到 A，而排序后的首位是 B。
+        weak = _cluster(1, "A 低优先级但先到", priority=10.0,
+                        confidence=CONF_CONFIRMED)
+        strong = _cluster(2, "B 优先级最高", priority=99.0,
+                          confidence=CONF_CONFIRMED)
+        decoy = _cluster(3, "C 只是 LIKELY", priority=50.0,
+                         confidence=CONF_LIKELY)
+
+        forward = assess_evidence([weak, strong, decoy], stats)
+        backward = assess_evidence([decoy, strong, weak], stats)
         assert forward.headline == backward.headline, (
             "只调换簇的入参顺序，headline 就变了 —— 它依赖入参顺序而非排序")
-        top_id = forward.candidates[0]["id"]
-        assert str(top_id) in forward.headline or \
-            forward.candidates[0].get("summary", "")[:20] in forward.headline, (
-            f"headline 与候选首位（簇 {top_id}）不是同一个簇")
+        top = forward.candidates[0]
+        assert top["id"] == strong.cluster_id, (
+            f"候选首位是簇 {top['id']}，而优先级最高的是 {strong.cluster_id}")
+        # headline 按**摘要**点名，所以反过来断言「它点名的是同一个簇」：
+        # 必须出现强簇的摘要，且**不能**出现先到但低优先级那个的摘要 ——
+        # 后半句才是这条用例真正在守的东西（旧的 `confirmed[0]` 会选它）。
+        assert top["summary"] in forward.headline, (
+            f"headline {forward.headline!r} 与候选首位（簇 {top['id']}）"
+            "不是同一个簇")
+        assert weak.summary not in forward.headline, (
+            f"headline {forward.headline!r} 点名了入参里第一个簇，"
+            "而不是优先级最高的那个 —— 它依赖入参顺序")
 
 
 class TestTheFailureMode:
@@ -208,11 +243,19 @@ class TestTheFailureMode:
     )
 
     def test_frequent_error_not_stated_as_root_cause(self):
-        """刷屏的错误不该被当成「已定位的根因」输出。"""
+        """刷屏的错误不该被当成「已定位的根因」输出。
+
+        「这个陷阱输入不得判 CONFIRMED」是本用例的**核心断言**，
+        不是一个前置条件。此前它写成了 `pytest.skip`（v2.11.0 改掉）：
+        那等于把「守卫触发」翻译成「跳过」，于是产品真的开始在这类
+        非因果输入上自信下结论时，CI 报的是**绿的**。
+        skip 的正当用途是「环境不具备条件」，而这里恰恰是「条件被破坏」。
+        """
         r = analyze_text(self.TRAP, levels=["ERROR", "FAIL"])
         ev = r.evidence
-        if ev["verdict"] == CONF_CONFIRMED:
-            pytest.skip("该输入意外产生了因果链，场景不适配")
+        assert ev["verdict"] != CONF_CONFIRMED, (
+            "刷屏错误 + 无 Caused-by 链被判成 CONFIRMED —— "
+            "这正是本项目最不能犯的错：自信的错误根因比没有答案更糟")
         assert ev["can_conclude"] is False
         assert "初步定位根因" not in to_markdown(r)
         assert "非因果证明" in to_markdown(r)

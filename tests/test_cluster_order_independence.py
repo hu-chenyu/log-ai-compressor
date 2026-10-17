@@ -325,3 +325,51 @@ def test_switch_off_still_disables_the_fallback():
     assert len(on) == 21, f"开启回退时 A/B 应合并，实际 {len(on)} 个簇"
     assert len(off) == 22, f"关闭回退后每条自成簇，实际 {len(off)} 个簇"
     assert MAX_SIMILARITY_COMPARE > 0
+
+
+# ---------------------------------------------------------------------------
+# 描述层也要守
+# ---------------------------------------------------------------------------
+_BANNED_CAP_WORDING = ("比较上限", "上限 256 次比较", "桶长超过比较上限",
+                       "两级性能保护")
+
+
+def test_module_and_add_docstrings_do_not_describe_a_fixed_cap():
+    """`add()` 与模块 docstring 不得再描述一个已经不存在的上限。
+
+    行为有守卫（上面几条：600 填充的分区不变性、无固定截断、退回滑动窗口
+    会红），**描述层却没有**。v2.10.0 把上限整个去掉之后，
+    `add()` 的 docstring 和 `docs/ARCHITECTURE.md` 都还写着「上限 256 次比较」，
+    而**同一个文件**里 `_find_similar` 的 docstring 写的是完整正确版本 ——
+    读代码的人按哪一处理解，取决于他先打开哪个文件。
+
+    只查 `_find_similar` **之前**的那段：它自己的 docstring 讲的就是这段历史，
+    「最近 256 个」「字典序前 256」在那个上下文里是必要的史料。
+    """
+    src = (ROOT / "log_ai_compressor" / "core" / "clustering.py").read_text(
+        encoding="utf-8")
+    head = src.split("def _find_similar", 1)[0]
+    hit = [w for w in _BANNED_CAP_WORDING if w in head]
+    assert not hit, (
+        f"模块/`add()` 的 docstring 还在描述固定比较上限：{hit}。"
+        "v2.10.0 已去掉，真实口径是「整桶 + 精确长度上界剪枝」")
+
+
+def test_architecture_doc_does_not_describe_a_fixed_cap():
+    """`docs/ARCHITECTURE.md` 是给读者看的算法说明，不该有过期描述。"""
+    doc = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    hit = [w for w in _BANNED_CAP_WORDING if w in doc]
+    assert not hit, f"docs/ARCHITECTURE.md 还在描述固定比较上限：{hit}"
+
+
+def test_architecture_doc_states_the_current_approach():
+    """反过来钉一句：它必须**说清楚现在是什么**，而不只是不再说旧东西。
+
+    只禁止旧措辞的话，把整段删掉也能过 —— 而删掉之后读者什么都不知道。
+    """
+    doc = (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "没有固定上限" in doc, (
+        "docs/ARCHITECTURE.md 该写明相似度匹配没有固定上限")
+    assert "长度上界" in doc, (
+        "docs/ARCHITECTURE.md 该写明性能靠精确的长度上界剪枝补，"
+        "而不是靠砍候选集")

@@ -37,6 +37,11 @@ dependencies = [
 # 本地 Web 界面（双击 start.bat 走这条）
 web = [
     "fastapi>=0.110",
+    # 直接 import 的就要直接声明。FastAPI 本来就会把 pydantic 带进来，
+    # 所以「漏了也能跑」—— 而**正因为能跑**，漏声明才特别难发现：
+    # 哪天有人用 --no-deps 装，或者 FastAPI 换了底层实现，第一个炸的
+    # 是 web/server.py:22 那个裸 ImportError，而不是一条清晰的依赖说明。
+    "pydantic>=2",
     "uvicorn[standard]>=0.27",
     "sse-starlette>=1.6",
 ]
