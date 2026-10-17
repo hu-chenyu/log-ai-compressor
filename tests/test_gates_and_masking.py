@@ -247,6 +247,17 @@ class TestLayeringGateSeesEveryImportSpelling:
         (pkg / "core" / "evidence.py").write_text("x = 1\n", encoding="utf-8")
         (pkg / "core" / "corefoo.py").write_text("x = 1\n", encoding="utf-8")
         (pkg / "export" / "__init__.py").write_text("", encoding="utf-8")
+        # v2.11.1：接入层是**自动发现**的，合成包必须包含 `_LAYER_ROOTS`
+        # 声明的全部四个，否则发现结果与名单不一致，门禁会因为「drift」
+        # 判红 —— 那样本类每条用例都会「因为错误的原因变红」，
+        # 而红的原因与它声称要验的那件事无关。
+        (pkg / "cli.py").write_text("x = 1\n", encoding="utf-8")
+        (pkg / "service.py").write_text("x = 1\n", encoding="utf-8")
+        (pkg / "constants.py").write_text("x = 1\n", encoding="utf-8")
+        (pkg / "__main__.py").write_text("x = 1\n", encoding="utf-8")
+        for layer in ("web", "ai", "mcp"):
+            (pkg / layer).mkdir(parents=True, exist_ok=True)
+            (pkg / layer / "__init__.py").write_text("", encoding="utf-8")
         for rel, body in files.items():
             target = pkg / rel
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -351,6 +362,71 @@ class TestLayeringGateSeesEveryImportSpelling:
         """改完门禁，本仓库必须还是绿的 —— 不能把正常路径一起判死。"""
         c = prove.claim_layering()
         assert c["holds"] is True, c["detail"]
+
+
+class TestLayeringGateDiscoversEntryLayers:
+    """v2.11.1：`layer_roots` 是字面量 → 新增第 5 个接入层会被**完全跳过**。
+
+    判据是 `_layer_of(p) in layer_roots`，扫的是一个**子集**；子集之外的
+    越层 import 一条都看不见。而 `scanned_empty` 只管「全部扫到 0 个」，
+    扫到 3 个它就满意了。**这已经是同一种病第四次**：守的是已经看见的
+    那一半（`cli.py` 当目录扫 → 相对导入 → `from pkg import sub` → 字面量名单）。
+
+    现在自动发现全部一级层，并要求发现结果与声明**相等**：加一层不登记
+    判红，从名单里删一层也判红。
+    """
+
+    @staticmethod
+    def _repo(tmp_path, files: dict) -> None:
+        TestLayeringGateSeesEveryImportSpelling._repo(tmp_path, files)
+
+    def test_current_discovery_matches_declaration(self):
+        """先证真：本仓库的发现结果与 `_LAYER_ROOTS` 一致。"""
+        pkg = Path(__file__).resolve().parent.parent / "log_ai_compressor"
+        assert prove._discover_layer_roots(pkg) == set(prove._LAYER_ROOTS)
+
+    def test_library_and_facade_are_not_mistaken_for_entry_layers(self):
+        """core/rules/export 与 service/constants 不算接入层。"""
+        pkg = Path(__file__).resolve().parent.parent / "log_ai_compressor"
+        found = prove._discover_layer_roots(pkg)
+        assert not found & {"core", "rules", "export", "service", "constants"}
+
+    def test_undeclared_entry_layer_fails_loudly(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, {"desktop_entry/__init__.py": "",
+                              "desktop_entry/app.py": "x = 1\n"})
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        c = prove.claim_layering()
+        assert c["holds"] is False, "新增接入层没登记，门禁仍报通过 —— 门禁失能"
+        assert "desktop_entry" in c["detail"], c["detail"]
+
+    def test_dropping_a_layer_from_the_declaration_also_fails(self, tmp_path,
+                                                              monkeypatch):
+        """反向也要卡：从名单里删一层而不删文件，同样判红。"""
+        self._repo(tmp_path, {})
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        monkeypatch.setattr(prove, "_LAYER_ROOTS",
+                            tuple(x for x in prove._LAYER_ROOTS if x != "ai"))
+        c = prove.claim_layering()
+        assert c["holds"] is False
+        assert "ai" in c["detail"], c["detail"]
+
+    def test_registering_a_new_layer_makes_its_violations_visible(self, tmp_path,
+                                                                  monkeypatch):
+        """关键一条：不登记会报 drift，**登记之后必须真的扫它**。
+
+        只报 drift 不等于修好了 —— 门禁可能只是在对名单发火，
+        而新层里的越层 import 依然一条都看不见。
+        """
+        self._repo(tmp_path, {
+            "desktop_entry/__init__.py": "",
+            "desktop_entry/app.py": "from log_ai_compressor.core.evidence import x\n",
+        })
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        monkeypatch.setattr(prove, "_LAYER_ROOTS",
+                            tuple(prove._LAYER_ROOTS) + ("desktop_entry",))
+        c = prove.claim_layering()
+        assert c["holds"] is False
+        assert "app.py" in c["detail"], c["detail"]
 
 
 class TestConfidenceGateCanActuallyFail:
