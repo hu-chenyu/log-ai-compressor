@@ -134,14 +134,86 @@ class TestEvidenceAttached:
         assert KIND_SAMPLE in kinds and KIND_CAUSED_BY in kinds
 
     def test_pasted_text_evidence_is_marked_no_source(self):
-        """粘贴文本没有可回读的源文件 —— 证据仍生成，但不得谎称已校验。"""
+        """粘贴文本没有可回读的源文件 —— 证据仍生成，但不得谎称已校验。
+
+        v2.11.1：verdict 由 TAMPERED 改为 UNVERIFIABLE。粘贴进来的文本
+        **结构上就回读不了**，把它报成「日志被篡改」是一次误指控 ——
+        而「我验不了」与「我验出你改了」对用户是两件完全不同的事，
+        后者会让人去查一个根本不存在的攻击。
+        """
         result = analyze_text(LOG)
         ref = result.clusters[0].primary_evidence
         assert ref is not None
         assert ref.source == "<粘贴文本>"
         report = verify_refs(result.clusters[0].evidence)
-        assert report.verdict == "TAMPERED"
+        assert report.verdict == "UNVERIFIABLE", (
+            f"粘贴文本不该报 {report.verdict}")
+        assert report.ok is False, "一条都没验成却报 ok=True —— 机器接口会据此说谎"
         assert report.missing_source == len(result.clusters[0].evidence)
+
+    def test_a_real_mismatch_is_still_called_tampered(self, logfile):
+        """**反向对照**：收紧 TAMPERED 的口径不能把篡改检测一起弄丢。
+
+        上一条把「回读不了」从 TAMPERED 里摘出去，这条守住另一半：
+        真的回读过、而且**对不上**，必须仍然是 TAMPERED。
+        """
+        result = analyze_files([logfile], context_lines=3)
+        refs = list(result.clusters[0].evidence)
+        assert refs, "前提：这条簇有可回读的证据"
+        lines = logfile.read_text(encoding="utf-8").splitlines(True)
+        lines[1] = lines[1].replace("db-primary:5432", "db-replica:6432")
+        logfile.write_text("".join(lines), encoding="utf-8")
+        report = verify_refs(refs)
+        assert report.verdict == "TAMPERED", (
+            f"改了原文却报 {report.verdict} —— 篡改检测失效")
+        assert report.mismatched >= 1, "判据没数到失配条数"
+        assert report.missing_source == 0, "源还在，不该算 missing"
+        assert report.ok is False
+
+    def test_zero_checked_is_not_ok(self):
+        """一条引用都没有时 `ok` 必须是 False（v2.11.1 修的假通过）。
+
+        原来 `ok` 只看「有没有失配」，`checked == 0` 时恒为 True ——
+        而 `mcp/server.py` 的契约是「`ok=False` 才不转述」，于是 Agent
+        把「一条都没复核」读成了「每条都已复核通过」。
+        """
+        from log_ai_compressor.core.evidence import VerifyReport
+        empty = VerifyReport()
+        assert empty.checked == 0
+        assert empty.verdict == "NO_EVIDENCE"
+        assert empty.ok is False, "零校验不得报 ok=True"
+
+    def test_an_entry_beyond_the_window_is_not_confirmed(self, tmp_path):
+        """条目超出摄入窗口 → 证据取不到 → **不得**判 CONFIRMED（v2.11.1）。
+
+        这是第一承诺「每条结论带行号出处」在压力下的那条边界：窗口是绝对值
+        约 114 行，与条目长度无关，120–300 帧的真实 Java 递归栈直接越界。
+        修复前实测 115 行起证据全丢而档位仍判 CONFIRMED，报告渲染出
+        「已定位根因」却 `出处=None` —— 最硬的一句断言没有一行出处可核。
+        """
+        def _run(frames: int):
+            log = tmp_path / f"deep_{frames}.log"
+            log.write_text(
+                "2024-03-15 08:00:01 ERROR [api] request failed\n"
+                + "\n".join(f"\tat com.acme.Svc.step{i}(Svc.java:{100 + i})"
+                            for i in range(frames - 2))
+                + "\nCaused by: java.sql.SQLTimeoutException: lock timeout\n",
+                encoding="utf-8")
+            return analyze_files([log]).clusters[0]
+
+        # 边界对照：窗口内的条目仍判 CONFIRMED —— 降级不能过头
+        inside = _run(60)
+        assert inside.root_cause_confidence == "CONFIRMED", \
+            "窗口内的条目被误降级了：门槛收得太紧"
+        assert inside.evidence, "窗口内的条目应当带着出"
+
+        beyond = _run(300)
+        assert not beyond.evidence, "前提变了：300 行时证据居然还在"
+        assert beyond.root_cause_confidence != "CONFIRMED", (
+            "零证据却判 CONFIRMED —— 报告会说「已定位根因」而出处为空")
+        assert beyond.root_cause_confidence == "LIKELY"
+        assert "降为 LIKELY" in beyond.root_cause_reason, \
+            "降级必须**说出来**，否则用户不知道为什么从 CONFIRMED 掉下来"
 
     def test_service_serializes_evidence(self, logfile):
         result = analyze_files([logfile], context_lines=3)
@@ -196,9 +268,14 @@ class TestVerify:
         assert S.verify_result(result)["verdict"] == "TAMPERED"
 
     def test_missing_source_reported_not_passed(self, tmp_path):
+        """源文件已被删：报「验不了」，不是「日志被篡改」（v2.11.1）。
+
+        两者都不是通过，但对用户是两件完全不同的事 —— 后者是一次指控。
+        """
         ghost = make_ref(str(tmp_path / "gone.log"), 1, 1, ["x"])
         rep = verify_refs([ghost])
-        assert rep.verdict == "TAMPERED"
+        assert rep.verdict == "UNVERIFIABLE"
+        assert rep.ok is False
         assert rep.missing_source == 1
         assert rep.details[0]["status"] == "MISSING_SOURCE"
 
@@ -507,6 +584,12 @@ class TestVerifySavedReport:
 
     def test_saved_report_detects_rotation_cleanup(self, logfile, tmp_path,
                                                    capsys):
+        """日志被轮转清掉了 —— 报「验不了」，退出码仍非 0（v2.11.1）。
+
+        退出码不能改成 0：结论**已经无法被核实**，让脚本返回成功等于
+        说「那份报告还成立」。但 verdict 必须说 UNVERIFIABLE 而不是
+        TAMPERED —— 轮转清理不是篡改，指控错了对象比不敢结论更糟。
+        """
         from log_ai_compressor.cli import main
         result = analyze_files([logfile], context_lines=3)
         report = tmp_path / "r.json"
@@ -514,7 +597,8 @@ class TestVerifySavedReport:
         logfile.unlink()
         assert main(["verify", "--report", str(report)]) == 1
         out = capsys.readouterr().out
-        assert "MISSING_SOURCE" in out or "TAMPERED" in out
+        assert "UNVERIFIABLE" in out
+        assert "TAMPERED" not in out, "轮转清理被当成了篡改"
 
     def test_report_without_evidence_is_refused(self, tmp_path, capsys):
         """没有证据的报告必须明说，而不是假装校验通过。"""

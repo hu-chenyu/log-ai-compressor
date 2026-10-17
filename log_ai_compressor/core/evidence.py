@@ -165,18 +165,44 @@ class VerifyReport:
 
     @property
     def ok(self) -> bool:
-        """全部对得上才算 ok。
+        """**每一条引用都真的回读核对过，且全对**。
 
-        部分匹配**不算** ok：一份掺了假的证据报告，不能因为"大部分是真的"
-        就放行 —— 那正是取证工具最不能犯的错。
+        v2.11.1 修的假通过：原来只有 `mismatched == 0 and missing_source == 0`，
+        于是两种「什么都没验成」都报 True：
+
+        - `checked == 0`（一条引用都没有）—— `mcp/server.py` 的契约是
+          「`ok=False` 才不转述」，于是 Agent 读到 `ok=true` 就把
+          「一条都没复核」当成「每条都已复核通过」；
+        - 全部是粘贴文本引用 —— 结构上就回读不了，那不是「通过」。
+
+        取「只有 VERIFIED 才算通过」，宁可让机器接口说不了话，
+        也不能让它替用户断言「验过了」。
         """
-        return self.mismatched == 0 and self.missing_source == 0
+        return self.verdict == "VERIFIED"
 
     @property
     def verdict(self) -> str:
+        """四档，v2.11.1 新增 UNVERIFIABLE。
+
+        - `NO_EVIDENCE`   一条引用都没有（空报告 / 未产出任何引用）
+        - `TAMPERED`      真的回读过、且对不上 —— 日志被改过
+        - `UNVERIFIABLE`  有引用，但**一条都回读不了**（粘贴文本没有源文件、
+                          源文件已被删、条目超出摄入窗口取不到原文）
+        - `VERIFIED`      全部回读通过
+
+        v2.11.1 之前只有三档，而 `missing_source` 被并进 TAMPERED ——
+        「粘贴进来的文本没法回读」因此被报成「日志被篡改」，退出码 1，
+        屏幕上写着「请勿直接采信」。那是**方向相反的假警报**：不是谎称通过，
+        是把「验不了」说成「被抓」。而 CLI 那一层给的却是
+        `NO_EVIDENCE` + exit 0 —— 同一个事实，两层两个结论。
+        """
         if not self.checked:
             return "NO_EVIDENCE"
-        return "VERIFIED" if self.ok else "TAMPERED"
+        if self.mismatched:
+            return "TAMPERED"
+        if self.missing_source:
+            return "UNVERIFIABLE"
+        return "VERIFIED"
 
     def as_dict(self) -> Dict[str, Any]:
         return {

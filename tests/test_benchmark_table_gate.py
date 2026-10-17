@@ -343,7 +343,7 @@ def test_faq_copy_has_no_event_column_and_is_still_checked(gate):
     这正是把表识别判据从「必须有标注事件列」放宽的原因：
     只认事件列的话，FAQ 这张同口径的表会被结构性放过。
     """
-    faq_keys = {k for cols, _ in prove._bench_tables(_REAL_FAQ) for k in cols}
+    faq_keys = {k for cols, _b, _h in prove._bench_tables(_REAL_FAQ) for k in cols}
     assert "events" not in faq_keys, "FAQ 那张表其实有事件列，判据白写了"
     assert {"delivery", "budget32k", "full", "drain3", "logslop"} <= faq_keys
     assert "docs/FAQ.md×1" in gate(_REAL_README, _REAL_BASE)["detail"]
@@ -374,7 +374,7 @@ def test_non_benchmark_tables_are_not_mistaken_for_it():
     assert len(bench_tables) == 2, (
         f"docs/BENCHMARK.md 里认出 {len(bench_tables)} 张基准表，"
         "应该是主表 + 达成度表")
-    keys = {k for cols, _ in bench_tables for k in cols}
+    keys = {k for cols, _b, _h in bench_tables for k in cols}
     assert keys == {"events", "delivery", "budget32k", "full",
                     "drain3", "logslop"}, f"认出的列字段不对：{sorted(keys)}"
 
@@ -719,6 +719,164 @@ def test_an_unmeasured_comparison_cell_is_reported_not_silently_skipped():
     notes = prove._bench_doc_problems("README.md", _REAL_README,
                                       base["datasets"])[4]
     assert notes["cells_unmeasured"], "少校了几格却一声不吭"
+
+
+# ---------------------------------------------------------------------------
+# v2.11.1：列名改一个字 → 整列静默脱管（第四轮外部复核 F1）
+# ---------------------------------------------------------------------------
+def _rename_bench_header_cell(text: str, old: str, new: str) -> str:
+    """把基准表**表头行**里的某一格改名，不碰数据行。
+
+    两处都必须和 `_bench_columns` 保持一致，否则这个夹具在造一个
+    「被测代码根本没认出来的列」：
+
+    - 按**内容**定位而不是 `replace(old, new, 1)`：README 的表头写的是
+      `交付 top20` / `**同预算 32k**` / `本项目(全量)`，而「交付」这个词
+      在正文、图例、散文里都出现过，replace 第一个命中的是哪一处完全
+      取决于文档改版顺序 —— 而「改坏的门禁还在绿」最省事的造法就是改错地方。
+    - 匹配用**子串**而不是相等，与 `_bench_columns` 一样；相等匹配根本
+      命不中表头。
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not (line.lstrip().startswith("|") and "数据集" in line):
+            continue
+        if i + 1 >= len(lines) or not prove._MD_SEP_RE.match(lines[i + 1]):
+            continue
+        if not prove._bench_columns(line):
+            continue        # 以「数据集」开头但列义不同的表（token 压缩比等）
+        parts = line.strip().strip("|").split("|")
+        hit = False
+        for j, p in enumerate(parts):
+            if old in p.strip().replace("**", ""):
+                parts[j] = p.strip().replace("**", "").replace(old, new)
+                hit = True
+        assert hit, f"基准表表头里找不到含 {old} 的格子"
+        lines[i] = "|" + "|".join(parts) + "|"
+        return "\n".join(lines)
+    raise AssertionError("没找到基准表表头")
+
+
+def test_a_renamed_column_header_fails_loudly(gate):
+    """列名改一个字 → 整列不再对账 → 门禁必须变红。
+
+    修复前的干净对照（三行都实测过）：
+
+        原始 README                        对账 50 格 / 问题 0
+        只把 10 个交付值改成 99.9%         对账 50 格 / 问题 10   ← 全响
+        同样改坏 + 表头「交付」→「投递」    对账 40 格 / 问题 1    ← 整列脱管
+
+    根因是 `if key not in cols: continue` —— 列缺失既不计数，也不进
+    `cells_unmeasured`，于是 10 个**明知错误**的数字悄悄退出射程，而
+    docs/BENCHMARK.md 的同一份副本仍写着 72.7%：仓库自相矛盾，
+    门禁报「全部一致」。
+
+    这是 AGENTS.md 记了四次的「扫了 N 个却报通过」，只是这次
+    N 从 0（扫不到文件）变成了 50（扫到了，但少校了一整列）。
+    """
+    broken = _rename_bench_header_cell(_REAL_README, "交付", "投递")
+    assert "投递" in broken, "夹具前提：表头确实被改了"
+    c = gate(broken, _REAL_BASE)
+    assert c["holds"] is False, "列名改了却判通过 = 整列脱管且无人叫"
+    assert "缺 delivery" in c["detail"], c["detail"]
+
+
+def test_a_renamed_secondary_header_also_fails(gate):
+    """不只交付：同预算/全量被改名同样判红（三个口径同量纲，一起被要求）。"""
+    broken = _rename_bench_header_cell(_REAL_README, "全量", "完量")
+    c = gate(broken, _REAL_BASE)
+    assert c["holds"] is False
+    assert "缺 full" in c["detail"], c["detail"]
+
+
+def test_a_table_may_still_report_only_one_caliber():
+    """**不得假红**：docs/BENCHMARK.md 的第二张表本来就只报交付一列。
+
+    判据刻意是「认出 ≥2 个保留率口径才要求报全」而不是「每张表都得三列」——
+    真实文档里就有只认出一个口径的合法表（实测 `own=['delivery']`）。
+    """
+    _rows, _checked, _v, _problems, notes = prove._bench_doc_problems(
+        "docs/BENCHMARK.md", _REAL_BENCHMARK, _REAL_BASE["datasets"])
+    assert not notes["cells_misnamed"], "只报一个口径的合法表被误判成拼错"
+
+
+def test_every_real_bench_table_reports_all_three_calibers():
+    """反向对照：新判据**不假红**的依据本身要有人守。
+
+    一旦将来有人在真实文档里加一张「≥2 个口径却缺一个」的表，这里立刻红 ——
+    而不是让新判据在真实文档上默默失效、直到某天又有一个数字脱管。
+    """
+    checked = 0
+    for doc in ("README.md", "docs/BENCHMARK.md", "docs/FAQ.md"):
+        text = (_ROOT / doc).read_text(encoding="utf-8")
+        for cols, _body, _header in prove._bench_tables(text):
+            own = [k for _t, k in prove._BENCH_OWN if k in cols]
+            if len(own) >= 2:
+                checked += 1
+                assert len(own) == 3, f"{doc}: 保留率口径只认出 {own}"
+    assert checked >= 3, f"只认出 {checked} 张三口径表，夹具前提变了"
+
+
+# ---------------------------------------------------------------------------
+# v2.11.1：「合计」行重算对账 —— 第四轮外部复核 D1
+# ---------------------------------------------------------------------------
+def test_the_aggregate_row_is_recomputed_not_skipped():
+    """合计行的数字是**手算**的，此前列在跳过名单里没人校，已错 11.8pp。
+
+    修复前实测：文档写 282.4%，从基线重算是 270.6%，而 `prove.py` 全绿。
+    引入它的那笔提交（d299aeb）标题恰恰是「把『交付口径已达天花板』从
+    断言变成脚本能复现的数字」—— 它想治的病在原地复发了。
+    """
+    broken = _REAL_BENCHMARK.replace("**270.6%**", "**282.4%**")
+    assert broken != _REAL_BENCHMARK, "夹具前提：合计行没改到"
+    _r, _c, _v, problems, _n = prove._bench_doc_problems(
+        "docs/BENCHMARK.md", broken, _REAL_BASE["datasets"])
+    assert any("合计 交付实测" in p and "282.4" in p for p in problems), \
+        problems
+
+
+def test_the_real_aggregate_row_agrees_with_the_recomputation():
+    """对照：真实文档的合计行必须**本来就**对得上重算（否则夹具前提变了）。"""
+    _r, _c, _v, problems, _n = prove._bench_doc_problems(
+        "docs/BENCHMARK.md", _REAL_BENCHMARK, _REAL_BASE["datasets"])
+    assert not any("合计" in p for p in problems), problems
+
+
+def test_aggregate_row_accepts_honest_integer_rounding():
+    """**不得假红**：达成度合计写整数 82%，重算 82.2% —— 诚实的取整。
+
+    这里刻意不用固定容差：对整数声称值，0.05pp 容差天然会把正确写法判红
+    （差 0.2pp），而**一条会误报的门禁比没有门禁更糟**（真漂移被淹没在噪音里）。
+    """
+    header = ["数据集", "标注事件", "交付实测", "交付上限", "达成度"]
+    ds = _REAL_BASE["datasets"]
+
+    def _check(claimed_att: str):
+        return prove._agg_row_problems(
+            "x.md", 1, "合计",
+            ["合计", "", "270.6%", "343.2%", claimed_att], {}, header, ds)
+
+    assert _check("82%") == [], "整数 82% 对重算 82.2% 是诚实取整，不该报红"
+    assert _check("**82%**") == [], "加粗不该影响判定"
+    bad = _check("83%")
+    assert any("达成度" in p for p in bad), \
+        f"83% 明明不是 82.2% 的诚实取整，却放过了（判据恒真 = 装饰）：{bad}"
+
+
+def test_bench_n_del_matches_the_product_default():
+    """`_BENCH_N_DEL` 必须与 `constants.DEFAULT_TOP_N` 同值。
+
+    「交付上限 = min(报告给几个簇, 事件数) / 事件数」—— 报告给几个簇正是
+    产品默认值。两者一旦漂了，重算出来的上限就是**另一个口径的上限**，
+    而它看起来与文档里的数毫无区别。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "lac_constants", _ROOT / "log_ai_compressor" / "constants.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert prove._BENCH_N_DEL == mod.DEFAULT_TOP_N, (
+        f"prove._BENCH_N_DEL={prove._BENCH_N_DEL} 与 "
+        f"DEFAULT_TOP_N={mod.DEFAULT_TOP_N} 不同 —— 交付上限会算成另一个口径")
 
 
 # ---------------------------------------------------------------------------

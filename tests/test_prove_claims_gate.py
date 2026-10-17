@@ -386,20 +386,105 @@ class TestFullRunDetection:
         assert _is_full_run(_FakeConfig(ignore=["tests/a.py"])) is False
         assert _is_full_run(_FakeConfig(lf=True)) is False
 
+    # 会改变「收集了哪些用例」的 pytest 参数。v2.11.1 实测：
+    # 往 CI 插 `--lf`（或 `--deselect=tests/x.py` 这种 `=` 合并写法），
+    # 下面那条 `startswith("-")` 全部放行，而 `_is_full_run` 立刻变 False ——
+    # 于是「README 写的条数不许漂」在 CI 上开始 skip，**12 条相关测试全绿**。
+    # skip 与真跑在 CI 界面上完全同形，所以这条守卫自己必须堵住它。
+    _NARROWING = (
+        "-k", "--deselect", "--ignore", "--ignore-glob", "-m",
+        "--lf", "--last-failed", "--ff", "--failed-first",
+        "--collect-only", "--co",
+    )
+
     def test_ci_workflow_passes_no_path_arg(self):
-        """**防的是"门禁在 CI 上静默失效"。**
+        """**防的是「门禁在 CI 上静默失效」。**
 
         CI 的 pytest 命令一旦加上位置参数（哪怕只是个目录），
-        这条对账就会开始 skip —— 而 skip 出来的"绿"和真跑一遍的"绿"在
+        这条对账就会开始 skip —— 而 skip 出来的「绿」和真跑一遍的「绿」在
         CI 界面上没有任何区别。所以 CI 的命令形态本身就是被校的对象。
+
+        v2.11.1：判据从「参数必须以 `-` 开头」收紧成**白名单** ——
+        那条判据只挡位置参数，`--lf` / `--deselect=` 这类**同样让收集范围
+        变窄**的写法它一个都挡不住。白名单意味着以后往 CI 加任何参数都必须
+        是有意识的，而不是「反正以 - 开头就放过」。
         """
         text = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
         m = re.search(r'"-m",\s*"pytest",(.*?)\]', text, re.S)
         assert m, "ci.yml 里找不到 pytest 调用 —— 形状变了，先更新本测试"
         for lit in re.findall(r'"([^"]+)"', m.group(1)):
-            assert lit.startswith("-"), (
-                f"CI 的 pytest 命令多了位置参数 {lit!r} —— "
-                f"这条对账会在 CI 上静默失效（要么改判据，要么别在 CI 里传路径）")
+            narrowed = lit.split("=", 1)[0]
+            if narrowed in self._NARROWING or narrowed.startswith("-k"):
+                raise AssertionError(
+                    f"CI 的 pytest 命令里有会改变收集范围的参数 {lit!r} —— "
+                    f"这条对账会在 CI 上静默 skip，而 skip 与真跑长得一模一样")
+            assert lit.startswith("--cov"), (
+                f"CI 的 pytest 命令多了未经批准的参数 {lit!r}。"
+                f"当前只允许 --cov* 系列（覆盖率相关）；"
+                f"要加别的，请先确认它不会让收集范围变窄，再同步更新本测试。")
+
+    def test_the_narrowing_guard_really_catches_those_flags(self):
+        """这条守卫自己必须能变红 —— 逐个危险参数喂进去看它是否报错。"""
+        text = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        m = re.search(r'"-m",\s*"pytest",(.*?)\]', text, re.S)
+        assert m
+        original = m.group(1)
+        anchor = '"--cov=log_ai_compressor",'
+        assert anchor in original, "锚点没找到，ci.yml 的写法变了"
+        for bad in ('"--lf"', '"--deselect=tests/test_x.py"',
+                    '"-k", "smoke"', '"--ignore=tests"'):
+            # bad 必须是**引号自洽**的一整段：插进正则抓取的那段文本里，
+            # 多一个逗号都会让 `"([^"]+)"` 配对错位，于是测到的就是
+            # 解析器的毛病，而不是守卫的毛病 —— 那是白红一次。
+            mutated = original.replace(anchor, bad + ", " + anchor, 1)
+            assert mutated != original, f"夹具没插进去：{bad}"
+            lit = re.findall(r'"([^"]+)"', mutated)
+            caught = [x for x in lit
+                      if x.split("=", 1)[0] in self._NARROWING
+                      or x.split("=", 1)[0].startswith("-k")]
+            assert caught, f"守卫漏掉了 {bad}（lit={lit}）"
+
+
+# ---------------------------------------------------------------------------
+# v2.11.1：`claim_evidence` 的 0/0 空转（第四轮外部复核 F2）
+# ---------------------------------------------------------------------------
+def test_claim_evidence_is_not_vacuously_true():
+    """一个**什么都不产出**的产品不得拿到这条主张的 PASS。
+
+    v2.11.1 实测：`covered == total` 在两个都是 0 时恒真，于是把 pipeline
+    的 `clusters` 清空后，11 条自证主张里有 6 条空转通过，只有对抗性评测
+    拦下。`claim_layering` 早就为同类问题加了 `scanned_empty`（扫了 0 个
+    文件不许报通过），这条漏了 —— 同一份注册表里同一种病、两种修法。
+    """
+    from log_ai_compressor.core.models import AnalysisResult, RunStats
+
+    # 用**真实模型对象**而不是手搓的假类：`verify_result` 内部要算指纹，
+    # 手搓的 stats 少一个字段就是 AttributeError —— 那测的就不是那件事了。
+    empty = AnalysisResult(stats=RunStats(), clusters=[])
+
+    monkey = prove.analyze_files
+    try:
+        # 打的是 **prove 模块级** 那个名字 —— claim_evidence 里写的是
+        # `analyze_files(...)`（模块 import），不是 `S.analyze_files`。
+        # 补一句：patch 错了对象，测试就会静悄悄地去跑真数据然后照样绿 ——
+        # 那是又一次「看起来有测试，其实什么都没校」。
+        prove.analyze_files = lambda *a, **k: empty
+        c = prove.claim_evidence(_ROOT / "examples" / "sample_system.log")
+    finally:
+        prove.analyze_files = monkey
+    assert c["holds"] is False, (
+        "零簇零证据却判通过 —— 判据恒真 = 装饰性门禁")
+    assert "0/0" in c["detail"], c["detail"]
+
+
+def test_claim_evidence_still_passes_on_a_real_log():
+    """**不得假红**：真实样例（有簇、有出处）必须仍然通过。
+
+    与上面那条成对 —— 一条门禁既要抓住「什么都没产出」，
+    也不能把正常路径一起判死。
+    """
+    c = prove.claim_evidence(_ROOT / "examples" / "sample_system.log")
+    assert c["holds"] is True, c["detail"]
 
 
 # 覆盖率**不在**本文件校：pytest-cov 在 session 结束时才落 coverage.xml，

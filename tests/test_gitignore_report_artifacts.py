@@ -39,6 +39,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from log_ai_compressor.cli import _SUFFIX_FORMAT
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -111,3 +113,60 @@ def test_gitignore_does_not_swallow_the_sample_log():
         env=_ENV,
     )
     assert proc.returncode != 0, "样例日志被忽略了"
+
+
+# ---------------------------------------------------------------------------
+# v2.11.1：行尾注释让整条规则失效（第四轮外部复核 D6/F6）
+# ---------------------------------------------------------------------------
+def test_no_ignore_rule_carries_a_trailing_comment():
+    """**任何**一条忽略规则都不得带行尾注释。
+
+    git 只把**行首**的 ``#`` 当注释；行尾的 ``#`` 属于模式本身。v2.11.1 实测
+    ``.gitignore`` 里有两行写了行尾注释：
+
+        .coverage.*        # pytest-xdist 并行模式留的分片……
+        .coveragerc.ci      # CI 在 mcp 不可用时临时生成的……
+
+    于是它们的实际模式是「那一串文字连同空格和中文」，匹配不到任何文件 ——
+    ``git check-ignore .coverage.host.12345`` 返回 1（未忽略）。**一条写了
+    却从不生效的忽略规则比不写更糟**：它让人以为工作区是干净的，于是
+    「跑完测试 ``git status`` 兜底」这条安全网自己先失效了。
+
+    这条检查测的是**形态**而不是某几个具体文件，所以同类问题换个文件名复发
+    也照样抓得到 —— 而只测 ``*_report*`` 后缀的那几条永远碰不到它们。
+    """
+    offenders = []
+    for i, line in enumerate(GITIGNORE.read_text(encoding="utf-8").splitlines(), 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "#" in s and "\\#" not in s:
+            offenders.append(f"第 {i} 行: {line!r}")
+    assert offenders == [], (
+        "行尾注释被当成模式的一部分，整条规则从未生效（git 只认行首 #）："
+        + "；".join(offenders))
+
+
+@pytest.mark.parametrize("probe", [
+    ".coverage",
+    ".coverage.host.12345",       # pytest-xdist 的分片，真实文件名长这样
+    ".coverage.machine.99.1",
+    "coverage.xml",
+    ".coveragerc.ci",
+    ".pytest_cache",
+    ".ruff_cache",
+])
+def test_artifact_rules_actually_take_effect(probe: str):
+    """行为口径：问 git 本人「这个文件你管不管」，而不是比对文本。
+
+    与上面那条形态检查互为对照 —— 形态检查保证以后不会再写出行尾注释，
+    这一条保证**眼下这批规则真的生效**。两条都在，是因为 v2.11.1 实测里
+    那个问题正是「文本看着完全正常，git 却不认」。
+    """
+    proc = subprocess.run(
+        ["git", "check-ignore", "-q", probe],
+        cwd=ROOT,
+        capture_output=True,
+        env=_ENV,
+    )
+    assert proc.returncode == 0, f"git 不忽略 {probe} —— 规则写了却没生效"

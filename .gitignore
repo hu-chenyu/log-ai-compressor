@@ -12,11 +12,17 @@ venv/
 # 测试与覆盖率
 .pytest_cache/
 .coverage
-.coverage.*        # pytest-xdist 并行模式留的分片，跑一次测试就会攒下一堆
+# pytest-xdist 并行模式留的分片，跑一次测试就会攒下一堆
+# （这行注释原来写在行尾，而 git 只把**行首**的 # 当注释 —— 整条规则连同
+#  后面的空格和中文一起变成了模式的一部分，于是从来没有生效过。
+#  第四轮外部复核实测：`git check-ignore .coverage.host.12345` 返回 1。
+#  一条写了却从不生效的忽略规则比不写更糟：它让人以为工作区是干净的。）
+.coverage.*
 coverage.xml
 htmlcov/
 .ruff_cache/
-.coveragerc.ci      # CI 在 mcp 不可用时临时生成的覆盖率配置
+# CI 在 mcp 不可用时临时生成的覆盖率配置
+.coveragerc.ci
 
 # 基准数据集（Loghub 2.0 原始日志，几十 MB，不入库）
 data/
