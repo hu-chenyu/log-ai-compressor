@@ -55,6 +55,27 @@ _INSTANCE_EDGE = 5          # 超出时首尾各列几个
 _CHANGE_INLINE_MAX = 8
 
 
+def _resolve_top_n(top_n: Optional[int], default: int, total: int) -> int:
+    """把调用方的 top_n 归一成实际展示条数。
+
+    两条规则，都源于 v2.9.5 的撤回：
+
+    1. **`None` 才是「没给」**，回落默认。
+       原来 5 处导出函数各写一句 `n = top_n or DEFAULT_TOP_N` —— `0` 是
+       falsy，于是「不限」被静默改成「只给 20 个」。v2.9.5 只修了 service 层
+       那一处，**根因一动没动，只在最上面补了个洞**，同一个坑在 5 个导出器里
+       各留一份。实测后果：`to_json` 的 `error_kinds` 写全部簇数、实际只吐
+       截断后的簇数，且无任何标记 —— 与被撤回的数字性质完全相同。
+
+    2. **`0` 的含义是「不限」，不是「零个」**。所以 `0` 必须翻成 `total`；
+       直接返回 0 会让 `clusters[:0]` 变成空列表 —— 那比原 bug 更荒谬。
+    """
+    if top_n is None:
+        return default
+    n = int(top_n)
+    return total if n <= 0 else n
+
+
 def _instance_density(c: ErrorCluster) -> str:
     """行号间隔的中位数描述（回答「密不密」比列两千个行号有用）。
 
@@ -301,7 +322,7 @@ def _header_meta_lines(result: AnalysisResult, compressed_text: str,
 def to_markdown(result: AnalysisResult, top_n: Optional[int] = None,
                 title: Optional[str] = None, sections=None) -> str:
     """生成适配大模型输入的 Markdown 结构化报告。"""
-    n = top_n or DEFAULT_TOP_N
+    n = _resolve_top_n(top_n, DEFAULT_TOP_N, len(result.clusters))
     clusters = result.clusters[:n]
     s = result.stats
     secs = _sections(sections)
@@ -535,7 +556,7 @@ def _cluster_detail_md(index: int, c: ErrorCluster,
 # ---------------------------------------------------------------------------
 def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
     """生成精简文本摘要（适合直接粘贴给 AI 助手）。"""
-    n = top_n or min(DEFAULT_TOP_N, 10)
+    n = _resolve_top_n(top_n, min(DEFAULT_TOP_N, 10), len(result.clusters))
     s = result.stats
     out: List[str] = []
     out.append(f"【日志分析摘要】{s.source}")
@@ -673,7 +694,7 @@ def to_json(result: AnalysisResult, top_n: Optional[int] = None,
     列表（不含上下文/堆栈/样例原文；261 簇 × 完整上下文 >1MB、
     3 万余行人不可读），GUI 导出默认精简，完整结构为对话框勾选项。
     """
-    n = top_n or DEFAULT_TOP_N
+    n = _resolve_top_n(top_n, DEFAULT_TOP_N, len(result.clusters))
     meta = result.stats.as_dict()
     meta["time_start"] = _iso_ts(meta.get("time_start"))
     meta["time_end"] = _iso_ts(meta.get("time_end"))
@@ -683,6 +704,12 @@ def to_json(result: AnalysisResult, top_n: Optional[int] = None,
         "meta": meta,
         "root_cause_summary": _root_summary(result),
         "error_kinds": len(result.clusters),
+        # 截断诚实字段 —— 与 service.result_to_dict 的三个字段对齐。
+        # 没有它们，下载到的 JSON 会自称 error_kinds=21 却只含 20 个簇，
+        # 读的人无从知道少了 1 个。**交付物说谎比交付物少一项严重得多。**
+        "total_clusters": len(result.clusters),
+        "shown_clusters": min(n, len(result.clusters)),
+        "top_n_truncated": len(result.clusters) > n,
         "clusters": [_cluster_dict(c, full=full)
                      for c in result.clusters[:n]],
         "time_series": [[_iso_ts(t), c]
@@ -703,7 +730,7 @@ def to_text(result: AnalysisResult, top_n: Optional[int] = None,
     （元信息 + 智能分析 + 实例行号索引 + 前上下文 + 样例 + 降噪
     堆栈 + 后上下文），实例索引可独立勾选输出紧凑清单。
     """
-    n = top_n or DEFAULT_TOP_N
+    n = _resolve_top_n(top_n, DEFAULT_TOP_N, len(result.clusters))
     clusters = result.clusters[:n]
     s = result.stats
     secs = _sections(sections)
@@ -901,7 +928,7 @@ def to_html(result: AnalysisResult, top_n: Optional[int] = None,
     def esc(t) -> str:
         return _html.escape(str(t), quote=True)
 
-    n = top_n or DEFAULT_TOP_N
+    n = _resolve_top_n(top_n, DEFAULT_TOP_N, len(result.clusters))
     clusters = result.clusters[:n]
     s = result.stats
     secs = _sections(sections)

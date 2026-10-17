@@ -33,16 +33,23 @@ from log_ai_compressor.constants import (
     DEFAULT_TOP_N,
     canonical_level,
 )
-from log_ai_compressor.core.comparator import compare_files
-from log_ai_compressor.core.pipeline import analyze_file, analyze_files
-from log_ai_compressor.rules.engine import RuleSetError
-from log_ai_compressor.export.reporters import (
+# 分层：接入层只经 service 触达 core / export。
+#
+# 这里原来直接 import core.comparator / core.pipeline / export.reporters ——
+# 而 claim_layering 门禁因为把 `cli` 当目录扫，**一次都没看到过这 4 处**
+# （详见 scripts/prove.py 里 claim_layering 的注释）。门禁修好后它立刻变红，
+# 这才暴露出下面这几行。现在统一从 service 取，调用点一行都不用改。
+from log_ai_compressor.service import (
+    analyze_file,
+    analyze_files,
     brief_summary,
+    compare_files,
     compare_to_markdown,
     to_json,
     to_markdown,
     to_text,
 )
+from log_ai_compressor.rules.engine import RuleSetError
 
 # 导出格式 -> 生成函数
 _FORMAT_TABLE = {"md": to_markdown, "markdown": to_markdown,
@@ -662,7 +669,6 @@ def cmd_ai_explain(args) -> int:
     ai = _import_ai()
     if ai is None:
         return EXIT_ERROR
-    from log_ai_compressor.core.pipeline import analyze_file
     path = Path(args.file)
     if not path.is_file():
         print(f"错误：日志文件不存在 {path}", file=sys.stderr)

@@ -82,17 +82,44 @@ def claim_evidence(path: Path) -> dict:
 
 
 def claim_confidence(path: Path) -> dict:
-    """CONFIRMED 只能来自 Caused-by 链；日志里没有因果链就必须零。"""
+    """CONFIRMED 只能来自 Caused-by 链；日志里没有因果链就必须零。
+
+    **v2.9.9 修的恒真**：原来是
+    `consistent = (not confirmed) if not has_chain else True`
+    —— 样例日志 `examples/sample_system.log` **恰好含 Caused-by 链**，
+    于是永远走 `else True`。这条主张声称守「无因果链时零 CONFIRMED」，
+    而唯一被跑的样本恰好是有链的，**它永远不会红**。10 条主张里这 1 条空转，
+    而它守的正是「置信档位不乱说」这个核心卖点。
+
+    现在拆成**两个都要真判**的分支：
+      · 无链 -> 必须零 CONFIRMED（拿程序自己合成的无链日志去判）
+      · 有链 -> CONFIRMED 数不得超过链数，且每个 CONFIRMED 都得真的带链证据
+    两边都判，恒真分支就不存在了。
+    """
     r = analyze_files([path], context_lines=2)
     confirmed = [c for c in r.clusters
                  if c.root_cause_confidence == "CONFIRMED"]
     verdict = (r.evidence or {}).get("verdict")
-    has_chain = "Caused by:" in path.read_text(encoding="utf-8", errors="replace")
-    consistent = (not confirmed) if not has_chain else True
-    return claim("置信档位：无因果链时零确定性断言",
-                 consistent,
-                 f"日志含 Caused-by：{has_chain}；"
-                 f"判 CONFIRMED {len(confirmed)} 个；verdict={verdict}")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    has_chain = "Caused by:" in text
+    n_chain = text.count("Caused by:")
+
+    if not has_chain:
+        consistent = not confirmed
+        why = f"日志无 Caused-by 链，必须零 CONFIRMED，实得 {len(confirmed)}"
+    else:
+        # 有链时不再是「无条件 True」：CONFIRMED 不能多于链，且每个都得带
+        # 链证据（变体 / 证据引用 / 因果计数三者至少有一个非空）。
+        chain_backed = all(
+            (getattr(c, "root_cause_variants", None)
+             or getattr(c, "evidence", None)
+             or getattr(c, "cause_counts", None))
+            for c in confirmed)
+        consistent = len(confirmed) <= n_chain and chain_backed
+        why = (f"日志含 {n_chain} 条 Caused-by；判 CONFIRMED {len(confirmed)} 个"
+               f"（不得超过链数，且每个须有链证据）")
+    return claim("置信档位：无因果链时零确定性断言", consistent,
+                 f"{why}；verdict={verdict}")
 
 
 def claim_compression(path: Path) -> dict:
@@ -254,28 +281,65 @@ def claim_layering() -> dict:
 
     真正的风险不是「多一层间接」，而是**同一份逻辑会长出第二个实现**。
     所以这里用 AST 核验，不靠人自觉。
+
+    **v2.9.9 修的一处「门禁自己失能」**：原来按 `(pkg / layer).rglob("*.py")`
+    逐层扫，而 `cli` 是**文件不是目录** —— `Path.rglob` 对不存在的路径**静默
+    返回空**，于是 `cli.py` 一次都没被扫到，却照样报「4 个接入层 AST 核验
+    通过」（那 4 是 `len(layer_roots)`，即**名字个数**，不是实际扫了几个文件）。
+
+    这比没有门禁更糟：没有门禁你知道那里没检查；这个门禁**明确告诉你检查过
+    了**。而它的 docstring 恰恰就是**为了修 `cli.py` 的越层 import 才写的**。
+
+    两处一起改：
+      1. 遍历 `pkg/**/*.py` 再按路径前缀筛接入层 —— 不再假设某层是目录；
+      2. detail 报**实际扫描的文件数**，且扫描数为 0 时直接判失败。
+         「扫了 0 个文件还通过」必须是红的，不能是绿的。
     """
     import ast
     layer_roots = ("cli", "web", "mcp", "ai")
     banned_prefix = ("log_ai_compressor.core", "log_ai_compressor.export")
+    pkg = ROOT / "log_ai_compressor"
+
+    def _layer_of(p: Path) -> str:
+        """该文件属于哪一层。
+
+        `cli.py` 直接躺在包根，`relative_to(pkg).parts[0]` 是 ``"cli.py"``
+        而不是 ``"cli"`` —— 漏掉它就等于漏掉 cli.py，所以顶层文件取 stem，
+        子目录才取首段目录名。
+        """
+        parts = p.relative_to(pkg).parts
+        return parts[0][:-3] if len(parts) == 1 and parts[0].endswith(".py") \
+            else parts[0]
+
+    targets = sorted(p for p in pkg.rglob("*.py") if _layer_of(p) in layer_roots)
     violations = []
-    for layer in layer_roots:
-        for path in sorted((ROOT / "log_ai_compressor" / layer).rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            rel = path.relative_to(ROOT).as_posix()
-            for node in ast.walk(tree):
-                mod = None
-                if isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                    mod = node.module
-                elif isinstance(node, ast.Import):
-                    for a in node.names:
-                        if a.name.startswith(banned_prefix):
-                            violations.append(f"{rel}: import {a.name}")
-                if mod and mod.startswith(banned_prefix):
-                    violations.append(f"{rel}:{node.lineno} from {mod} import …")
-    return claim("分层：接入层只经 service 触达 core/export", not violations,
-                 "；".join(sorted(set(violations))[:6]) if violations
-                 else f"{len(layer_roots)} 个接入层 AST 核验通过")
+    for path in targets:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        rel = path.relative_to(ROOT).as_posix()
+        for node in ast.walk(tree):
+            mod = None
+            if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                mod = node.module
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name.startswith(banned_prefix):
+                        violations.append(f"{rel}: import {a.name}")
+            if mod and mod.startswith(banned_prefix):
+                violations.append(f"{rel}:{node.lineno} from {mod} import …")
+    # 扫到 0 个文件还判「通过」，本身就是失能 —— 门禁必须对此敏感。
+    scanned_empty = not targets
+    per_layer = {}
+    for p in targets:
+        k = _layer_of(p)
+        per_layer[k] = per_layer.get(k, 0) + 1
+    detail = ("；".join(sorted(set(violations))[:6]) if violations
+              else "实际扫描 %d 个文件（%s）AST 核验通过"
+                   % (len(targets), " ".join("%s=%d" % kv
+                                             for kv in sorted(per_layer.items()))))
+    if scanned_empty:
+        detail = "**扫描到 0 个接入层文件** —— 门禁失能，不能判通过"
+    return claim("分层：接入层只经 service 触达 core/export",
+                 not violations and not scanned_empty, detail)
 
 
 def claim_optdeps() -> dict:

@@ -161,7 +161,18 @@ class TestJson:
             assert key in first
         assert "context_before" not in lean, "精简模式不得含上下文"
         full_text = to_json(result)
-        assert len(lean) < len(full_text) / 2, "精简体积应显著小于完整版"
+        # 阈值从「严格小于一半」放宽到「不超过 55%」。
+        #
+        # 为什么：v2.9.9 给 to_json 加了 total_clusters / shown_clusters /
+        # top_n_truncated 三个**诚实字段**（原先 JSON 自称 error_kinds=N 却只
+        # 含 N-1 个簇、零提示）。这三个键在精简模式下同样出现，固定多出几十
+        # 字节，把这个比值从 ~50% 顶到 50.05%。
+        #
+        # **不是为了让测试变绿而放宽**：精简版的真实收益（去掉上下文/堆栈/
+        # 样例原文）远大于这三个键，这里量的是比例而不是绝对值；而那个原先
+        # 会掩盖截断的缺陷，现在由 `test_json_reports_truncation_honestly`
+        # 单独盯着，不再依赖这个比例。
+        assert len(lean) <= len(full_text) * 0.55, "精简体积应显著小于完整版"
         # 默认（不参）保持完整结构（向后兼容）
         assert "sample" in json.loads(full_text)["clusters"][0]
 
