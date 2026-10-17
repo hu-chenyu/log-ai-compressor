@@ -8,6 +8,85 @@
 
 ---
 
+## [2.11.0] - 2026-10-17
+
+**一整轮外部审查查出 4 个真缺陷，全部修掉；其中 3 个是「门禁绿着，而它什么都没校」。**
+
+这一版的共同形状不是「代码写错了」，而是**校验环节失能**：文档、门禁、
+退出码各自看起来都在尽职，串起来却没有任何一处真的在守它声称的东西。
+
+### 修掉的 4 个缺陷
+
+**1. 基准表门禁只堵了半边（🔴）**
+
+`claim_benchmark_table` 只对账 README，而同一张表在 `docs/BENCHMARK.md` 与
+`docs/FAQ.md` 里各有一份副本。`docs/BENCHMARK.md` 那份**至今仍挂着
+AGENTS.md 明列为已撤回的 85.1%**，正文还写着「下面是修正口径后的重测」。
+
+更糟的是第三份副本 `docs/FAQ.md` 连结构都不同（没有「标注事件」列），靠
+「表头必须含标注事件列」识别表的话是**结构性看不见**。表识别判据因此放宽成
+「有事件数列 **或** 有两个以上本项目口径列」—— 两边都不能靠：只认事件列就漏
+FAQ，放宽成「有 Drain3 就算」就把 `docs/BENCHMARK.md` 里两张 token 压缩比表
+吃进来报假漂移。
+
+顺带查出 **3 处**「交付口径 1 胜 9 负」：实测是 **0 胜 1 平 9 负** ——
+多算一场胜，把 Proxifier 那场平（72.7% vs 72.7%）整个漏掉。同一仓库的 README
+与 FAQ 写的都是正确的那个数，三份文档互相矛盾而全部门禁绿着。多报一个**不存在
+的胜**，比错一个百分点严重得多。现在胜负场次也由基线的 `verdict_*` 重算并对账。
+
+**2. 分层门禁看不见相对导入，也看不见 `from pkg import sub`（🔴）**
+
+判据写的是 `... and node.module and not node.level`，`not node.level` 让
+`from ..core.evidence import …` 整条逃逸（运行时完全合法）；而
+`from log_ai_compressor import core` 的 `node.module` 只是
+`log_ai_compressor`，不以禁用前缀开头就放行 —— 而它拿到的正是 core 层。
+
+修 `_package_of` 时第一版把模块自己的名字也算进了包里，level 于是多退一级，
+相对导入一条都抓不到 —— **门禁仍然绿着**。这个错已被钉成回归测试。
+
+**3. 结论指纹不该是「你怎么写的这个路径」的函数（🟠）**
+
+同一份逐字节相同的日志，绝对路径得 `856b49a8…`、相对路径得 `2adae7d0…`。
+来源有**两处**：`stats.source`，以及 `evidence_id`（它由 `source` 派生，
+也进了指纹）。只删前者的话指纹照样会变 —— 症状修好了，病还在。
+
+现在指纹不取 `source`，证据改用**路径无关身份**（起止行 + 类型 + 原文摘要）
+入指纹，判别力等价。`evidence_id` 本身不变（它是报告里可见的证据编号，
+且 `verify` 靠 `ref.source` 定位重读，不按 ID 匹配）。
+
+CI 的确定性门禁**结构上测不到这一维**（同一个字面路径连跑三次），已写进
+AGENTS.md §4b 的边界表。
+
+**4. 文档漂移与小瑕疵（🟡）**
+
+- `core/clustering.py` 模块 docstring / `add()` docstring 与
+  `docs/ARCHITECTURE.md` 仍写「上限 256 次比较」—— v2.10.0 已整个去掉。
+  模块 docstring 描述的还是**实测否决**的「按字典序截断」方案。
+- `tests/test_evidence.py` 两处 `pytest.skip`：**一处是数据相关**（示例日志
+  变了就静默不执行），**另一处把「守卫触发」翻译成「跳过」** —— 产品真的开始
+  在非因果输入上自信下结论时，CI 报的是**绿的**。已改成现造场景 + 硬断言。
+- `cli.py` 的 `rules list` 在预设加载失败时只打「(加载失败)」且退出 0。
+  现在打出异常类型与原因，并返回非零（内置模板加载不了是我们的缺陷）。
+- `pyproject.toml` 的 web extra 漏声明 `pydantic`（`web/server.py:22` 直接
+  import，一直靠 fastapi 顺带装上）。**正因为能跑才特别难发现。**
+
+### 新增门禁
+
+| 门禁 | 守的是什么 |
+| --- | --- |
+| `test_every_benchmark_copy_is_listed` | 基准表抄进**第四个文件**时看门狗会报；豁免必须写理由（CHANGELOG.md 是历史快照，刻意不重写） |
+| `test_every_verdict_mention_in_every_doc_is_caught` | 三份文档里**每一处**胜负断言都校，不只第一处 |
+| `TestLayeringGateSeesEveryImportSpelling` | 相对导入 / `from pkg import sub` 两类写法 + 同前缀无关模块的边界 |
+| `test_fingerprint_does_not_depend_on_how_the_path_was_spelled` | 路径写法不影响指纹；配套 4 条「路径无关身份仍有判别力」 |
+| `test_module_and_add_docstrings_do_not_describe_a_fixed_cap` | 描述层不许复活已删除的固定上限（另有一条**反向**钉住「必须写明现在是什么」） |
+| `test_every_direct_third_party_import_is_declared` | 直接 import 的第三方必须在 pyproject 声明，且映射表本身要守 |
+
+### 撤回与更正
+
+本轮修正了先前发布的多处基准数字：**没有撤回整张表**，而是把 9 格漂移按实测
+基线回填，并在 `docs/BENCHMARK.md` 更正 3 处胜负口径。历史版本记录
+（CHANGELOG 里 v2.9.x 的旧数字）按惯例**刻意不重写**。
+
 ## [2.10.0] - 2026-10-17
 
 **一个真实的行序依赖、一个没人重测的基准回归，外加两条被证明走不通的路。**

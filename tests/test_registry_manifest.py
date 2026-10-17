@@ -63,6 +63,77 @@ class TestStandaloneMcpEntryPoint:
         assert "log-ai-compressor[mcp]" in err, "必须告诉用户装哪个 extra"
         assert "Traceback" not in err
 
+
+class TestRulesListTellsYouWhyItFailed:
+    """`rules list` 曾只打「(加载失败)」且照常退出 0。
+
+    两个问题叠在一起：
+
+    1. **没有原因**。用户看到「加载失败」既没法判断是自己的环境坏了还是
+       这个内置模板坏了，也没法把问题报上来 —— 一句没有任何信息的话，
+       等于没打印。
+    2. **退出码是 0**。内置模板加载不了是**我们**的缺陷，不是用户的用法错误；
+       照常退出 0 等于把缺陷藏进一次「成功」里。而 MCP 侧同一个概念是
+       `{"ok": False, "error": ...}`，两边对同一个错误的表态不一致。
+    """
+
+    @staticmethod
+    def _args(action="list", name=None):
+        import argparse
+
+        return argparse.Namespace(action=action, name=name)
+
+    def test_broken_preset_is_reported_with_reason_and_fails(self,
+                                                             monkeypatch,
+                                                             capsys):
+        from log_ai_compressor import cli
+
+        import log_ai_compressor.rules.engine as engine
+
+        def boom(name):
+            raise ValueError("unknown field 'patern'")
+
+        monkeypatch.setattr(engine, "load_ruleset", boom)
+        rc = cli.cmd_rules(self._args())
+        err = capsys.readouterr().err
+        assert rc == cli.EXIT_ERROR, (
+            "内置模板加载失败却退出 0 —— 缺陷被藏进一次「成功」里")
+        assert "unknown field 'patern'" in err, (
+            f"必须打印失败原因，实际 stderr：{err!r}")
+        assert "ValueError" in err, "异常类型也要打：YAML 语法错与文件缺失只看 message 分不清"
+        assert "Traceback" not in err, "面向用户的是一句话，不是裸栈"
+
+    def test_all_presets_load_cleanly_in_this_repo(self, capsys):
+        """先证真：本仓库内置模板全部可加载，所以本用例红就是真回归。"""
+        from log_ai_compressor import cli
+
+        rc = cli.cmd_rules(self._args())
+        out, err = capsys.readouterr()
+        assert rc == cli.EXIT_OK, f"本仓库内置模板不该有加载失败：{err}"
+        assert "加载失败" not in out and "加载失败" not in err
+
+    def test_single_preset_failure_still_lists_the_rest(self, monkeypatch,
+                                                        capsys):
+        """一个坏的不该把整张表吞掉 —— 坏哪个要指名道姓。"""
+        from log_ai_compressor import cli
+
+        import log_ai_compressor.rules.engine as engine
+
+        real = engine.load_ruleset
+
+        def flaky(name):
+            if name == "generic":
+                raise OSError("cannot read rules/generic.yaml")
+            return real(name)
+
+        monkeypatch.setattr(engine, "load_ruleset", flaky)
+        rc = cli.cmd_rules(self._args())
+        out, err = capsys.readouterr()
+        assert rc == cli.EXIT_ERROR
+        assert "cannot read rules/generic.yaml" in err, err
+        assert "generic" in err, "坏的是哪一个必须指名道姓"
+        assert "jenkins" in out, "其余模板必须照常列出，不能一个坏了就整张吞掉"
+
     @pytest.mark.skipif(
         pytest.importorskip("mcp", reason="需要 mcp SDK") is None,
         reason="需要 mcp SDK")

@@ -331,13 +331,27 @@ def cmd_rules(args) -> int:
 
     if args.action == "list":
         print("可用解析规则模板：")
+        broken = []
         for name in list_presets():
             try:
                 rs = load_ruleset(name)
                 print(f"  {name:<12} {rs.description}")
-            except Exception:
-                print(f"  {name:<12} (加载失败)")
+            except Exception as exc:
+                # 原因必须打出来。只写「(加载失败)」的话，用户既没法判断是
+                # 自己的环境坏了还是这个模板本身坏了，也没法把问题报上来。
+                # 异常类型一并打：YAML 语法错与文件缺失，光看 message 分不清。
+                broken.append(name)
+                print(f"  {name:<12} (加载失败: {type(exc).__name__}: {exc})",
+                      file=sys.stderr)
         print("\n提示：--rule 支持传入自定义 YAML 规则文件路径")
+        if broken:
+            # 内置模板加载不了是**我们**的缺陷，不是用户的用法错误。
+            # 照常退出 0 等于把缺陷藏进一次「成功」里 —— 而 MCP 侧同一个
+            # 概念是带 error 字段返回的，两边对同一个错误的表态不一致。
+            print(f"错误：{len(broken)} 个内置模板加载失败：{', '.join(broken)}",
+                  file=sys.stderr)
+            return EXIT_ERROR
+        return EXIT_OK
     else:
         name = args.name or "generic"
         try:
