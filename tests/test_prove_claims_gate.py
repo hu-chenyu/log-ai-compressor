@@ -168,6 +168,12 @@ def _is_full_run(config) -> bool:
 
     `-k` / `-m` / `--ignore` / `--lf` 都会让收集数天然变小，那时红是假的。
     与其猜一堆组合，不如只认「没带筛选器」这一种情况。
+
+    位置参数也得看：**指向目录**（含 `testpaths` 展开出来的 `tests`）仍然是全量，
+    **指向具体文件或节点**才是子集 —— `pytest tests/a.py::C::t` 只收集 1 个用例，
+    却不会被前几条筛出来，于是拿 1 去对账 README 写的三千多，**报一个假的红**。
+    这条判据是量出来的：pytest 把位置参数放在 ``config.args``，
+    且不带参数时它就是 ``testpaths`` 的值（实测 `['tests']`）。
     """
     opt = config.option
     if getattr(opt, "keyword", "") or getattr(opt, "markexpr", ""):
@@ -177,6 +183,9 @@ def _is_full_run(config) -> bool:
             return False
     for lst in ("ignore", "ignore_glob", "deselect"):
         if getattr(opt, lst, None):
+            return False
+    for a in getattr(config, "args", None) or []:
+        if "::" in a or pathlib.Path(a).is_file():
             return False
     return True
 
@@ -207,6 +216,86 @@ class TestReadmeTestCountIsGated:
                 assert claimed == actual, (
                     f"{name} 写 {claimed} 个测试，实际收集 {actual} 个"
                     f"（新增/删除测试后必须同步回填）")
+
+
+# ---------------------------------------------------------------------------
+# 「子集运行不能触发对账」，以及 —— 更要紧的 —— **对账不能在 CI 上静默失效**
+# ---------------------------------------------------------------------------
+
+_THIS_FILE = str(_ROOT / "tests" / "test_prove_claims_gate.py")
+
+
+class _FakeOption:
+    def __init__(self, **kw):
+        self.keyword = ""
+        self.markexpr = ""
+        self.lf = False
+        self.ff = False
+        self.failed_first = False
+        self.last_failed = False
+        self.ignore = None
+        self.ignore_glob = None
+        self.deselect = None
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class _FakeConfig:
+    """只带 `_is_full_run` 真正读的那几个字段。"""
+
+    def __init__(self, args=(), **kw):
+        self.args = list(args)
+        self.option = _FakeOption(**kw)
+
+
+class TestFullRunDetection:
+    """`_is_full_run` 判错的后果是对称的，两个方向都得堵。
+
+    判得太松 → 子集运行时拿 1 个用例去对账 README 写的三千多，**假红**，
+    于是人开始习惯忽略这条门禁。
+    判得太紧 → CI 上它一直 skip，界面上和"真跑了一遍全绿"长得一模一样，
+    那比没有门禁更糟：没有门禁你知道那里没检查。
+    """
+
+    def test_directory_arg_is_still_a_full_run(self):
+        """CI 的形态：不带路径参数时 `config.args` 就是 testpaths 展开的 `['tests']`。
+
+        这条守的是**别把门禁写死** —— 判据一旦改成"参数必须为空"，
+        CI 上它立刻变 skip，而 CI 界面不会告诉你任何事。
+        """
+        assert _is_full_run(_FakeConfig(["tests"])) is True
+        assert _is_full_run(_FakeConfig(["."])) is True
+        assert _is_full_run(_FakeConfig()) is True
+
+    def test_file_arg_is_not_a_full_run(self):
+        """`pytest tests/a.py` 只收集那一个文件 —— 拿它对账必然是假红。"""
+        assert _is_full_run(_FakeConfig([_THIS_FILE])) is False
+
+    def test_node_id_arg_is_not_a_full_run(self):
+        """`pytest <文件>::<类>::<用例>` 只收集 1 个，是最容易被忽略的子集形态。"""
+        assert _is_full_run(_FakeConfig([f"{_THIS_FILE}::TestFullRunDetection"])) is False
+
+    def test_existing_filters_still_work(self):
+        """改这条判据时不能顺手把原来那几条筛掉了。"""
+        assert _is_full_run(_FakeConfig(keyword="foo")) is False
+        assert _is_full_run(_FakeConfig(markexpr="slow")) is False
+        assert _is_full_run(_FakeConfig(ignore=["tests/a.py"])) is False
+        assert _is_full_run(_FakeConfig(lf=True)) is False
+
+    def test_ci_workflow_passes_no_path_arg(self):
+        """**防的是"门禁在 CI 上静默失效"。**
+
+        CI 的 pytest 命令一旦加上位置参数（哪怕只是个目录），
+        这条对账就会开始 skip —— 而 skip 出来的"绿"和真跑一遍的"绿"在
+        CI 界面上没有任何区别。所以 CI 的命令形态本身就是被校的对象。
+        """
+        text = (_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        m = re.search(r'"-m",\s*"pytest",(.*?)\]', text, re.S)
+        assert m, "ci.yml 里找不到 pytest 调用 —— 形状变了，先更新本测试"
+        for lit in re.findall(r'"([^"]+)"', m.group(1)):
+            assert lit.startswith("-"), (
+                f"CI 的 pytest 命令多了位置参数 {lit!r} —— "
+                f"这条对账会在 CI 上静默失效（要么改判据，要么别在 CI 里传路径）")
 
 
 # 覆盖率**不在**本文件校：pytest-cov 在 session 结束时才落 coverage.xml，
