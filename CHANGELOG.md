@@ -81,6 +81,13 @@ AGENTS.md §4b 的边界表。
 | `test_module_and_add_docstrings_do_not_describe_a_fixed_cap` | 描述层不许复活已删除的固定上限（另有一条**反向**钉住「必须写明现在是什么」） |
 | `test_every_direct_third_party_import_is_declared` | 直接 import 的第三方必须在 pyproject 声明，且映射表本身要守 |
 
+### 记成明示决定的已知例外
+
+`cli.py`（2 处）、`mcp/server.py`、`web/server.py` 都直接 import
+`rules.engine`，**没有经 service**，而 `service.py` 完全不碰它。这不违反分层
+契约（契约点名的是 core 与 export），但契约也没提过它 —— 现在写进
+AGENTS.md §3，连同「为什么先不动」和「什么时候该动」。
+
 ### 撤回与更正
 
 本轮修正了先前发布的多处基准数字：**没有撤回整张表**，而是把 9 格漂移按实测
