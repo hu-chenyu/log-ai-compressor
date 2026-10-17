@@ -42,6 +42,7 @@ def _load_prove():
 prove = _load_prove()
 _REAL_METRICS = prove._code_metrics()
 _REAL_COUNT = len(prove._CLAIM_FNS)
+_REAL_RATIO = prove._count_ratio()
 
 
 def _rewrite(text: str, old: str, new: str) -> str:
@@ -66,6 +67,68 @@ def gate(tmp_path, monkeypatch):
         return prove.claim_readme_metrics()
 
     return _run
+
+
+class TestReadmeLineRatioIsGated:
+    """`docs/FAQ.md` 的「测试/主代码行数比 ≈X」曾写 1.1，实测 1.37。
+
+    v2.11.0 的复核顺手量到这件事，而**没有任何门禁校它** —— 与本文件
+    开头写的 v2.9.0 那次（README 写「9 条主张」没人校）是同一个病：
+    一个对外数字漂了，全部门禁绿着。差得不多不代表不算错：
+    **「大概差不多」写成实测值，就是这个项目明令禁止的那件事。**
+    """
+
+    @staticmethod
+    def _pin(monkeypatch) -> None:
+        """把行数与比值都钉成**真实**值。
+
+        不钉的话，ROOT 指到临时目录后 `_code_metrics()` 会算成 0 行 0 模块
+        —— 门禁会「因为另一个原因变红」，那样测的就不是「比值对不对」，
+        而是「目录存不存在」。
+        """
+        monkeypatch.setattr(prove, "_code_metrics", lambda: dict(_REAL_METRICS))
+        monkeypatch.setattr(prove, "_count_ratio", lambda: _REAL_RATIO)
+
+    def _run(self, tmp_path, monkeypatch, faq_text: str) -> dict:
+        self._pin(monkeypatch)
+        (tmp_path / "README.md").write_text(_REAL_README, encoding="utf-8")
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "FAQ.md").write_text(faq_text, encoding="utf-8")
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        return prove.claim_readme_metrics()
+
+    def test_current_docs_pass(self):
+        """先证真：照现状跑是绿的。"""
+        assert prove.claim_readme_metrics()["holds"] is True
+
+    def test_the_ratio_is_really_what_the_docs_say(self):
+        """先证真：文档里那个数确实是当前实测值（否则后面的红都是白红）。"""
+        faq = (_ROOT / "docs" / "FAQ.md").read_text(encoding="utf-8")
+        claimed = [float(x) for x in re.findall(
+            r"行数比\s*[≈~]?\s*(\d+(?:\.\d+)?)", faq)]
+        assert claimed, "FAQ 里找不到行数比 —— 格式变了，先更新本测试"
+        for c in claimed:
+            assert abs(c - _REAL_RATIO) <= 0.01, (c, _REAL_RATIO)
+
+    def test_wrong_ratio_in_a_doc_fails_loudly(self, tmp_path, monkeypatch):
+        c = self._run(tmp_path, monkeypatch,
+                      "- 测试/主代码行数比 ≈9.9（同为非空非注释行口径）\n")
+        assert c["holds"] is False, "FAQ 里的行数比写错了却没被发现"
+        assert "9.9" in c["detail"], c["detail"]
+        assert str(_REAL_RATIO) in c["detail"], c["detail"]
+
+    def test_a_ratio_off_by_more_than_a_hundredth_fails(self, tmp_path,
+                                                       monkeypatch):
+        """容差只给显示舍入留 0.01；差 0.02 就该判红。"""
+        c = self._run(tmp_path, monkeypatch,
+                      f"- 测试/主代码行数比 ≈{_REAL_RATIO + 0.02:.2f}\n")
+        assert c["holds"] is False, "差 0.02 却放过 —— 容差被悄悄放宽了"
+
+    def test_a_doc_without_the_phrase_is_not_invented(self, tmp_path,
+                                                      monkeypatch):
+        """没写「行数比」的文档不得被凭空判红 —— 假红比漏红更糟。"""
+        c = self._run(tmp_path, monkeypatch, "这里没有任何行数比。\n")
+        assert c["holds"] is True, c["detail"]
 
 
 class TestReadmeClaimCountIsGated:
