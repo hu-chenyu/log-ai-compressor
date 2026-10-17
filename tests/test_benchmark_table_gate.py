@@ -44,6 +44,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _REAL_README = (_ROOT / "README.md").read_text(encoding="utf-8")
 _REAL_BENCHMARK = (_ROOT / "docs" / "BENCHMARK.md").read_text(encoding="utf-8")
 _REAL_FAQ = (_ROOT / "docs" / "FAQ.md").read_text(encoding="utf-8")
+_REAL_POSITIONING = (_ROOT / "docs" / "POSITIONING.md").read_text(encoding="utf-8")
 _BASELINE = _ROOT / "docs" / "benchmark_baseline.json"
 _TABLE_ROW = re.compile(
     r"^\|\s*(?P<name>[A-Za-z0-9_]+)\s*\|(?P<events>\s*\d+\s*)\|"
@@ -108,7 +109,7 @@ def gate(tmp_path, monkeypatch):
     """
 
     def _run(readme_text: str, baseline_obj, benchmark_text=None,
-             faq_text=None, omit=()) -> dict:
+             faq_text=None, positioning_text=None, omit=()) -> dict:
         (tmp_path / "README.md").write_text(readme_text, encoding="utf-8")
         (tmp_path / "docs").mkdir(exist_ok=True)
         if "docs/BENCHMARK.md" not in omit:
@@ -118,6 +119,13 @@ def gate(tmp_path, monkeypatch):
         if "docs/FAQ.md" not in omit:
             (tmp_path / "docs" / "FAQ.md").write_text(
                 _REAL_FAQ if faq_text is None else faq_text, encoding="utf-8")
+        # v2.11.1：POSITIONING 也进了射程。四份都写 —— 只造三份的话，
+        # 「docs/POSITIONING.md 不存在」会让每条「先证真」用例假红，
+        # 而红的原因与它声称要验的那件事无关。
+        if "docs/POSITIONING.md" not in omit:
+            (tmp_path / "docs" / "POSITIONING.md").write_text(
+                _REAL_POSITIONING if positioning_text is None
+                else positioning_text, encoding="utf-8")
         if baseline_obj is not None:
             (tmp_path / "docs" / "benchmark_baseline.json").write_text(
                 json.dumps(baseline_obj, ensure_ascii=False), encoding="utf-8")
@@ -403,14 +411,19 @@ def test_every_benchmark_copy_is_listed():
     要么在 `_BENCH_DOC_EXEMPT` 里写明**为什么**豁免。
     """
     listed = set(prove._BENCH_DOCS)
+    verdicts = set(prove._BENCH_VERDICT_DOCS)
     offenders: dict = {}
     scanned = _documentation_files()
     assert len(scanned) >= 8, f"只认出 {len(scanned)} 份文档，扫描范围不对：{scanned}"
     for name in scanned:
-        if name in listed or name in prove._BENCH_DOC_EXEMPT:
+        if name in prove._BENCH_DOC_EXEMPT:
             continue
-        if prove._bench_tables((_ROOT / name).read_text(encoding="utf-8")):
+        text = (_ROOT / name).read_text(encoding="utf-8")
+        if name not in listed and prove._bench_tables(text):
             offenders[name] = "含基准表，但既不在 _BENCH_DOCS 也不在 _BENCH_DOC_EXEMPT"
+        elif name not in verdicts and prove._VERDICT_RE.search(text):
+            offenders[name] = ("含对外战绩，但既不在 _BENCH_VERDICT_DOCS "
+                               "也不在 _BENCH_DOC_EXEMPT")
     assert not offenders, offenders
 
 
@@ -436,6 +449,9 @@ def test_verdict_counts_match_measured_tallies():
     assert (counts["交付"]["胜"], counts["交付"]["平"], counts["交付"]["负"]) == (0, 1, 9)
     assert (counts["同预算"]["胜"], counts["同预算"]["平"], counts["同预算"]["负"]) == (8, 1, 1)
     assert (counts["全量"]["胜"], counts["全量"]["平"], counts["全量"]["负"]) == (8, 1, 1)
+    # 对 LogsLop 只有同预算一个口径有实测（10 胜）
+    logslop = prove._bench_verdict_counts(_REAL_BASE["datasets"], "LogsLop")
+    assert (logslop["同预算"]["胜"], logslop["同预算"]["平"], logslop["同预算"]["负"]) == (10, 0, 0)
 
 
 def test_verdict_written_as_win_without_tie_is_still_caught(gate):
@@ -455,21 +471,22 @@ def test_verdict_written_as_win_without_tie_is_still_caught(gate):
 
 
 def test_every_verdict_mention_in_every_doc_is_caught(gate):
-    """三份文档里的**每一处**胜负断言都要校，不能只校第一处。
+    """四份文档里的**每一处**胜负断言都要校，不能只校第一处。
 
     docs/BENCHMARK.md 同一句话在三处重复；只校第一处的门禁，
-    和只对账 README 的门禁是同一种病。
+    和只对账 README 的门禁是同一种病。docs/POSITIONING.md 是
+    v2.11.1 才纳管的第四份 —— 它重复着 README 的三个口径。
 
     注意 README 的三处胜负**挤在同一行**（第 59 行那句话里），
     所以「一行一处」的假设在这里不成立 —— 必须三档口径都校到。
     """
     texts = {"README.md": _REAL_README, "docs/BENCHMARK.md": _REAL_BENCHMARK,
-             "docs/FAQ.md": _REAL_FAQ}
+             "docs/FAQ.md": _REAL_FAQ, "docs/POSITIONING.md": _REAL_POSITIONING}
     assert gate(_REAL_README, _REAL_BASE)["holds"] is True, "先证真"
-    counts = prove._bench_verdict_counts(_REAL_BASE["datasets"])
 
     for doc, text in texts.items():
-        _probs, seen, n = prove._bench_verdict_problems(doc, text, counts)
+        _probs, seen, n, _notes = prove._bench_verdict_problems(
+            doc, text, _REAL_BASE["datasets"])
         assert n >= 3, f"{doc} 只认出 {n} 处胜负断言，口径或写法变了"
         assert set(seen) == {"交付", "同预算", "全量"}, (
             f"{doc} 只认出 {sorted(seen)} 三个口径，少了哪一档？")
@@ -485,48 +502,172 @@ def test_every_verdict_mention_in_every_doc_is_caught(gate):
         broken = "\n".join(broken_lines)
         assert broken != text
 
-        if doc == "README.md":
-            c = gate(broken, _REAL_BASE)
-        elif doc == "docs/BENCHMARK.md":
-            c = gate(_REAL_README, _REAL_BASE, benchmark_text=broken)
-        else:
-            c = gate(_REAL_README, _REAL_BASE, faq_text=broken)
+        kwargs = {"README.md": {}, "docs/BENCHMARK.md": {"benchmark_text": broken},
+                  "docs/FAQ.md": {"faq_text": broken},
+                  "docs/POSITIONING.md": {"positioning_text": broken}}
+        c = (gate(broken, _REAL_BASE) if doc == "README.md"
+             else gate(_REAL_README, _REAL_BASE, **kwargs[doc]))
         assert c["holds"] is False, (
             f"{doc} 的 {targets} 改成「0 胜 0 平 9 负」却没被发现")
 
 
 def test_verdict_check_reports_nothing_for_clean_docs():
-    """先证真：三份受校文档当前的胜负断言全部正确。"""
-    counts = prove._bench_verdict_counts(_REAL_BASE["datasets"])
+    """先证真：受校文档当前的胜负断言全部正确。"""
     for doc, text in (("README.md", _REAL_README),
                       ("docs/BENCHMARK.md", _REAL_BENCHMARK),
-                      ("docs/FAQ.md", _REAL_FAQ)):
-        probs, _seen, _n = prove._bench_verdict_problems(doc, text, counts)
+                      ("docs/FAQ.md", _REAL_FAQ),
+                      ("docs/POSITIONING.md", _REAL_POSITIONING)):
+        probs, _seen, n, _notes = prove._bench_verdict_problems(
+            doc, text, _REAL_BASE["datasets"])
         assert probs == [], f"{doc}：{probs}"
+        assert n >= 3, doc
 
 
 def test_verdict_check_survives_unrelated_wording():
     """没写「胜/平/负」的行不能被误判 —— 误报的门禁比没有门禁更糟。"""
-    counts = prove._bench_verdict_counts(_REAL_BASE["datasets"])
     benign = [
         "| 数据集 | 交付上限 | 达成度 |\n|---|---:|---:|\n| HPC | 27.0% | 75% |\n",
         "交付口径的那一栏很难看，算法输了 9 个，不是模型更差。\n",
         "全量口径见结果一。\n",
     ]
     for i, text in enumerate(benign):
-        probs, _seen, n = prove._bench_verdict_problems(f"t{i}", text, counts)
+        probs, _seen, n, _notes = prove._bench_verdict_problems(
+            f"t{i}", text, _REAL_BASE["datasets"])
         assert probs == [], f"第 {i} 段被误报：{probs}"
         assert n == 0, f"第 {i} 段不该认出胜负断言，却认出 {n} 处"
 
 
 def test_a_tie_left_implicit_is_reported_as_zero_ties():
     """没写「平」的那一场，报错里必须显示成 0 平，而不是别的数。"""
-    counts = prove._bench_verdict_counts(_REAL_BASE["datasets"])
     text = "交付口径 2 胜 8 负 —— 这个说法漏掉了平局。\n"
-    probs, _seen, n = prove._bench_verdict_problems("t", text, counts)
+    probs, _seen, n, _notes = prove._bench_verdict_problems(
+        "t", text, _REAL_BASE["datasets"])
     assert n == 1
     assert len(probs) == 1 and probs[0], "漏写平的写法必须被抓住"
     assert "文档 2 胜 0 平 8 负" in probs[0], probs[0]
+
+
+# ---------------------------------------------------------------------------
+# v2.11.1：胜负判据的三处「测量环节静默失能」
+#
+# 三处都在同一个位置假设上 —— v2.11.0 判据是
+# `line.find(口径标签)` 之后才开始找场次，于是：
+#   (a) 对照组写在标签**前面**（「同预算档对 LogsLop：10 胜 0 平 0 负」）
+#       会被拿去和 Drain3 的数比 → **假红**，而假红会把真漂移淹没；
+#   (b) 标签写在场次**后面**（「……0 胜 1 平 9 负（交付口径）。」）
+#       一处都校不到 → **漏校**，一句对外战绩被判成「没有断言」；
+#   (c) 同一行两个场次，v2.11.0 是「有一个对得上就算过」
+#       → 一行里那个写错的数被同行写对的数**顺手放过**。
+# (a) 和 (b) 是同一处代码的两个方向，必须一起钉。
+# ---------------------------------------------------------------------------
+def test_verdict_against_logslop_is_not_judged_with_drain3_numbers():
+    """(a) 对 LogsLop 的战绩不能拿 Drain3 的数字去比。"""
+    probs, _seen, n, notes = prove._bench_verdict_problems(
+        "t", "同预算档对 **LogsLop**：10 胜 0 平 0 负。\n", _REAL_BASE["datasets"])
+    assert probs == [], f"拿错尺子量出来的假红：{probs}"
+    assert n == 1, "这一处应当被校到"
+    assert notes["unverifiable"] == []
+
+
+def test_verdict_label_written_after_the_tally_is_still_checked():
+    """(b) 标签在场次**后面**也必须校到，且错的值要判红。"""
+    ok = "对 Drain3 的战绩：0 胜 1 平 9 负（交付口径）。\n"
+    bad = "对 Drain3 的战绩：0 胜 0 平 9 负（交付口径）。\n"
+    _p, _s, n_ok, _n = prove._bench_verdict_problems("t", ok, _REAL_BASE["datasets"])
+    p_bad, _s, n_bad, _n = prove._bench_verdict_problems(
+        "t", bad, _REAL_BASE["datasets"])
+    assert n_ok == 1, "标签在句尾括号里时一处都没校到 —— 这正是 v2.11.0 的漏校"
+    assert n_bad == 1 and p_bad, p_bad
+
+
+def test_verdict_with_no_measured_combination_is_reported_not_silently_green():
+    """基线里没有的「口径 × 对照组」组合必须**单列出来**。
+
+    **「全是 0」和「没测过」是两件事。** 缺 `verdict_full_logslop` 时重算
+    出来是 0/0/0，拿它去比文档里的「10 胜 0 平 0 负」会得到一条永远红的门禁；
+    当成真的 0 又会永远绿。两种都是这个项目最熟的那种病。
+    """
+    probs, _seen, n, notes = prove._bench_verdict_problems(
+        "t", "对 LogsLop：全量口径 10 胜 0 平 0 负。\n", _REAL_BASE["datasets"])
+    assert probs == [], "无实测可对账时不能判红（会永远红）"
+    assert n == 0
+    assert notes["unverifiable"], "无实测可对账必须报出来，不能默默放过"
+
+
+def test_a_wrong_tally_next_to_a_right_one_is_still_caught():
+    """(c) 一行两个数、一个对一个错 —— 错的那个必须判红。"""
+    probs, _seen, n, _notes = prove._bench_verdict_problems(
+        "t", "交付口径 0 胜 1 平 9 负、同预算档 7 胜 2 平 1 负。\n",
+        _REAL_BASE["datasets"])
+    assert n == 2
+    assert len(probs) == 1 and "7 胜 2 平 1 负" in probs[0], probs
+
+
+def test_verdict_unlabeled_claims_are_counted_not_judged():
+    """历史叙述里没有口径的「7 胜 2 负」不该被猜一个尺子去量 —— 但要计数。
+
+    猜错就是假红；而完全不数，就看不出这条门禁的覆盖面有多大。
+    """
+    probs, _seen, n, notes = prove._bench_verdict_problems(
+        "t", "结论从「5 个全部领先」变成「9 个 7 胜 2 负」。\n",
+        _REAL_BASE["datasets"])
+    assert probs == [], probs
+    assert n == 0
+    assert notes["unlabeled"] == 1, notes
+
+
+# ---------------------------------------------------------------------------
+# v2.11.1：表头还在但数据行没了 / 少了某一行
+# ---------------------------------------------------------------------------
+def _faq_without_data_rows() -> str:
+    lines = _REAL_FAQ.splitlines()
+    head = next(i for i, l in enumerate(lines)
+                if l.lstrip().startswith("|") and "数据集" in l
+                and prove._MD_SEP_RE.match(lines[i + 1])
+                and prove._bench_columns(l))
+    j = head + 2
+    while j < len(lines) and lines[j].lstrip().startswith("|"):
+        j += 1
+    return "\n".join(lines[:head + 2] + lines[j:])
+
+
+def test_benchmark_table_with_header_but_no_rows_fails_loudly(gate):
+    """表头保留、数据行删空 → 必须判红。
+
+    v2.11.0 实测判通过：`rows=0 cells=0 problems=0`。
+    `_bench_tables` 照样把它认成一张表（判据看的是表头 + 分隔行），
+    而逐格循环一行都不跑 —— 「表在、行没了」比「表没了」更难发现。
+    """
+    stripped = _faq_without_data_rows()
+    assert "\n|" in stripped, "前提不成立：没造出只有表头的表"
+    c = gate(_REAL_README, _REAL_BASE, faq_text=stripped)
+    assert c["holds"] is False
+    assert "只剩表头" in c["detail"], c["detail"]
+
+
+def test_a_single_missing_dataset_row_fails_loudly(gate):
+    """只删掉**一行**（HPC）也必须判红 —— 这是比删空表更常见的漏法。
+
+    每一行单独看都对得上，表也齐，于是门禁绿；而报告里就此少了一个负例。
+    """
+    lines = [l for l in _REAL_FAQ.splitlines()
+             if not (l.lstrip().startswith("|") and "HPC" in l and "%" in l)]
+    assert len(lines) < len(_REAL_FAQ.splitlines()), "前提不成立：没找到 HPC 行"
+    c = gate(_REAL_README, _REAL_BASE, faq_text="\n".join(lines))
+    assert c["holds"] is False
+    assert "缺数据集 HPC 的行" in c["detail"], c["detail"]
+
+
+def test_doc_without_a_table_is_not_charged_for_missing_rows():
+    """先证真的方向：只有战绩、没有表的文档不得报「缺数据集的行」。
+
+    POSITIONING.md 没有基准表，若缺行检查不随 check_tables 一起退场，
+    它就会凭空报出 10 条假红 —— **一条会误报的门禁比没有门禁更糟**。
+    """
+    probs = prove._bench_doc_problems(
+        "docs/POSITIONING.md", _REAL_POSITIONING, _REAL_BASE["datasets"],
+        check_tables=False)[3]
+    assert probs == [], probs
 
 
 # ---------------------------------------------------------------------------

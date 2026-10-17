@@ -202,6 +202,32 @@ def _code_metrics() -> dict:
     return {"modules": len(files), "lines": lines}
 
 
+# 会被 `claim_readme_metrics` 逐个扫「对外工程数字」的文档。
+# 每加一份文档，就多一处能悄悄漂移的地方 —— 与基准表那份白名单同一个道理。
+_METRIC_DOCS = ("README.md", "docs/FAQ.md", "CONTRIBUTING.md")
+
+
+def _count_lines_in(root_name: str) -> int:
+    """与 `_code_metrics` **同一个口径**数某个目录下的非空非注释行。
+
+    口径必须共用一个函数：两个地方各写一遍，换个算法就漂了 ——
+    而漂了的恰好是一个对外数字。
+    """
+    total = 0
+    for p in (ROOT / root_name).rglob("*.py"):
+        for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = raw.strip()
+            if s and not s.startswith("#"):
+                total += 1
+    return total
+
+
+def _count_ratio() -> float:
+    """测试 / 主代码行数比（README 与 FAQ 都对外写着它）。"""
+    prod = _code_metrics()["lines"]
+    return round(_count_lines_in("tests") / prod, 2) if prod else 0.0
+
+
 def claim_readme_metrics() -> dict:
     """README 里的工程指标必须与仓库实际一致（v2.8.0 新增门禁）。
 
@@ -238,12 +264,34 @@ def claim_readme_metrics() -> dict:
     found = [int(x) for x in re.findall(r"\*\*(\d+)\s*条\*\*\s*主张", readme)]
     counts_ok = bool(found) and all(n == expected for n in found)
 
-    return claim(
-        "README 工程指标与仓库一致", metrics_ok and counts_ok,
-        f"README 写 {claimed_lines} 行 / {claimed_modules} 个模块；"
-        f"实测 {m['lines']} 行 / {m['modules']} 个模块"
-        f"（口径：log_ai_compressor/**/*.py 非空非注释行）；"
-        f"README 写自证主张 {found or '未找到'} 条，本文件实际登记 {expected} 条")
+    # 「测试/主代码行数比 ≈X」—— v2.11.0 的复核顺手量到实测是 **1.37**，
+    # 而 docs/FAQ.md 写的是「≈1.1」。差得不多，但那是**错的**，而且
+    # **没有任何门禁校它** —— 又是本文件开头那条病。与其把它列进
+    # 「尚无数据的主张」，不如接进这条已经算好行数的门禁：口径现成。
+    ratio_real = _count_ratio()
+    ratio_problems = []
+    for doc in _METRIC_DOCS:
+        path = ROOT / doc
+        if not path.is_file():
+            continue
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1):
+            for claimed in re.findall(r"行数比\s*[≈~]?\s*(\d+(?:\.\d+)?)", line):
+                if abs(float(claimed) - ratio_real) > 0.01:
+                    ratio_problems.append(
+                        f"{doc}:{lineno} 写 {claimed}，实测 {ratio_real}")
+    ratio_ok = not ratio_problems
+
+    detail = (f"README 写 {claimed_lines} 行 / {claimed_modules} 个模块；"
+              f"实测 {m['lines']} 行 / {m['modules']} 个模块"
+              f"（口径：log_ai_compressor/**/*.py 非空非注释行）；"
+              f"README 写自证主张 {found or '未找到'} 条，"
+              f"本文件实际登记 {expected} 条；"
+              f"测试/主代码行数比实测 {ratio_real}")
+    if ratio_problems:
+        detail += "；" + "；".join(ratio_problems[:3])
+    return claim("README 工程指标与仓库一致",
+                 metrics_ok and counts_ok and ratio_ok, detail)
 
 
 # 「本项目」自己的口径列。它们的存在本身就说明这是一张**证据保留率**表。
@@ -267,53 +315,132 @@ _BENCH_VERDICTS = (("交付", "verdict_delivery"),
                    ("同预算", "verdict_budget"),
                    ("全量", "verdict_full"))
 
+# 胜负是**对某个对照组**说的，这句话没有对照组就是残句。
+#
+# v2.11.0 那版判据根本不知道对照组是谁：`line.find(口径标签)` 之后才
+# 开始找场次，于是「同预算档对 **LogsLop**：10 胜 0 平 0 负」被当成
+# 「对 Drain3 的 8 胜 1 平 1 负」而报假漂移 —— **一条会误报的门禁比
+# 没有门禁更糟**，它把真漂移淹没在噪音里。
+#
+# 基线里对 LogsLop **只有同预算一个口径**的实测（`verdict_budget_logslop`
+# = 10 胜），所以「对 LogsLop 的交付/全量战绩」是**无法对账**的断言：
+# 拿 Drain3 的数字去比是拿错尺子量，默默放过是漏。单列成 `unverifiable`
+# 报进 detail，让「这条门禁管不到哪些」是**可见的**，而不是猜的。
+_VERDICT_COUNTERPARTS = {"Drain3": "", "LogsLop": "_logslop"}
+_DEFAULT_COUNTERPART = "Drain3"
 
-def _bench_verdict_counts(datasets: dict) -> dict:
-    """从基线里每个数据集的 `verdict_*` 重算三个口径对 Drain3 的场次。"""
+
+def _bench_verdict_counts(datasets: dict, counterpart: str = "Drain3") -> dict:
+    """从基线里每个数据集的 `verdict_*` 重算三个口径对某对照组的场次。"""
+    suffix = _VERDICT_COUNTERPARTS[counterpart]
     out = {}
     for label, key in _BENCH_VERDICTS:
         tally = {"胜": 0, "平": 0, "负": 0}
         for rec in datasets.values():
-            v = rec.get(key)
+            v = rec.get(key + suffix)
             if v in tally:
                 tally[v] += 1
         out[label] = tally
     return out
 
 
-def _bench_verdict_problems(doc_name: str, doc_text: str, counts: dict):
+def _verdict_has_data(datasets: dict, label: str, counterpart: str) -> bool:
+    """基线里到底有没有这个「口径 × 对照组」的实测。
+
+    **「全是 0」和「没测过」是两件事。** 缺 `verdict_full_logslop` 时重算
+    出来是 0 胜 0 平 0 负，拿它去比文档里的「10 胜 0 平 0 负」会得到一条
+    **永远判红**的门禁；反过来把它当成真的 0，又会永远判绿。
+    混同这两者，就是这个项目最熟的那种病：测量环节静默失能。
+    """
+    key = dict(_BENCH_VERDICTS)[label] + _VERDICT_COUNTERPARTS[counterpart]
+    return any(key in rec for rec in datasets.values())
+
+
+def _verdict_claims(line: str):
+    """把一行拆成 `[(口径标签或 None, (胜,平,负), 对照组或 None), ...]`。
+
+    口径与场次必须**同行**，但口径**不一定写在前面** ——
+    「对 Drain3 的战绩：0 胜 1 平 9 负（交付口径）。」把口径放在句尾括号里，
+    而 v2.11.0 那版是 `line.find(标签)` 之后才开始找场次，于是这句话
+    **一处都没校到**（实测 `checked=0`）：一句对外的战绩被判成没有断言。
+    同一份代码里「对 LogsLop 误报」和「标签在后的漏校」是**同一个
+    位置假设的两面**，所以两边一起改。
+
+    改法：先把场次全找出来，每个场次归给**距离最近**的那个口径标签 /
+    对照组名，距离相同时取左边的那个（中文里限定词总是先引出被限定的数）。
+    没有标签也没有对照组的（「历史叙述里的 7 胜 2 负」）原样交出去，
+    由调用方按「无法判定口径」处理 —— 不猜。
+    """
+    matches = list(_VERDICT_RE.finditer(line))
+    if not matches:
+        return []
+    labels = sorted((line.find(lb), lb) for lb, _ in _BENCH_VERDICTS
+                    if line.find(lb) >= 0)
+    cps = sorted((line.find(cp), cp) for cp in _VERDICT_COUNTERPARTS
+                 if cp in line)
+
+    def _nearest(table, pos: int):
+        # `pos` 必须显式传进来：写成闭包去抓推导式的 `m` 会拿到
+        # NameError —— 推导式有自己的作用域，嵌套 lambda 看不见它。
+        if not table:
+            return None
+        return min(table, key=lambda p: (abs(p[0] - pos),
+                                         p[0] > pos))[1]
+
+    return [(_nearest(labels, m.start()), _verdict_triple(m),
+             _nearest(cps, m.start()))
+            for m in matches]
+
+
+def _bench_verdict_problems(doc_name: str, doc_text: str, datasets: dict,
+                            counts: dict | None = None):
     """把文档里「N 胜 N 平 N 负」的断言逐处与重算结果比对。
+
+    返回 (问题列表, {口径: [行号]}, 校过的处数, 备注)。
 
     口径标签与场次**必须同一行**：靠固定字符窗口跨行匹配，会在
     「交付上限」「全级别」这些含「交付」「全量」的词上乱抓 ——
     一条会误报的门禁比没有门禁更糟，它把真漂移淹没在噪音里。
 
-    一行里同一口径可能出现多次（同预算 + 全量都是 8/1/1），
-    所以只要**有一个**场次对得上就算过 —— 要求「全中」会逼着作者
-    删掉合法的重复表述。
+    同一行里同一口径可能出现多次（同预算 + 全量都是 8/1/1），
+    但归到该口径的**每一个**场次都要对得上。v2.11.0 那版是
+    「只要有一个对得上就算过」—— 那是为了容忍合法重复表述，
+    但它同时放过了一行里写错的那一个：**一行两个数、一个对一个错，
+    门禁判绿**。多报一个不存在的胜比错一个百分点严重得多，所以这里
+    逐个校，「一个对得上就放过」是这条门禁最危险的简化。
+
+    `counts` 省略时按默认对照组（Drain3）现算。
     """
     problems: list = []
     seen: dict = {}
     checked = 0
+    unverifiable: list = []
+    unlabeled = 0
+    default_counts = counts if counts is not None \
+        else _bench_verdict_counts(datasets)
     for lineno, line in enumerate(doc_text.splitlines(), 1):
-        for label, _key in _BENCH_VERDICTS:
-            at = line.find(label)
-            if at < 0:
+        for label, triple, cp in _verdict_claims(line):
+            if label is None:
+                # 历史叙述里的「7 胜 2 负」不带口径，无法判定该拿哪把尺子量。
+                # 计入统计并报进 detail，而不是猜一个 —— 猜错就是假红。
+                unlabeled += 1
                 continue
-            found = [_verdict_triple(m) for m in _VERDICT_RE.finditer(line, at)]
-            if not found:
+            cp = cp or _DEFAULT_COUNTERPART
+            if not _verdict_has_data(datasets, label, cp):
+                unverifiable.append(f"{doc_name}:{lineno} {label} vs {cp}")
                 continue
-            seen.setdefault(label, []).append(lineno)
-            checked += 1
-            want = counts[label]
+            want = (default_counts if cp == _DEFAULT_COUNTERPART
+                    else _bench_verdict_counts(datasets, cp))[label]
             expect = (want["胜"], want["平"], want["负"])
-            if expect not in found:
-                got = found[0]
+            checked += 1
+            seen.setdefault(label, []).append(lineno)
+            if triple != expect:
                 problems.append(
-                    f"{doc_name}:{lineno} {label} 胜负：文档 "
-                    f"{got[0]} 胜 {got[1]} 平 {got[2]} 负 vs 实测 "
+                    f"{doc_name}:{lineno} {label} vs {cp} 胜负：文档 "
+                    f"{triple[0]} 胜 {triple[1]} 平 {triple[2]} 负 vs 实测 "
                     f"{expect[0]} 胜 {expect[1]} 平 {expect[2]} 负")
-    return problems, seen, checked
+    return problems, seen, checked, {
+        "unverifiable": unverifiable, "unlabeled": unlabeled}
 
 
 def _verdict_triple(m) -> tuple:
@@ -323,6 +450,17 @@ def _verdict_triple(m) -> tuple:
 # 每一处**当前**结论的副本都要对账。v2.11.0 才发现第三份：docs/FAQ.md 的
 # Q2 有一张同口径的表，v2.10.0 那条只认 README 的门禁照样放过它。
 _BENCH_DOCS = ("README.md", "docs/BENCHMARK.md", "docs/FAQ.md")
+# 含对外战绩、但**没有**基准表的文档。
+#
+# v2.11.0 的纳管判据是 `_bench_tables(...)` ——「这份文档里认得出基准表」。
+# docs/POSITIONING.md 认不出表，于是成了法外地带：它重复着 README 的三个
+# 口径战绩（交付 1 处 / 同预算 2 处 / 全量 1 处），看门狗却既不纳管、
+# 也不点名。**「没被禁」不等于「被想过」** —— 上一轮刚在 rules.engine 上
+# 记过一次同款教训，这里是同一族的第二次。
+#
+# 所以纳管判据要按**受校的内容**分，而不是按「有没有表」：
+# 表格口径对 `_BENCH_DOCS` 生效，胜负口径对这两个集合的**并集**生效。
+_BENCH_VERDICT_DOCS = _BENCH_DOCS + ("docs/POSITIONING.md",)
 # 刻意排除的文档，附理由。没有理由的豁免等于给自己开后门。
 _BENCH_DOC_EXEMPT = {"CHANGELOG.md": "历史快照，AGENTS.md §2.4 明说刻意不改写"}
 
@@ -404,10 +542,10 @@ def _pct(cell: str):
 
 
 def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
-                         eps_pp: float = 0.05):
+                         eps_pp: float = 0.05, check_tables: bool = True):
     """对**一份**文档里的所有基准表逐格对账，外加口径胜负场次。
 
-    返回 (表内行数, 校验过的百分数格数, 校验过的胜负处数, 问题列表)。
+    返回 (表内行数, 校验过的百分数格数, 校验过的胜负处数, 问题列表, 备注)。
     三档计数都单独报出来，是因为「扫了 0 个却报通过」比报错更危险 ——
     摘要里必须看得出这一轮到底校了多少东西。
 
@@ -415,16 +553,30 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
     而测试要能喂一段"故意改坏的表格"进去 —— 这是本仓库的硬规矩，
     **一条从不曾变红过的门禁等于没有门禁**。
 
+    `check_tables=False` 用于**只带战绩、不带表**的文档
+    （docs/POSITIONING.md）：对它找表是「找不到」，而「找不到」已经是
+    另一个意思（那份文档本来就该没表），混在一起报就是假红。
+
     注意 `claim_benchmark_table` **不能**加参数：`prove.py::_run_claim` 见到
     任何带参数的 claim 就会把命令行 path 塞进去当成"从别的目录读基线"。
     """
     problems: list = []
     rows_total = 0
     checked = 0
-    tables = _bench_tables(doc_text)
-    if not tables:
-        return 0, 0, 0, [f"{doc_name} 里找不到基准表（表头需含「标注事件」或两个以上本项目口径列）"]
-    for cols, body in tables:
+    seen_datasets: set = set()
+    tables = _bench_tables(doc_text) if check_tables else []
+    if check_tables and not tables:
+        problems.append(
+            f"{doc_name} 里找不到基准表（表头需含「标注事件」或两个以上本项目口径列）")
+    for idx, (cols, body) in enumerate(tables, 1):
+        # 表头还在、数据行全没了：`_bench_tables` 照样把它认成一张表
+        # （判据看的是表头 + 分隔行），而下面 `for raw in body` 一行都不跑，
+        # 于是 rows/checked 全是 0、problems 全空 —— **v2.11.0 实测判通过**。
+        # 「表在、行没了」比「表没了」更难发现：表还在，肉眼看着好好的。
+        if not body:
+            problems.append(
+                f"{doc_name} 第 {idx} 张基准表只剩表头、一行数据都没有")
+            continue
         for raw in body:
             cells = [c.strip().replace("**", "") for c in raw.strip().strip("|").split("|")]
             name = cells[0].strip()
@@ -436,6 +588,7 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
                 problems.append(f"{doc_name} 表里有、基线里没有的数据集：{name}")
                 continue
             rows_total += 1
+            seen_datasets.add(name)
             if any(idx >= len(cells) for idx in cols.values()):
                 problems.append(f"{doc_name} {name} 那行列数不足")
                 continue
@@ -467,10 +620,24 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
             if got.isdigit() and int(got) != rec["events"]:
                 problems.append(
                     f"{doc_name} {name} 标注事件：文档 {got} vs 实测 {rec['events']}")
-    v_problems, _seen, v_checked = _bench_verdict_problems(
-        doc_name, doc_text, _bench_verdict_counts(datasets))
+    # 基线里有、本文档一张表里却一行都没有的数据集。
+    #
+    # 只判「表还在不在」漏掉了**更常见**的那一半：删掉一行（哪怕只删
+    # HPC 那一行），表还是齐的、每一格也都对得上，于是门禁照样绿 ——
+    # 而「少了一个负例」的报告比「数字错了一个百分点」的报告危险得多，
+    # 因为读者会以为那一行不存在。v2.11.0 实测：删掉 1 行 problems=[]。
+    #
+    # 必须与表格检查同进同退：`check_tables=False` 的文档（POSITIONING.md）
+    # 本来就没有表，这里照样报一遍就是十条凭空捏造的假红 —— 而一条会
+    # 误报的门禁比没有门禁更糟。
+    if check_tables:
+        for name in sorted(set(datasets) - seen_datasets):
+            problems.append(
+                f"{doc_name} 缺数据集 {name} 的行（基线里有，本文档没有）")
+    v_problems, _seen, v_checked, notes = _bench_verdict_problems(
+        doc_name, doc_text, datasets)
     problems.extend(v_problems)
-    return rows_total, checked, v_checked, problems
+    return rows_total, checked, v_checked, problems, notes
 
 
 def claim_benchmark_table() -> dict:
@@ -533,30 +700,44 @@ def claim_benchmark_table() -> dict:
     rows_total = 0
     checked = 0
     verdicts = 0
+    unverifiable: list = []
+    unlabeled = 0
     seen_docs = []
-    for doc_name in _BENCH_DOCS:
+    for doc_name in _BENCH_VERDICT_DOCS:
         doc_path = ROOT / doc_name
         if not doc_path.is_file():
             problems.append(f"{doc_name} 不存在")
             continue
         text = doc_path.read_text(encoding="utf-8")
-        n_tables = len(_bench_tables(text))
-        r, c, v, probs = _bench_doc_problems(doc_name, text, datasets)
+        check_tables = doc_name in _BENCH_DOCS
+        n_tables = len(_bench_tables(text)) if check_tables else 0
+        r, c, v, probs, notes = _bench_doc_problems(
+            doc_name, text, datasets, check_tables=check_tables)
         rows_total += r
         checked += c
         verdicts += v
-        seen_docs.append(f"{doc_name}×{n_tables}")
+        unverifiable.extend(notes["unverifiable"])
+        unlabeled += notes["unlabeled"]
+        seen_docs.append(f"{doc_name}×{n_tables}" if check_tables
+                         else f"{doc_name}(无表)")
         problems.extend(probs)
 
-    return claim(
-        "基准表与实测一致", not problems,
-        f"对账 {'、'.join(seen_docs) or '无'} 共 {rows_total} 行："
-        f"{checked} 格百分数 + {verdicts} 处胜负场次"
-        f"（容差 0.05pp）；"
-        + ("；".join(problems[:6]) if problems else "全部一致")
-        + ("；…" if len(problems) > 6 else "")
-        + "｜重跑：python scripts/benchmark_loghub.py --budgets 32000 "
-          "--write-baseline")
+    detail = (f"对账 {'、'.join(seen_docs) or '无'} 共 {rows_total} 行："
+              f"{checked} 格百分数 + {verdicts} 处胜负场次"
+              f"（容差 0.05pp）；"
+              + ("；".join(problems[:6]) if problems else "全部一致")
+              + ("；…" if len(problems) > 6 else ""))
+    # 覆盖不到的地方必须**说出来**。一条只报「校了 N 处全对」的门禁，
+    # 读的人无从知道剩下的断言是「校过且没问题」还是「压根没进射程」——
+    # 而这两种在界面上长得一模一样。
+    if unverifiable:
+        detail += (f"｜另有 {len(unverifiable)} 处无实测可对账"
+                   f"（如 {'、'.join(unverifiable[:2])}）")
+    if unlabeled:
+        detail += f"；{unlabeled} 处胜负未带口径，无从判定对账对象，仅统计不判红"
+    return claim("基准表与实测一致", not problems,
+                 detail + "｜重跑：python scripts/benchmark_loghub.py "
+                          "--budgets 32000 --write-baseline")
 
 
 def claim_readme_module_tree() -> dict:
@@ -582,6 +763,41 @@ def claim_readme_module_tree() -> dict:
     return claim("架构树列全包内模块", not missing,
                  f"docs/ARCHITECTURE.md 的架构树缺 {missing}" if missing
                  else f"{len(mods)} 个模块全部在架构树里")
+
+
+# 接入层 = 包内「库层与门面之外」的一级模块或目录。
+#
+# v2.11.0 那版把名单写死成 `("cli", "web", "mcp", "ai")`，于是**新增第 5 个
+# 接入层会被完全跳过**：判据是 `_layer_of(p) in layer_roots`，扫的是一个
+# 子集，子集之外的越层 import 一条都看不见；而 `scanned_empty` 只管
+# 「全部扫到 0 个」，扫到 3 个它就满意了。
+# **这已经是同一种病第三次了**：守的是「已经看见的那一半」。
+#
+# 改成自动发现全部一级层（排除库层与门面），再与声明式名单比对：
+# 新增接入层 → 两个集合不再相等 → 判红，detail 直接点名是哪一层。
+_LAYER_LIBRARY = frozenset({"core", "rules", "export"})
+_LAYER_FACADE = frozenset({"service", "constants", "__init__", "__main__"})
+# 声明式名单：它不是「要扫哪些」，而是「应该存在哪些」，两者必须相等。
+_LAYER_ROOTS = ("cli", "web", "mcp", "ai")
+
+
+def _layer_of(p: Path, pkg: Path) -> str:
+    """该文件属于哪一层。
+
+    `cli.py` 直接躺在包根，`relative_to(pkg).parts[0]` 是 ``"cli.py"``
+    而不是 ``"cli"`` —— 漏掉它就等于漏掉 cli.py，所以顶层文件取 stem，
+    子目录才取首段目录名。
+    """
+    parts = p.relative_to(pkg).parts
+    return parts[0][:-3] if len(parts) == 1 and parts[0].endswith(".py") \
+        else parts[0]
+
+
+def _discover_layer_roots(pkg: Path) -> set:
+    """包内实际存在的接入层（一级模块或目录，排除库层与门面）。"""
+    skip = _LAYER_LIBRARY | _LAYER_FACADE
+    return {_layer_of(p, pkg) for p in pkg.rglob("*.py")
+            if _layer_of(p, pkg) not in skip}
 
 
 def claim_layering() -> dict:
@@ -621,22 +837,23 @@ def claim_layering() -> dict:
          只是 `log_ai_compressor`，不以禁用前缀开头，于是整条放行 ——
          而它拿到的 `core` 正是 core 层。现在判定导入的**基名是不是包**：
          是包就把每个被 import 的名字当成可能的子模块一起校。
+
+    **v2.11.1 修的一处**（第四次同族：又只守住了已经看见的那一半）：
+      5. `layer_roots` 是字面量 `("cli","web","mcp","ai")`，判据又是
+         `_layer_of(p) in layer_roots` —— **新增第 5 个接入层会被完全跳过**，
+         而 `scanned_empty` 只管「全部扫到 0 个」，扫到 3 个就满意。
+         现在 `_discover_layer_roots()` 自动发现全部一级层（排除库层与门面），
+         并要求发现结果与 `_LAYER_ROOTS` **相等**：加一层不登记就判红，
+         从名单里删一层也判红。
     """
     import ast
-    layer_roots = ("cli", "web", "mcp", "ai")
     banned_prefix = ("log_ai_compressor.core", "log_ai_compressor.export")
     pkg = ROOT / "log_ai_compressor"
-
-    def _layer_of(p: Path) -> str:
-        """该文件属于哪一层。
-
-        `cli.py` 直接躺在包根，`relative_to(pkg).parts[0]` 是 ``"cli.py"``
-        而不是 ``"cli"`` —— 漏掉它就等于漏掉 cli.py，所以顶层文件取 stem，
-        子目录才取首段目录名。
-        """
-        parts = p.relative_to(pkg).parts
-        return parts[0][:-3] if len(parts) == 1 and parts[0].endswith(".py") \
-            else parts[0]
+    # 自动发现 ≠ 声明即免检：两个集合必须**相等**，不相等就是有人加了一层
+    # 却没告诉门禁，或者有人从名单里删了一层却没删文件。两种都判红。
+    discovered = _discover_layer_roots(pkg)
+    drift = sorted(discovered ^ set(_LAYER_ROOTS))
+    layer_roots = tuple(sorted(discovered))
 
     def _package_of(p: Path) -> str:
         """该文件**所在的包** —— 相对导入的基准点。
@@ -688,7 +905,8 @@ def claim_layering() -> dict:
             out.extend(f"{base}.{a.name}" for a in node.names)
         return out
 
-    targets = sorted(p for p in pkg.rglob("*.py") if _layer_of(p) in layer_roots)
+    targets = sorted(p for p in pkg.rglob("*.py")
+                     if _layer_of(p, pkg) in layer_roots)
     violations = []
     for path in targets:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -711,7 +929,7 @@ def claim_layering() -> dict:
     scanned_empty = not targets
     per_layer = {}
     for p in targets:
-        k = _layer_of(p)
+        k = _layer_of(p, pkg)
         per_layer[k] = per_layer.get(k, 0) + 1
     detail = ("；".join(sorted(set(violations))[:6]) if violations
               else "实际扫描 %d 个文件（%s）AST 核验通过"
@@ -719,8 +937,12 @@ def claim_layering() -> dict:
                                              for kv in sorted(per_layer.items()))))
     if scanned_empty:
         detail = "**扫描到 0 个接入层文件** —— 门禁失能，不能判通过"
+    if drift:
+        detail = ("**发现结果与 _LAYER_ROOTS 不一致：" + "、".join(drift)
+                  + "**（新增接入层请同步 `_LAYER_ROOTS`；"
+                    "不在名单里就不会被扫，等于没有门禁）" + detail)
     return claim("分层：接入层只经 service 触达 core/export",
-                 not violations and not scanned_empty, detail)
+                 not violations and not scanned_empty and not drift, detail)
 
 
 def claim_optdeps() -> dict:
