@@ -220,7 +220,20 @@ CLUSTER_SIMILARITY_THRESHOLD = 0.85   # 聚类编辑距离相似度阈值
 SIMILARITY_PRESETS = {"strict": 0.95,
                       "standard": CLUSTER_SIMILARITY_THRESHOLD,
                       "lenient": 0.70}
-MAX_SIMILARITY_COMPARE = 256          # 相似度回退比较的最大模板数（性能保护）
+# 相似度回退的**开关**：<= 0 表示整个关掉相似度回退（只走精确指纹匹配）。
+#
+# 它曾经叫「比较的最大模板数」，用来把候选集截成最近 256 个 —— 那等于
+# 用**结果正确性**换算力：候选集变成「最近 N 个」之后，第 1 个簇到第
+# (桶长 - 256) 个簇永远比不到，聚类结果**依赖日志行序**（实测复现见
+# `tests/test_cluster_order_independence.py`）。
+#
+# 试过「超上限时按模板字典序取前 N 个」，**更糟**：固定的前 N 个会让
+# 字母靠后的模板永远找不到同类（Loghub Mac 的 INFO 桶 604 -> 1604 个簇，
+# 同预算覆盖率 85.8% -> 64.4%）。任何「固定取前 N」的截断都是系统性偏袒。
+#
+# 所以现在**没有上限**：候选集是整个级别桶，性能靠 `_find_similar` 里
+# 「ratio <= 2*min(|a|,|b|)/(|a|+|b|)」这个精确长度上界来保。
+MAX_SIMILARITY_COMPARE = 256
 TIMESTAMP_CACHE_SIZE = 65536          # 时间戳解析缓存上限（防内存膨胀）
 PROGRESS_EVERY_LINES = 16384          # 进度回调触发行数间隔
 CANCEL_CHECK_EVERY_LINES = 4096       # 取消检测行数间隔

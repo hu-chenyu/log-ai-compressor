@@ -14,7 +14,7 @@ v2 写下这份文档时，P0 里四条只完成了两条。v3 的状态：
 | 证据 ID + 报告可追溯 | ✅ 已完成 | `core/evidence.py`：evidence_id（确定性 sha256）+ 文件 + 行号区间 + 原文摘要；`log-ai-compressor verify --report` 重读原文逐条核对，日志被改/被删报 `TAMPERED`（退出码 1） |
 | 对抗性评测集 + 评分卡进 CI | ✅ 已完成 | `scripts/adversarial_eval.py`：10 场景 35 项，100% 正确弃权、0% 自信错误率；CI 门禁 |
 | MCP 工具描述改写成 Agent 剧本 | ✅ 已完成 | `INSTRUCTIONS` 从功能清单改成使用剧本（教 Agent **不要**自己 grep、不要把 LIKELY 说成根因、不要把共现说成因果）+ `SKILL.md` |
-| 接 Loghub 2.0 打榜 | ✅ 已完成 | `scripts/benchmark_loghub.py`，10 个数据集实测 **同预算档 8 胜 1 平 1 负**（vs Drain3；交付口径 1 胜 9 负、全量口径 8 胜 1 平 1 负，三个口径都报，见 README「证据保留率 vs Drain3」一节） |
+| 接 Loghub 2.0 打榜 | ✅ 已完成 | `scripts/benchmark_loghub.py`，10 个数据集实测 **同预算档 8 胜 1 平 1 负**（vs Drain3；交付口径 0 胜 1 平 9 负、全量口径 8 胜 1 平 1 负，三个口径都报，见 README「证据保留率 vs Drain3」一节） |
 
 v3 新增的三件事（v2 没识别的缺口）：
 

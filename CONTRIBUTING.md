@@ -1,0 +1,195 @@
+# 贡献指南
+
+面向人类贡献者。AI agent 与自动化工具请看 [`AGENTS.md`](AGENTS.md)
+（两者在「不许造数字」「门禁必须可失效」「不许对着基准调参」这三条上是同一套纪律）。
+
+先读一遍 [`AGENTS.md`](AGENTS.md) 再动手 —— 那里写的是**这个仓库的形状**，
+本文写的是**流程**。
+
+---
+
+## 1. 环境
+
+```bash
+git clone https://github.com/hu-chenyu/log-ai-compressor
+cd log-ai-compressor
+python -m venv .venv && .venv\Scripts\activate      # Windows
+pip install -r requirements-dev.txt
+```
+
+Python 3.11 起（`pyproject.toml` 的 `requires-python` 下限，CI 的最低矩阵档）。
+
+硬依赖只有 PyYAML。`web` / `mcp` / `ai` 是可选 extra，装不上也不影响
+core/rules/export 三层与全部核心测试 —— 但 `requirements-dev.txt` 会把它们
+都装上，因为要真跑那三层的测试。
+
+**Windows 用户**：`start.bat` 是 Windows 一等入口（不只是开发便利，
+CI 的 `windows-3.12` 矩阵也在守它）。它必须保持**纯 ASCII + CRLF**，
+中文提示一律放在 Web 界面里 —— cmd.exe 逐字节按控制台代码页解析批处理，
+一个非 ASCII 字节就可能让每行开头被吞、程序永远起不来。
+
+## 2. 跑起来看看
+
+```bash
+log-ai-compressor run examples/sample_system.log -f summary
+log-ai-compressor verify --report report.json      # 重读原文自校验
+python -m pytest -q                                # 全量测试应该十几秒内跑完
+python scripts/prove.py                            # 10 条自证主张应全部成立
+```
+
+## 3. 分支与提交
+
+不要在 `main` 上直接提交：
+
+```bash
+git checkout -b fix/short-description
+```
+
+提交信息用 [Conventional Commits](https://www.conventionalcommits.org/)。
+**subject 写为什么，不写什么** —— 「什么」git 已经知道了：
+
+```
+fix(bench): 判定按计数比，胜负直接进报告；两个门禁测试本身是错的
+fix(ci): 覆盖率是平台相关的 —— 门禁第一次运行就抓到我对口径的错误假设
+fix(clustering): 相似度回退只比最近 256 个簇，实测出真实的行序依赖
+```
+
+scope 用真实子系统：`core` / `clustering` / `analysis` / `export` / `ci` /
+`bench` / `docs`。
+
+## 4. 测试
+
+```bash
+python -m pytest -q                                        # 全量
+python -m pytest tests/test_clustering.py -q               # 单文件
+python -m pytest --cov=log_ai_compressor --cov-report=term-missing
+```
+
+三条写测试时的规矩：
+
+1. **每条降级分支配一条「正常路径没被写坏」的对照。**
+   降级写成「恒返回空」时测试照样是绿的 —— 没有对照就分不出
+   「异常时返回空」和「什么都没干」。
+
+2. **新增门禁/断言必须配一条「故意做坏 → 必须变红」的测试。**
+   一个从未曾变红过的门禁等于没有门禁。范式见
+   `tests/test_prove_claims_gate.py`。
+
+3. **别用 `skip` 掩盖真失败。** 子集运行导致的 `prove.py` 假失败
+   （`_is_full_run` 会把子集误判成全量）有专门的豁免标记，不是让你跳过整条主张。
+
+## 5. 门禁
+
+CI 跑六道，全部必须在本地先跑通（见 [`AGENTS.md` §4](AGENTS.md#4-ci-的六道门禁)）。
+最常用的三条：
+
+```bash
+ruff check log_ai_compressor tests scripts
+python scripts/prove.py
+python scripts/adversarial_eval.py
+```
+
+**不要通过删断言、跳过测试、放宽阈值让 CI 变绿。**
+如果你发现某道门禁本身有 bug，修门禁并补上它的可失效性测试 ——
+`claim_layering` 扫了 0 个文件却报「通过」就是现成的例子。
+
+## 6. 基准
+
+```bash
+python scripts/fetch_datasets.py --all     # Loghub 2.0，约 178 MB，不入库
+python scripts/benchmark_loghub.py --no-logslop --no-drain3 --budgets 32000
+```
+
+全量 10 个数据集很慢（单是 Hadoop 就要对 18 万行做 4 次完整分析，
+实测单次约 194 秒）。迭代时用 `--datasets HPC` 之类的子集。
+
+**跑基准时不要并发跑别的东西。** 分析是纯 CPU 密集的，并发跑测试会把
+两边的墙钟时间一起拉长好几倍，最后谁都说不清「这次改动花了多久」。
+
+报告三个口径（交付 `top_n=20` / 同预算 32k / 全量），因为它们回答三个不同的问题，
+混着说就是不诚实。判定按**事件种数**比、0.05pp 内记平 —— 报告只有一位小数，
+落在舍入误差里的差不是领先。
+
+### 不许对着基准调参
+
+这是最重要的一条。改阈值、改掩码规则、改 `top_n` 默认值来让某个数据集赢，
+得到的领先不是领先 —— 你已经把评测集也一起改了。
+
+每次「修好了某数据集」的提交必须**全量重跑 10 个数据集**，并给出
+「哪些变了、为什么」。只报告变好的那一个数据集等于隐瞒。
+
+两个数据集各自要求不同的规则、且没有一条全局规则能同时满足时，
+**诚实的答案是把这个矛盾写进文档**，不是折中出一个两边都次优的阈值。
+（见 [`CHANGELOG.md`](CHANGELOG.md) 里 Proxifier 与 HPC 的那几轮。）
+
+## 7. PR
+
+- 一个 PR 一件事。跨两层（core + 接入层）的重构请拆开。
+- 描述里写**为什么现在改**，以及**怎么验证的**（贴门禁输出或基准对比）。
+- 动了对外数字（README / docs / CHANGELOG）：说明复现命令，并确认
+  `scripts/prove.py` 全绿。`prove.py` 是逐条重算的，文档漂移它必红。
+- 门禁有红的且你打算「先合了再说」：那不叫门禁。
+
+## 8. 发版
+
+固定顺序，每一步都有它的理由：
+
+```bash
+# 1. 版本号 + CHANGELOG + 提交，推分支
+# 2. 发 tag，推 tag —— 等 CI 绿
+git tag -a vX.Y.Z -m "..."
+git push origin vX.Y.Z
+
+# 3. CI 绿之后才构建，并立刻记下哈希
+python -m build --sdist --wheel
+sha256sum dist/*
+
+# 4. 上传 GitHub Release 附件 + PyPI（文件名里带同一对哈希）
+# 5. 用公开 API 逐条核实，不看页面渲染
+```
+
+- **先 tag、后构建。** 反过来的话，任何上传环节被卡住都会留下
+  「tag 已推但产物没记下哈希」的中间态。
+- **三方 sha256 必须逐字节相同**：本地构建产物 == GitHub Release 附件 digest
+  == PyPI 的 `digests` 字段。用
+  `GET /repos/{owner}/{repo}/releases/tags/{tag}` 拿附件的 `digest`，
+  不靠页面底部 Assets 区块是否渲染出来（那是懒加载 fragment，
+  在很多客户端里长期转圈，**看不到不等于没上传**）。
+- 发布后改已推送内容 = 换版本号重发，不要原地修。
+
+## 9. 撤回
+
+这个仓库撤回过多次**发布数字**与**修法**（v2.7.0 / v2.9.5 / v2.9.6 / v2.9.8 /
+v2.9.9 各有记述，完整清单见 [`CHANGELOG.md`](CHANGELOG.md) 里标着「撤回」的条目）。
+发现对外数字错了而修不好，正确做法是**撤回并写清原因**，不是换个措辞让它
+看着没那么糟。
+
+值得注意的是其中两次的性质不同，值得分开看：
+
+- **撤回数字**（v2.7.0 的 Hadoop 91.4%、v2.9.6 里对 v2.9.4 基准的撤回）——
+  数字本身错了或不可复现。
+- **撤回修法**（v2.9.8 的「字面词元守卫」）—— 数字在涨，但产品的交付口径
+  崩了一半。**指标变好不等于产品变好**，这类撤回更容易被忽略。
+
+撤回记录**不要删改**。后来的版本在 CHANGELOG 里追加
+「此前发布的 X 已撤回，原因是 Y」，让读者看到纠正过程本身。
+一个会公开撤回自己招牌数字的项目，它剩下的数字才有分量。
+
+## 10. 代码风格
+
+- `ruff` 管，配置在 `pyproject.toml`；行长上限 110。
+- 行尾按 `.gitattributes`：`*.bat` 强制 CRLF，其余源码与文档统一 LF。
+  改完用**二进制读**复核 —— `read_text()` 会走通用换行把 CRLF 归一成 LF，
+  自检会得到一个百分之百确定的假结论。
+- 公开函数写中文 docstring，说明**为什么这样设计**，不是复述函数名。
+  这个仓库的注释密度高是有意的：很多决策的约束条件不写在代码里就没人知道。
+- 类型注解齐全（`py.typed` 已在包里），新增公开函数请补上。
+
+---
+
+## 相关文档
+
+[`README.md`](README.md) · [`AGENTS.md`](AGENTS.md) · [`CHANGELOG.md`](CHANGELOG.md) ·
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) ·
+[`docs/BENCHMARK.md`](docs/BENCHMARK.md) · [`docs/POSITIONING.md`](docs/POSITIONING.md) ·
+[`docs/FAQ.md`](docs/FAQ.md)
