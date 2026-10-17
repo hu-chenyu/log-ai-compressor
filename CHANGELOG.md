@@ -10,7 +10,9 @@
 
 ## [2.11.0] - 2026-10-17 — **未发布**，待发版时对账 pyproject 版本号
 
-**一整轮外部审查查出 4 个真缺陷，全部修掉；其中 3 个是「门禁绿着，而它什么都没校」。**
+**两轮外部审查共查出 11 个真缺陷，全部修掉。其中 7 个是「门禁绿着，而它
+什么都没校」或「判据量错了东西还报通过」—— 而第二轮的 7 个里有 4 个，
+就出在第一轮刚写的那批门禁上。**
 
 这一版的共同形状不是「代码写错了」，而是**校验环节失能**：文档、门禁、
 退出码各自看起来都在尽职，串起来却没有任何一处真的在守它声称的东西。
@@ -70,6 +72,90 @@ AGENTS.md §4b 的边界表。
 - `pyproject.toml` 的 web extra 漏声明 `pydantic`（`web/server.py:22` 直接
   import，一直靠 fastapi 顺带装上）。**正因为能跑才特别难发现。**
 
+### 第二轮复核：7 个残留缺陷，其中 4 个出在上一节刚写的门禁上
+
+对上一节的修复再做一轮外部复核，查出 7 个残留缺陷。**其中 4 个就在上面那张
+「新增门禁」表里** —— 上一节新写的门禁，四条里有四条带着洞。
+
+这件事值得单独记一笔，因为它是这个项目最该被记住的一条：**写了门禁**和
+**门禁真的在守**是两件事，而这两者的比例这一次是 **4/4**。七个洞的形态还
+完全一致 —— 全是「测量环节静默失能，且偏向让人以为没问题」：空表判通过、
+判据不知道对照组是谁、重复断言没人纳管、名单是字面量漏扫新层。
+与这个项目要解决的原始问题同构。
+
+**1. 表头还在、数据行没了 → 判通过（🔴）**
+
+`_bench_tables` 认表看的是「表头 + 分隔行」，所以删光数据行之后它照样返回
+一张表；而逐格循环一行都不跑，于是 `rows=0 cells=0 problems=0`。实测：
+FAQ.md 删掉全部 10 个数据行 → 判通过。
+
+**只删一行也一样绿**，而这才是更常见的漏法：每一格单独看都对得上，表也齐，
+于是报告里少了一个负例（HPC 那一行）却没有任何东西叫。现在两种都判红：
+「表头在但没有数据行」，以及「基线里有、本文档一张表里都没有」的数据集。
+
+**2. 胜负判据既拿错尺子、又漏校一半（🔴）**
+
+v2.11.0 的判据是 `line.find(口径标签)` 之后才开始找场次，于是两个方向同时坏：
+
+- **假红**：「同预算档对 **LogsLop**：10 胜 0 平 0 负」被拿去和 Drain3 的
+  8 胜 1 平 1 负 比。一条会误报的门禁比没有门禁更糟，它把真漂移淹没在噪音里。
+- **漏校**：「对 Drain3 的战绩：0 胜 1 平 9 负（**交付口径**）。」把口径写在
+  句尾括号里，实测 `checked=0` —— 一句对外战绩被判成「没有断言」。
+
+还带出第三个：同一行两个场次时是「有一个对得上就算过」，于是**一行里写错的
+那个数被同行写对的数顺手放过**。多报一场不存在的胜比错一个百分点严重得多。
+
+改法：场次先全找出来，每个归给**距离最近**的口径标签与对照组名（口径与对照
+组一视同仁）。基线里对 LogsLop **只有同预算一个口径**的实测，所以「对 LogsLop
+的交付/全量战绩」是**无法对账**的断言 —— 拿 Drain3 的数去比是拿错尺子量，
+当成真的 0 又会永远绿。现在它被单列成 `unverifiable` 报进 detail，
+让「这条门禁管不到哪些」是可见的而不是猜的。
+
+**3. docs/POSITIONING.md 重复着对外战绩，却不在任何射程内（🟠）**
+
+它含 4 处胜负断言（交付 1 / 同预算 2 / 全量 1），但**没有基准表**，而纳管判据
+是「这份文档认不认得出基准表」—— 于是看门狗既不纳管也不点名。
+**「没被禁」不等于「被想过」**，与上一节记下的 `rules.engine` 直连是同一族教训。
+
+现在纳管按**受校的内容**分：表格口径对 `_BENCH_DOCS`，胜负口径对
+`_BENCH_VERDICT_DOCS`（并集，含 POSITIONING.md）。实测覆盖面从 3 份 / 30 行
+升到 **4 份 / 40 行、160 格百分数 + 22 处胜负场次**。
+
+**4. `layer_roots` 是字面量（🟠）**
+
+判据是 `_layer_of(p) in layer_roots`，扫的是一个**子集**；新增第 5 个接入层会被
+完全跳过，而 `scanned_empty` 只管「全部扫到 0 个」，扫到 3 个它就满意。
+
+这是同一个家族**第四次**出现（cli.py 当目录扫 → 相对导入 → `from pkg import sub`
+→ 字面量名单），每一次都只守住了已经看见的那一半。
+
+现在 `_discover_layer_roots()` 自动发现全部一级层（排除 core/rules/export 与
+service/constants），并要求发现结果与 `_LAYER_ROOTS` **相等**：加一层不登记
+判红，从名单里删一层也判红，detail 点名是哪一层。
+
+**5. web 模块 docstring 与实现互相打脸（🟡）**
+
+`web/server.py:9` 写「文件浏览接口限制在用户主目录内」，同文件 62–68 行写
+「这里**刻意不限主目录**」，`_within_root()` 在未设环境变量时直接 `return True`。
+对外的安全承诺写着与代码相反的话。
+
+**6. `LOG_AI_FS_ROOT` 只管住了一个接口（🟡）**
+
+`/api/fs/list` 走 `_list_dir()` 会过 `_within_root`，而 `/api/fs/file` 绕开它 ——
+旋钮存在却不同时管住两个接口，等于名不副实。（威胁模型下不可利用：只绑
+127.0.0.1 无鉴权，且该接口只返回元数据不返回内容。）现在两个接口共用一个闸门，
+并且**先查根、再查存在性** —— 反过来会泄露「根外路径是否存在」。
+
+**7. 又一个「回归发生了才 skip」（🟡）**
+
+`tests/test_service.py::test_top_n_truncates` 写着
+`if total_clusters <= 2: pytest.skip(...)`。截断逻辑失效、簇数塌缩，正是最该
+变红的时候，这条却会静默跳过。已改成现造 4 个异常模板 × 3 次，不依赖样例
+日志的簇数，`skip` 删除。
+
+（实测那个 skip **目前没有在生效** —— 样例日志当前 8 簇。它是潜伏陷阱，
+不是在放过已经发生的回归。）
+
 ### 新增门禁
 
 | 门禁 | 守的是什么 |
@@ -80,6 +166,16 @@ AGENTS.md §4b 的边界表。
 | `test_fingerprint_does_not_depend_on_how_the_path_was_spelled` | 路径写法不影响指纹；配套 4 条「路径无关身份仍有判别力」 |
 | `test_module_and_add_docstrings_do_not_describe_a_fixed_cap` | 描述层不许复活已删除的固定上限（另有一条**反向**钉住「必须写明现在是什么」） |
 | `test_every_direct_third_party_import_is_declared` | 直接 import 的第三方必须在 pyproject 声明，且映射表本身要守 |
+| `test_benchmark_table_with_header_but_no_rows_fails_loudly` | 表头保留、数据行删空 → 判红 |
+| `test_a_single_missing_dataset_row_fails_loudly` | 只删**一行**（HPC）也判红 —— 比删空表更常见 |
+| `test_verdict_against_logslop_is_not_judged_with_drain3_numbers` | 对 LogsLop 的战绩不拿 Drain3 的数字去比（防假红） |
+| `test_verdict_label_written_after_the_tally_is_still_checked` | 口径写在句尾括号里也校到（防漏校） |
+| `test_a_wrong_tally_next_to_a_right_one_is_still_caught` | 一行两个数、一个对一个错 → 错的那个判红 |
+| `test_verdict_with_no_measured_combination_is_reported_not_silently_green` | 无实测的「口径 × 对照组」单列成 unverifiable，不当成 0 |
+| `test_verdict_unlabeled_claims_are_counted_not_judged` | 没有口径的历史叙述只计数不猜尺子，但计数要可见 |
+| `test_doc_without_a_table_is_not_charged_for_missing_rows` | 无表文档不得报「缺数据集的行」—— 防新门禁自己造出假红 |
+| `TestLayeringGateDiscoversEntryLayers`（5 条） | 接入层自动发现：加一层不登记判红、删一层也判红、**登记之后必须真的扫它** |
+| `tests/test_web_server_boundaries.py`（5 条） | `/api/fs/file` 限根、不泄露根外路径是否存在、`can_go_up` 随根变 |
 
 ### 记成明示决定的已知例外
 
