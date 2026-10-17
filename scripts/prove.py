@@ -245,6 +245,112 @@ def claim_readme_metrics() -> dict:
         f"README 写自证主张 {found or '未找到'} 条，本文件实际登记 {expected} 条")
 
 
+def claim_benchmark_table() -> dict:
+    """README 的基准表必须与最近一次全量实测逐格相等（v2.10.0 新增门禁）。
+
+    为什么单列一条
+    --------------
+    `claim_readme_metrics` 校的是**工程指标**（行数 / 模块数 / 主张条数），
+    README 里另一张更显眼的表 —— 十行数据集 × 六个百分数 —— **从来没有被
+    任何东西校过**。后果不是理论上的：v2.9.9 修了 `mask_text` 的两处误伤
+    （`read/write`、`input/output` 被误判成路径），那次改动是正确的，
+    但它**改变了聚类结果**，于是
+
+        HPC          76 簇 / 85.1%   ->  79 簇 / 81.1%
+        Zookeeper    83 簇 / 92.1%   ->  83 簇 / 91.0%
+
+    README 与 docs/BENCHMARK.md 仍写着修复前的数字，六道门禁全绿。
+    「唯一负例只差 2 个事件」也一并变成了 5 个 —— 一条会误导读者的结论
+    被原样留在了最重要的那张表上。
+
+    这与 v2.9.5 撤回的那次是**同一个病**：对外数字，没有任何东西在校它。
+
+    怎么修才不会复发
+    ----------------
+    全量基准要跑两小时，进不了 CI。所以这里不重跑，而是对账：
+
+        docs/benchmark_baseline.json   ← --write-baseline 生成的实测快照
+        README 的表                     ← 人类维护的展示层
+
+    改了任何影响聚类的代码，两者就不一致，这条主张变红。重新实测的办法
+    写在 detail 里，不需要猜：
+
+        python scripts/benchmark_loghub.py --budgets 32000 --write-baseline
+
+    容差取 0.05pp：报告只有一位小数，0.05 以内的差与显示舍入分不开 ——
+    与 `verdict()` 用的判平容差是同一个数，口径一致。
+    """
+    import json
+    import re
+
+    baseline_path = ROOT / "docs" / "benchmark_baseline.json"
+    if not baseline_path.is_file():
+        return claim("README 基准表与实测一致", False,
+                     f"缺 {baseline_path.name}：没有实测基线就无法对账。"
+                     "跑 python scripts/benchmark_loghub.py --budgets 32000 "
+                     "--write-baseline 生成")
+    try:
+        base = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return claim("README 基准表与实测一致", False,
+                     f"{baseline_path.name} 解析失败：{exc}")
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    # 表头形如：| 数据集 | 标注事件 | 交付 top20 | **同预算 32k** | 全量 | Drain3 | ...
+    rows = re.findall(
+        r"^\|\s*([A-Za-z0-9_]+)\s*\|(\s*\d+\s*)\|([^|]*)\|([^|]*)\|([^|]*)\|"
+        r"([^|]*)\|([^|]*)\|", readme, re.M)
+    if not rows:
+        return claim("README 基准表与实测一致", False,
+                     "README 里找不到基准表（扫不到任何 `| 数据集 | 标注事件 |` 行）")
+
+    def num(cell: str):
+        m = re.search(r"(-?[\d.]+)\s*%", cell)
+        return float(m.group(1)) / 100 if m else None
+
+    eps_pp = 0.05        # 0.05pp，与 verdict() 的判平容差同口径
+    problems: list[str] = []
+    checked = 0
+    for name, events, delivery, budget, full, drain, logslop in rows:
+        rec = base.get("datasets", {}).get(name)
+        if rec is None:
+            continue                      # 表里有、基线里没有 -> 下面单独报
+        fields = (("交付", num(delivery), rec["delivery"]),
+                  ("同预算", num(budget), rec["budget32k"]),
+                  ("全量", num(full), rec["full"]),
+                  ("Drain3", num(drain), rec["drain3"]),
+                  ("LogsLop", num(logslop), rec["logslop"]))
+        for label, claimed, actual in fields:
+            if claimed is None or actual is None:
+                continue
+            checked += 1
+            # 在**百分点**上比，并给浮点表示留一丝余量。
+            # 写成 `abs(a - b) > 0.0005` 会在边界上误判：OpenStack 的
+            # LogsLop 实测是 0.1875、README 写 18.8%，而
+            # `0.188 - 0.1875` 在二进制下是 0.0005000000000000004，
+            # 刚好「大于」0.0005 —— 一条完全正确的表格被判成漂移。
+            diff_pp = abs(claimed - actual) * 100
+            if diff_pp > eps_pp + 1e-9:
+                problems.append(
+                    f"{name} {label}：README {claimed * 100:.1f}% vs "
+                    f"实测 {actual * 100:.1f}%")
+        want_events = rec["events"]
+        got_events = int(events.strip())
+        if want_events != got_events:
+            problems.append(f"{name} 标注事件：README {got_events} vs 实测 {want_events}")
+
+    only_table = sorted({r[0] for r in rows} - set(base.get("datasets", {})))
+    if only_table:
+        problems.append(f"README 表里有、基线里没有的数据集：{only_table}")
+
+    return claim(
+        "README 基准表与实测一致", not problems,
+        f"逐格对账 {len(rows)} 行 × {checked} 格（容差 0.05pp）；"
+        + ("；".join(problems[:6]) if problems else "全部一致")
+        + ("；…" if len(problems) > 6 else "")
+        + "｜重跑：python scripts/benchmark_loghub.py --budgets 32000 "
+          "--write-baseline")
+
 def claim_readme_module_tree() -> dict:
     """架构树必须列全包内模块（v2.8.1 新增门禁）。
 
@@ -407,6 +513,7 @@ _CLAIM_FNS = (
     claim_layering,
     claim_readme_metrics,
     claim_readme_module_tree,
+    claim_benchmark_table,
 )
 
 

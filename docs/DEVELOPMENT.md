@@ -33,9 +33,41 @@ CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
 `ubuntu-3.12`（最常用版本）、`windows-3.12`（行尾 / shell / 路径处理与
 unix 不同，且 `start.bat` 是 Windows 一等入口）。**六道门禁**：ruff →
 pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证脚本 → 构建可复现性。
-自证脚本内部已扩到 **10 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
+自证脚本内部已扩到 **11 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
 v2.8.1 再加「README 架构树必须列全包内模块」，v2.9.0 加「接入层只经 service
-触达 core/export」，v2.9.1 再把「README 写的条数」本身也纳入对账）。
+触达 core/export」，v2.9.1 再把「README 写的条数」本身也纳入对账，
+v2.10.0 加「**README 基准表逐格对账实测基线**」）。
+
+### 基准数字的对账链
+
+`docs/benchmark_baseline.json` 是最近一次全量实测的快照，由
+
+```bash
+python scripts/benchmark_loghub.py --budgets 32000 --write-baseline
+```
+
+生成。`prove.py` 的 `claim_benchmark_table` 拿它与 README 的十行基准表
+**逐格对账**（容差 0.05pp，与判胜的容差同口径）。
+
+**为什么需要它**：v2.9.9 修了 `mask_text` 的两处误伤，改动本身是对的，
+但它改变了聚类结果 —— HPC 76 簇 / 85.1% 变成 79 簇 / 81.1%、
+Zookeeper 92.1% 变成 91.0%、Proxifier 交付口径 81.8% 变成 72.7% ——
+而 README、`docs/BENCHMARK.md` 与「唯一负例只差 2 个事件」全部原地不动，
+**六道门禁全绿**。与 v2.9.5 撤回的那次是同一个病：对外数字没人校。
+
+因此：**改了任何影响聚类的代码都要重跑全量基准**。只跑子集或缺对照臂时
+`--write-baseline` 会拒绝写文件 —— 残缺基线会把「这次没测」固化成
+「产品就是这样」，比没有基线更糟。
+
+### 诊断脚本
+
+```bash
+python scripts/diagnose_merge_decisions.py          # 需先 fetch_datasets
+```
+
+回答的是「有没有任何相似度量能把『该合并』和『不该合并』分开」。
+结论记在 `tests/test_cluster_token_guard.py` 里，断言守着它 ——
+哪天判据出现了，那些断言会失败并提示重新评估。
 
 ### 启动脚本的硬约束
 

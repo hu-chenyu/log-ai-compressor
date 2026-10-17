@@ -22,6 +22,8 @@
 include LICENSE
 include README.md
 include CHANGELOG.md
+include AGENTS.md
+include CONTRIBUTING.md
 include server.json
 include SKILL.md
 include requirements.txt
@@ -32,7 +34,10 @@ include start.bat
 
 recursive-include tests *.py
 recursive-include scripts *.py
-recursive-include docs *.md *.jpg *.png *.svg
+# docs 要带上 *.json：scripts/prove.py 会进 sdist，而它的一条主张
+# 要读 docs/benchmark_baseline.json 对账 README 的基准表。
+# 基线不进包 = 从 sdist 里跑 prove.py 必然那条红 —— 「检查器自己会坏」。
+recursive-include docs *.md *.jpg *.png *.svg *.json
 recursive-include examples *.log *.md *.json
 
 # 运行时资源（wheel 由 [tool.setuptools.package-data] 负责，
