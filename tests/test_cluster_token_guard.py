@@ -67,18 +67,32 @@ def test_but_they_are_above_the_merge_threshold():
         f"这个诊断可能已经过期，请重新核对并删掉本文件")
 
 
-def test_masking_does_not_normalize_hostnames():
-    """根因的另一半：**主机名没被掩码**，所以守卫一挡就全线碎片化。
+def test_hostname_masking_was_tried_and_falsified():
+    """补主机名掩码这条路**试过两次、都证伪了**，这里把过程钉住。
 
-    端口这类纯数字确实会被归一化（5070 -> N），但域名/主机名是字面词元，
-    会留在模板里 —— 于是「不同主机」变成「不同词元集合」，守卫一挡，
-    Proxifier 那类日志就从一个簇炸成几十个。
+    第一次按「点 + 纯字母」的形状写（末段 2~24 位字母）：
 
-    若哪天这条断言失败（说明掩码已经能归一化主机名），那么「守卫会误伤」
-    这个理由就过期了，可以重新评估加守卫。
+        chrome.exe -> D    ftp.exe -> D
+
+    Proxifier 的事件类型**恰恰靠进程名区分**，于是 117 簇 / 100% 被合并成
+    **13 簇 / 72.7%** —— 比不改还糟。
+
+    第二次改用 TLD 白名单（com/org/net/io/internal/...），进程名保住了，
+    但主机名本身在 Proxifier 里**就是事件身份**，于是：
+
+        Proxifier  117 簇 / 100.0%  ->  20 簇 / 90.9%
+        Zookeeper   83 簇 / 92.1%   ->  82 簇 / 91.0%
+
+    仍然是把不同事件合并。**方向就是错的**，不是调参能救的。
+
+    真正的修法是按数据集自适应粒度（Proxifier 对主机敏感、HPC 对用词敏感），
+    那是独立的一件事。
     """
     t = mask_text("[10.30 16:49:06] chrome.exe - proxy.example.org:5070 close")
+    assert "chrome.exe" in t, (
+        "进程名被当成主机名掩掉了 —— 第一次失败的形状；当前模板 %r" % t)
+    assert "data.log" in mask_text("data.log missing"), (
+        "日志文件名被当成域名掩掉了 —— 当前 mask_text 会把 .log 当 TLD")
     assert "proxy.example.org" in t, (
-        "掩码已经能归一化主机名了 —— 「守卫会误伤」这个理由可能已过期，"
-        f"请重新评估：当前模板 {t!r}")
-    assert ":N" in t, "纯数字端口应当已被归一化（这条与主机名是两回事）"
+        "主机名已经被归一化了 —— 「守卫会误伤」这个理由可能已过期，"
+        "请重新评估加守卫：当前模板 %r" % t)
