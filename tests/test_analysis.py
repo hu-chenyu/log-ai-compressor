@@ -9,6 +9,7 @@ from log_ai_compressor.core.analysis import (
     significant_in_window,
     simplify_stack,
 )
+from log_ai_compressor.core.evidence import make_ref
 from log_ai_compressor.core.models import (
     AnalysisResult,
     ClusterInstance,
@@ -21,17 +22,29 @@ from log_ai_compressor.core.models import (
 
 
 def make_cluster(cid, summary, level="ERROR", count=1, first_seen=None,
-                 first_line=1, last_line=1, stack=None, module=""):
+                 first_line=1, last_line=1, stack=None, module="",
+                 with_evidence=True):
     entry = LogEntry(line_no=first_line, raw=summary, level=level,
                      module=module, message=summary, timestamp=first_seen,
                      stack=stack or [])
-    return ErrorCluster(
+    cluster = ErrorCluster(
         cluster_id=cid, template=f"{level} | {summary}",
         message_template=summary, level=level, module=module, summary=summary,
         count=count, first_line=first_line, last_line=last_line,
         first_seen=first_seen, last_seen=first_seen,
         sample=ClusterSample(entry=entry),
     )
+    # v2.11.1：夹具默认挂一条可回读的证据引用。
+    #
+    # 真实簇由 pipeline 的 `_attach_evidence` 造出来，**一定**带出处；
+    # 而 CONFIRMED 的定义正是「有可复核出处的因果链」，没有出处的
+    # CONFIRMED 会被 `analysis.py` 降级成 LIKELY（承诺 1：每条结论带行号）。
+    # 夹具原来不挂证据，于是那些测「Caused-by → CONFIRMED」的用例
+    # 造的是一个**前提不成立**的簇 —— 它们靠「手工簇例外」活到现在。
+    if with_evidence:
+        cluster.evidence.append(make_ref(
+            "<夹具>", first_line, last_line, [summary]))
+    return cluster
 
 
 def make_result(clusters, error_entries=None, global_adds=()):

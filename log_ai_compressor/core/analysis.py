@@ -453,8 +453,8 @@ def _attach_change_events(clusters: List[ErrorCluster],
                             f"{gap:.0f}s（{src}）")
 
 
-def _mark_causal_evidence(c: ErrorCluster, deepest: str) -> None:
-    """给 CONFIRMED 判定补一条因果证据引用。
+def _mark_causal_evidence(c: ErrorCluster, deepest: str) -> bool:
+    """给 CONFIRMED 判定补一条因果证据引用；返回**是否补上了**。
 
     CONFIRMED 是本工具唯一敢说「就是它」的档位，所以举证要求也最高：
     必须能指回**原文行**，而不只是给个理由字符串。Caused by 链就在条目
@@ -462,14 +462,21 @@ def _mark_causal_evidence(c: ErrorCluster, deepest: str) -> None:
     kind 不同），note 写清是哪条链的最内层异常。
 
     拿不到样例引用时（超长堆栈超出摄入窗口）不补 —— 没有原文可核对的
-    CONFIRMED 应当让调用方通过置信档位本身去打折，而不是补一条指向
+    CONFIRMED **应当让调用方通过置信档位本身去打折**，而不是补一条指向
     别处的假引用。
+
+    v2.11.1：把那句「应当打折」真正落实成返回值。原来这里只是 `return`，
+    调用方接着照样判 CONFIRMED，于是本函数的 docstring 描述的是一个
+    当时并不存在的行为。实测：条目 115 行起证据全丢，而置信档位仍是
+    CONFIRMED，报告里渲染出「已定位根因」却 `出处=None` ——
+    工具最硬的一句断言没有一行出处可核。
     """
     base = c.primary_evidence
     if base is None:
-        return
+        return False
     c.evidence.append(derive_ref(
         base, KIND_CAUSED_BY, note=f"Caused-by 链最内层：{deepest[:60]}"))
+    return True
 
 
 def _add_cross_reference_edges(ordered: List[ErrorCluster],
@@ -599,10 +606,21 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
         # 仅当样例自身的链恰好就是这条原因，才从样例引用派生；否则宁可不挂 ——
         # 一条指向别处的"证据"比没有证据更容易误导排查的人。
         top_ref = c.cause_evidence.get(top)
-        if (top_ref is None or top_ref.evidence_id not in existing):
+        marked = top_ref is not None and top_ref.evidence_id in existing
+        if not marked:
             if deepest_caused_by(
                     _causal_lines(c.sample.entry) if c.sample else []) == top:
-                _mark_causal_evidence(c, top)
+                marked = _mark_causal_evidence(c, top)
+        if not marked:
+            # v2.11.1：CONFIRMED 说「就是它」，那举证要求就得跟得上 ——
+            # 一条都指不回原文的 CONFIRMED 不是结论，是一句没有出处的断言。
+            # 实测条目超过摄入窗口（约 114 行）时证据全丢，而档位仍判 CONFIRMED，
+            # 报告渲染出「已定位根因」却 `出处=None`。这里按 `_mark_causal_evidence`
+            # docstring 早就写明、却一直没落实的规则打折。
+            c.root_cause_confidence = CONF_LIKELY
+            c.root_cause_reason += (
+                "（因果链成立，但该条目超出摄入窗口、原文引用取不到，"
+                "无法逐行复核，故降为 LIKELY）")
 
     # b) 跨簇时间相邻：保留为边（用于「谁衍生自谁」的展示），但**绝不升级
     #    成 CONFIRMED** —— 前一个错紧接着出现，只是统计线索。

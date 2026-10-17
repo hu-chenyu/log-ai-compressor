@@ -279,12 +279,17 @@ class TestVerifyEndpoint:
         assert any(d["status"] == "MISMATCH" for d in body["details"])
 
     def test_pasted_text_has_no_readable_source(self, client):
-        """粘贴文本没有可回读源文件 —— 必须如实说，不谎称通过。"""
+        """粘贴文本没有可回读源文件 —— 必须如实说「验不了」，不谎称通过。
+
+        v2.11.1：verdict 由 TAMPERED 改为 UNVERIFIABLE。粘贴的文本结构上
+        没有源文件可比，把它报成「被篡改」是指控错了对象。
+        """
         job_id = _run(client, mode="text",
                       text="2026-10-14 10:00:00 ERROR db refused\n"
                            "2026-10-14 10:00:01 ERROR db refused\n")
         body = client.post("/api/verify", json={"job_id": job_id}).json()
-        assert body["verdict"] == "TAMPERED"
+        assert body["verdict"] == "UNVERIFIABLE"
+        assert body["ok"] is False
         assert body["missing_source"] >= 1
 
     def test_unknown_job_404(self, client):

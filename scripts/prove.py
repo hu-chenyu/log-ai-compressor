@@ -76,8 +76,14 @@ def claim_evidence(path: Path) -> dict:
     report = S.verify_result(r)
     covered = sum(1 for c in r.clusters if c.evidence)
     total = len(r.clusters)
+    # v2.11.1 修 0/0 空转：`covered == total` 在两个都是 0 时恒真，于是
+    # 一个**什么都不产出**的产品能拿到这条主张的 PASS —— 实测把
+    # pipeline 的 clusters 清空后，11 条主张里 6 条空转，只有对抗性评测
+    # 拦下。`claim_layering` 早就为同类问题加了 `scanned_empty`（扫了 0 个
+    # 文件不许报通过），这条漏了；同一份列表里同一种病，两种修法。
+    # `total > 0` 是显式的那一半，不依赖 `report["ok"]` 恰好也覆盖到。
     return claim("证据可复核：每条结论带行号出处且核对通过",
-                 report["ok"] and covered == total,
+                 report["ok"] and total > 0 and covered == total,
                  f"{covered}/{total} 个簇带出处；自校验 {report['verdict']}，"
                  f"匹配 {report['matched']}/{report['checked']}")
 
@@ -575,7 +581,13 @@ _MD_SEP_RE = re.compile(r"^[|\s:-]+$")
 
 
 def _bench_tables(doc_text: str):
-    """找出文档里所有基准表，返回 [(列号表, 数据行), ...]。"""
+    """找出文档里所有基准表，返回 [(列号表, 数据行, 表头单元格), ...]。
+
+    v2.11.1：多带一个**表头单元格**。聚合行（「合计」那一行）要对账的
+    「交付上限」「达成度」两列被 `_BENCH_SKIP_CELLS` 跳过、拿不到列号，
+    而表头是解析出来的东西 —— 让调用方再解析一遍就等于把口径写两遍，
+    换个算法就漂，而漂掉的恰好是一个对外数字。
+    """
     lines = doc_text.splitlines()
     out = []
     i = 0
@@ -589,10 +601,80 @@ def _bench_tables(doc_text: str):
                 body.append(lines[j])
                 j += 1
             if cols:
-                out.append((cols, body))
+                header = [c.strip().replace("**", "").strip()
+                          for c in line.strip().strip("|").split("|")]
+                out.append((cols, body, header))
             i = j
         else:
             i += 1
+    return out
+
+
+# 「交付上限」的物理上限要拿产品默认给几个簇去除 —— 必须与
+# `constants.DEFAULT_TOP_N` 同值，否则这里算出来的上限是另一个口径的。
+# 有测试钉住这个同步（tests/test_benchmark_table_gate.py），
+# 加不着一份测试就等于把这个常量放任漂下去。
+_BENCH_N_DEL = 20
+
+
+def _agg_row_problems(doc_name: str, idx: int, name: str, cells: list,
+                      cols: dict, header: list, datasets: dict,
+                      eps_pp: float = 0.05):
+    """对账「合计」行里**能从基线重算**的那几个数。
+
+    为什么只做「合计」而不做「平均/小计/总计」：那几样口径各不相同，
+    猜一个等于造数字。这里只认「合计」这一个明确的口径。
+
+    可重算的三个量（口径全部取自 `scripts/benchmark_loghub.py`）：
+
+        交付实测合计 = Σ 保留率
+        交付上限合计 = Σ min(n_del, events) / events
+        达成度合计   = Σ(保留率×events) / Σ min(n_del, events)
+
+    v2.11.1 实测：引入「合计」行的那笔提交（d299aeb，标题是「把『交付
+    口径已达天花板』从断言变成脚本能复现的数字」）把交付合计写成 282.4%，
+    实测是 270.6%，差 11.8pp —— **它想治的病在原地复发了**：脚本产出的
+    那部分对了，手算的这部分错了，而这一行此前列在跳过名单里没人叫。
+    """
+    if "合计" not in name:
+        return []
+    recs = [r for r in datasets.values()
+            if r.get("events") and r.get("delivery") is not None]
+    if not recs:
+        return []
+    cap_n_total = sum(min(_BENCH_N_DEL, r["events"]) for r in recs)
+    if not cap_n_total:
+        return []
+    cov_total = sum(r["delivery"] * r["events"] for r in recs)
+
+    expected = {
+        "交付实测": sum(r["delivery"] for r in recs),
+        "交付上限": sum(min(_BENCH_N_DEL, r["events"]) / r["events"] for r in recs),
+        "达成度": cov_total / cap_n_total,
+    }
+    out = []
+    for i, head in enumerate(header):
+        if i >= len(cells) or i == 0:
+            continue
+        label = next((k for k in expected if k in head), None)
+        if label is None:
+            continue
+        raw = cells[i].strip()
+        m = re.search(r"(-?[\d.]+)\s*%", raw)
+        if m is None:
+            out.append(f"{doc_name} {name} {label}：写不成百分数（{raw!r}）")
+            continue
+        claimed = float(m.group(1)) / 100
+        actual = expected[label]
+        # 用**诚实取整**而不是固定容差：合计行常写成整数（达成度 82%），
+        # 而重算值是 82.2% —— 按 0 位取整正好是 82，诚实的。
+        # 固定 0.05pp 容差会把这种正确写法判红，而**一条会误报的门禁比
+        # 没有门禁更糟**（它把真漂移淹没在噪音里）。这与 `_is_honest_rounding`
+        # 那条判据治的是同一个病，只是换了个字段。
+        if not _is_honest_rounding(m.group(1), actual * 100):
+            out.append(
+                f"{doc_name} {name} {label}：文档 {claimed * 100:.1f}% vs "
+                f"基线重算 {actual * 100:.1f}%")
     return out
 
 
@@ -625,12 +707,37 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
     rows_total = 0
     checked = 0
     cells_unmeasured: list = []
+    cells_misnamed: list = []
     seen_datasets: set = set()
     tables = _bench_tables(doc_text) if check_tables else []
     if check_tables and not tables:
         problems.append(
             f"{doc_name} 里找不到基准表（表头需含「标注事件」或两个以上本项目口径列）")
-    for idx, (cols, body) in enumerate(tables, 1):
+    for idx, (cols, body, header) in enumerate(tables, 1):
+        # **列名被改一个字，整列就静默脱管。**
+        #
+        # v2.11.0 实测：把 README 表头的「交付」改成「投递」，那 10 个交付格
+        # 全部不再对账（`cols` 里没有 delivery 键），而 docs/BENCHMARK.md 的
+        # 同一份副本仍写着 72.7% —— 仓库自相矛盾、门禁报「全部一致」，
+        # `cells_unmeasured` 里也一个字不提。这是 AGENTS.md 记了四次的
+        # 「扫了 N 个却报通过」，只是这次 N 从 0 变成了 50。
+        #
+        # 判据不是「这张表该有哪些列」（各表本就可以只报一部分），而是
+        # **own 三列同量纲**：一旦认出 ≥2 个保留率口径，它就是一张保留率表，
+        # 三个口径必须报全。少一个要么是列名拼错、要么是漏写，两种都判红。
+        # 实测四份受校文档共 4 张基准表，全部含交付列，满足「own≥2」的
+        # 有 3 张且三个口径齐全，所以这条判据当前不产生假红。
+        own_present = [k for _, k in _BENCH_OWN if k in cols]
+        if len(own_present) >= 2:
+            missing_own = [k for _, k in _BENCH_OWN if k not in cols]
+            if missing_own:
+                problems.append(
+                    f"{doc_name} 第 {idx} 张基准表认出保留率口径 "
+                    f"{'/'.join(own_present)}，缺 {'/'.join(missing_own)}"
+                    f"—— 列名改一个字就会整列不再对账（对账格数会悄悄变少）")
+                cells_misnamed.append(
+                    f"{doc_name} 表{idx} 缺口径列 {'/'.join(missing_own)}")
+
         # 表头还在、数据行全没了：`_bench_tables` 照样把它认成一张表
         # （判据看的是表头 + 分隔行），而下面 `for raw in body` 一行都不跑，
         # 于是 rows/checked 全是 0、problems 全空 —— **v2.11.0 实测判通过**。
@@ -642,8 +749,16 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
         for raw in body:
             cells = [c.strip().replace("**", "") for c in raw.strip().strip("|").split("|")]
             name = cells[0].strip()
-            # 合计/平均这类聚合行不是数据集，拿它跟基线比毫无意义
+            # 合计/平均这类聚合行不是数据集，拿它跟基线逐格比毫无意义。
+            # 但**跳过不等于不管**：「合计」行里的数完全可以从基线重算，
+            # 而 v2.11.1 实测发现它长期没人校、已经错了 11.8pp ——
+            # 引入它的那笔提交标题恰恰是「把『交付口径已达天花板』从断言
+            # 变成脚本能复现的数字」，也就是**它想治的病在原地复发了**：
+            # 脚本产出的部分对了，手算的那部分错了，而没人叫。
             if any(agg in name for agg in ("合计", "总计", "小计", "平均")):
+                problems.extend(
+                    _agg_row_problems(doc_name, idx, name, cells, cols,
+                                      header, datasets, eps_pp))
                 continue
             rec = datasets.get(name)
             if rec is None:
@@ -714,6 +829,7 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
         doc_name, doc_text, datasets)
     problems.extend(v_problems)
     notes["cells_unmeasured"] = cells_unmeasured
+    notes["cells_misnamed"] = cells_misnamed
     return rows_total, checked, v_checked, problems, notes
 
 
@@ -780,6 +896,7 @@ def claim_benchmark_table() -> dict:
     unverifiable: list = []
     unlabeled = 0
     cells_unmeasured: list = []
+    cells_misnamed: list = []
     seen_docs = []
     for doc_name in _BENCH_VERDICT_DOCS:
         doc_path = ROOT / doc_name
@@ -797,6 +914,7 @@ def claim_benchmark_table() -> dict:
         unverifiable.extend(notes["unverifiable"])
         unlabeled += notes["unlabeled"]
         cells_unmeasured.extend(notes["cells_unmeasured"])
+        cells_misnamed.extend(notes["cells_misnamed"])
         seen_docs.append(f"{doc_name}×{n_tables}" if check_tables
                          else f"{doc_name}(无表)")
         problems.extend(probs)
@@ -814,6 +932,11 @@ def claim_benchmark_table() -> dict:
                    f"（如 {'、'.join(unverifiable[:2])}）")
     if unlabeled:
         detail += f"；{unlabeled} 处胜负未带口径，无从判定对账对象，仅统计不判红"
+    # 「没对账」有两种**原因不同**的说法，混成一句就是错误解释：
+    # 列名没对上 = 文档写错了；基线里没实测 = 那一次没跑。
+    if cells_misnamed:
+        detail += (f"；另有 {len(cells_misnamed)} 张表列名没对上，"
+                   f"整列未参与对账（如 {'、'.join(cells_misnamed[:2])}）")
     if cells_unmeasured:
         detail += (f"；{len(cells_unmeasured)} 格基线里没有实测值，"
                    f"未参与对账（如 {'、'.join(cells_unmeasured[:2])}）")
