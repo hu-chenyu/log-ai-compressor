@@ -96,7 +96,7 @@ def _mutations(c):
          lambda x: setattr(x, "count", x.count + 1)),
         ("summary",
          lambda x: setattr(x, "summary", "tampered summary")),
-        ("evidence_ids",
+        ("evidence",
          lambda x: setattr(x, "evidence", list(x.evidence)[1:])),
     ]
 
@@ -177,3 +177,83 @@ def test_copying_result_keeps_fingerprint(tmp_path) -> None:
     """深拷贝后指纹不变 —— 证明 payload 只由值组成、不依赖对象身份。"""
     r = _analyze(tmp_path)
     assert result_fingerprint(r) == result_fingerprint(copy.deepcopy(r))
+
+
+# ---------------------------------------------------------------------------
+# 四、路径不是结论（v2.11.0）
+#
+# 修之前的实测：同一份逐字节相同的日志，绝对路径得 856b49a8…、相对路径得
+# 2adae7d0…。两处来源：`stats.source` 与 `evidence_id`（它由 source 派生）。
+#
+# 这条不只影响指纹的**数值**，它让对外那句话直接不成立：
+# README 第一屏写的是「同一份日志跑两遍，结论指纹逐字节相同」，
+# 而「跑两遍」完全可以是「一次 cd 到目录里、一次用绝对路径」。
+# CI 的确定性门禁用**同一个字面路径**连跑三次，结构上就看不到这一维。
+# ---------------------------------------------------------------------------
+
+
+def _analyze_by(spelling, tmp_path, monkeypatch):
+    """同一份日志，用给定的路径写法分析一次。"""
+    p = tmp_path / "two.log"
+    p.write_text(_two_cause_log(), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    return service.analyze(paths=[spelling], params={"top_n": 0,
+                                                     "context_lines": 0})
+
+
+def test_fingerprint_does_not_depend_on_how_the_path_was_spelled(
+        tmp_path, monkeypatch) -> None:
+    """绝对路径 / 相对路径 / `./` 前缀 —— 指纹必须逐字节相同。"""
+    p = tmp_path / "two.log"
+    a = _analyze_by(str(p), tmp_path, monkeypatch)
+    b = _analyze_by("two.log", tmp_path, monkeypatch)
+    c = _analyze_by("./two.log", tmp_path, monkeypatch)
+    # 先证真：分析本身确实被调用到了，且内容一致
+    assert len(a.clusters) == len(b.clusters) == len(c.clusters) > 0
+    assert a.stats.source != b.stats.source, "两种写法没真的产生不同的 source"
+    assert result_fingerprint(a) == result_fingerprint(b) == result_fingerprint(c), \
+        "同一份日志换个路径写法就换了指纹 —— 对外那句承诺不成立"
+
+
+def test_changing_only_the_path_does_not_change_the_fingerprint(
+        tmp_path, monkeypatch) -> None:
+    """把 `stats.source` 与每条引用的 source 一起改掉，指纹必须不动。
+
+    这是上面那条的**加强版**：它不依赖「怎么把路径写成相对」，
+    而是直接把路径字段改坏。如果哪天有人把 `source` 加回指纹，
+    这里立刻红 —— 而不会等到有人从别的目录跑一次才发现。
+    """
+    r = _analyze(tmp_path)
+    before = result_fingerprint(r)
+    r.stats.source = "C:\\somewhere\\else\\完全不同的名字.log"
+    for c in r.clusters:
+        for e in c.evidence:
+            object.__setattr__(e, "source", "C:\\somewhere\\else\\x.log")
+        for v in (c.root_cause_variants or ()):
+            if v.evidence is not None:
+                object.__setattr__(v.evidence, "source", "C:\\elsewhere\\y.log")
+    assert result_fingerprint(r) == before, \
+        "只改路径就改变了指纹 —— 路径不是结论，它不该进来"
+
+
+@pytest.mark.parametrize("field, value", [
+    ("line_start", 999),
+    ("line_end", 999),
+    ("kind", "tampered_kind"),
+    ("digest", "0" * 64),
+])
+def test_path_free_evidence_identity_still_discriminates(
+        tmp_path, field, value) -> None:
+    """去掉路径之后，证据身份**仍然**有判别力。
+
+    这是修复的代价检查：换成「起止行 + 类型 + 摘要」之后，
+    改动证据定位或原文都必须让指纹变 —— 否则等于用一个更弱的身份
+    换掉了原来的 `evidence_id`，把「看不见回归」的门禁又装回去了。
+    """
+    r = _analyze(tmp_path)
+    before = result_fingerprint(r)
+    c = _confirmed_cluster(r)
+    ref = c.evidence[0]
+    object.__setattr__(ref, field, value)
+    assert result_fingerprint(r) != before, \
+        f"篡改证据的 {field} 后指纹纹丝不动 —— 证据身份没有判别力了"
