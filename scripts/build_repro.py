@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -85,11 +86,24 @@ def normalize_sdist(path: Path, epoch: int) -> None:
 def build(outdir: Path) -> list[Path]:
     epoch = last_commit_epoch()
     env = dict(os.environ, SOURCE_DATE_EPOCH=str(epoch), PYTHONHASHSEED="0")
+    # 整秒取整：某些文件系统只存整秒的 mtime，而写文件发生在 started 之后，
+    # 整秒比较在粗/细两种时间精度下都成立（细精度下 mtime 是小数，也 ≥ 整秒）。
+    started = int(time.time())
     subprocess.run(
         [sys.executable, "-m", "build", "--outdir", str(outdir)],
         cwd=ROOT, env=env, check=True,
     )
-    made = sorted(outdir.glob("*.tar.gz"))
+    # 只归一化**本次构建产生**的 sdist，不能对 outdir 里所有 .tar.gz 一视同仁。
+    #
+    # 正式构建的 outdir 是 dist/，那里堆着历次发布的产物。而 epoch 取的是
+    # **最后一次提交**的时间戳 —— 拿它去重写旧产物，等于把每个历史版本
+    # 的字节都按新时间戳重打一遍。实测：本地 2.11.0 的 sdist 从
+    # 1ff4b384…（= PyPI 上的值）变成 3cfef3bc…，README 里
+    # 「本地/PyPI/GitHub 三方 sha256 对账」对**任何已发布版本**都当场失效。
+    #
+    # 判据是「mtime >= 本次构建开始的整秒」，不是文件名：重跑同一个版本时
+    # 文件名不变但内容被重写过，只有时间戳能同时覆盖「新文件」和「重跑」。
+    made = sorted(p for p in outdir.glob("*.tar.gz") if p.stat().st_mtime >= started)
     for tgz in made:
         normalize_sdist(tgz, epoch)
     return made
