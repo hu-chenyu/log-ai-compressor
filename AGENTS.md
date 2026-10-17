@@ -90,6 +90,21 @@ cli.py  web/  mcp/  ai/     ← 四个接入层**只能经 service** 触达 core
 > 真实越层 import。**一个报「检查通过」但其实什么都没扫的门禁，比没有门禁更糟** ——
 > 没有门禁你知道那里没检查。
 
+v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一类写法上，
+又漏掉了另一种写法。
+
+- **相对导入被整条丢掉**。判据写的是 `... and node.module and not node.level`，
+  `not node.level` 让 `from ..core.evidence import …` 全部逃逸 ——
+  它在 `mcp/server.py` 里运行时完全合法。现在按文件的**包路径**解析 level。
+- **`from log_ai_compressor import core` 看不到越层**。`node.module` 只是
+  `log_ai_compressor`，不以禁用前缀开头就整条放行，而它拿到的正是 core 层。
+  现在判定基名**是不是包**（有 `__init__.py` 的目录），是包就把每个被 import
+  的名字也当子模块校。
+
+修 `_package_of` 时我第一版把模块自己的名字也算进了包里，于是 level 多退一级，
+相对导入一条都抓不到 —— **门禁仍然绿着，却什么都没校**。
+这个错被测试钉住了：把那一行改回多算一级，5 个变异里它立刻变红。
+
 加新模块时先确认它属于哪一层。新增接入层必须同步更新 `prove.py` 的
 `_CLAIM_FNS` 注册表，否则它不在核验范围内。
 
