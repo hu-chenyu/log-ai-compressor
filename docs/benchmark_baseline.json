@@ -1,5 +1,5 @@
 {
-  "_comment": "由 scripts/benchmark_loghub.py --write-baseline 生成；scripts/prove.py 的 claim_benchmark_table 用它对账 README 的基准表。改过任何影响聚类的代码后必须重跑。",
+  "_comment": "由 scripts/benchmark_loghub.py --write-baseline 生成；scripts/prove.py 的 claim_benchmark_table 用它对账 _BENCH_DOCS 白名单里**每一份**文档的基准表（README / docs/BENCHMARK.md / docs/FAQ.md），并从各数据集的 verdict_* 重算「N 胜 N 平 N 负」场次。改过任何影响聚类的代码后必须重跑。",
   "budget": 32000,
   "datasets": {
     "Apache": {
