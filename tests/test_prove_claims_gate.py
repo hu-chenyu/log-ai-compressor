@@ -102,13 +102,54 @@ class TestReadmeLineRatioIsGated:
         assert prove.claim_readme_metrics()["holds"] is True
 
     def test_the_ratio_is_really_what_the_docs_say(self):
-        """先证真：文档里那个数确实是当前实测值（否则后面的红都是白红）。"""
+        """先证真：文档里那个数确实是当前实测值。
+
+        用 `prove._RATIO_RE` 而不是在本文件里**再抄一遍正则** ——
+        抄一份的那版，正则被改坏时它照样绿（实测：把 prove 的正则打坏，
+        同类另两条测试都红，只有它 PASSED），等于装饰。
+        正则真坏掉时 `claimed` 会是空列表，下面那句 assert 就是它的牙齿。
+        """
         faq = (_ROOT / "docs" / "FAQ.md").read_text(encoding="utf-8")
-        claimed = [float(x) for x in re.findall(
-            r"行数比\s*[≈~]?\s*(\d+(?:\.\d+)?)", faq)]
-        assert claimed, "FAQ 里找不到行数比 —— 格式变了，先更新本测试"
+        claimed = [float(x) for x in prove._RATIO_RE.findall(faq)]
+        assert claimed, "FAQ 里找不到行数比 —— 正则坏了，或格式变了"
         for c in claimed:
-            assert abs(c - _REAL_RATIO) <= 0.01, (c, _REAL_RATIO)
+            # 用门禁自己的判据，别在这儿再抄一遍
+            assert prove._is_honest_rounding(str(c), _REAL_RATIO), (c, _REAL_RATIO)
+
+    def test_the_ratio_gate_cannot_be_appeased_by_a_loose_tolerance(self):
+        """「1.37 对 1.3807」不是诚实的取整，门禁必须判红。
+
+        这条不是假设出来的：v2.11.0 用固定容差 0.01，实测 1.3807 写成
+        「≈1.37」**能过**（差 0.0099 < 0.01）—— 而那正是本次修复的起因。
+        而「1.4 对 1.3807」是诚实的取整，必须放过。
+        """
+        assert prove._is_honest_rounding("1.38", 1.3807)
+        assert not prove._is_honest_rounding("1.37", 1.3807)
+        assert prove._is_honest_rounding("1.4", 1.3807)
+
+    def test_every_doc_mentioning_the_ratio_is_listed(self):
+        """看门狗：把「行数比」抄进第五个文件，必须有人发现。
+
+        `_BENCH_DOCS` 有这么一条（`test_every_benchmark_copy_is_listed`），
+        本门禁起初没有 —— 而 `_METRIC_DOCS` 三份里有两份根本不含「行数比」，
+        名单写错只会静默少扫一份，没有任何东西会叫。
+        """
+        listed = set(prove._METRIC_DOCS) | set(prove._METRIC_DOCS_EXEMPT)
+        offenders: dict = {}
+        for p in sorted(_ROOT.rglob("*.md")):
+            rel = p.relative_to(_ROOT).as_posix()
+            if rel in listed or rel.split("/")[0] in ("dist", ".git"):
+                continue
+            text = p.read_text(encoding="utf-8")
+            if re.search(r"行数比[^\n]*\d", text):
+                offenders[rel] = "写了行数比却不在 _METRIC_DOCS / _METRIC_DOCS_EXEMPT 里"
+        assert not offenders, offenders
+
+    def test_every_metric_exemption_carries_a_reason(self):
+        """豁免必须写理由 —— 没有理由的豁免等于给自己开后门。"""
+        for name, why in prove._METRIC_DOCS_EXEMPT.items():
+            assert why and len(why) >= 8, f"{name} 的豁免没写理由"
+            assert (_ROOT / name).is_file(), f"{name} 不存在，豁免该删了"
 
     def test_wrong_ratio_in_a_doc_fails_loudly(self, tmp_path, monkeypatch):
         c = self._run(tmp_path, monkeypatch,
