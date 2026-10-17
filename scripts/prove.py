@@ -193,18 +193,19 @@ def _code_metrics() -> dict:
     两边各算一次必然漂移。
     """
     files = sorted((ROOT / "log_ai_compressor").rglob("*.py"))
-    lines = 0
-    for p in files:
-        for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            s = raw.strip()
-            if s and not s.startswith("#"):
-                lines += 1
-    return {"modules": len(files), "lines": lines}
+    # 行数走共用函数，而不是在这里再写一遍算法：**同一个口径写两遍，
+    # 换一个算法就漂了**，而漂掉的恰好是一个对外数字。
+    return {"modules": len(files),
+            "lines": _count_lines_in("log_ai_compressor")}
 
 
 # 会被 `claim_readme_metrics` 逐个扫「对外工程数字」的文档。
 # 每加一份文档，就多一处能悄悄漂移的地方 —— 与基准表那份白名单同一个道理。
 _METRIC_DOCS = ("README.md", "docs/FAQ.md", "CONTRIBUTING.md")
+# 写了这几个字但**刻意不校**的文档。没有理由的豁免等于给自己开后门。
+_METRIC_DOCS_EXEMPT = {
+    "CHANGELOG.md": "历史快照，AGENTS.md §2.4 明说刻意不改写 —— "
+                    "它必然记着若干个已经作废的旧比值"}
 
 
 def _count_lines_in(root_name: str) -> int:
@@ -226,6 +227,23 @@ def _count_ratio() -> float:
     """测试 / 主代码行数比（README 与 FAQ 都对外写着它）。"""
     prod = _code_metrics()["lines"]
     return round(_count_lines_in("tests") / prod, 2) if prod else 0.0
+
+
+# 「≈X」里的 X 必须是实测值的**诚实取整**：按 X 自己的小数位去四舍五入实测值，
+# 应当正好得到 X。
+#
+# v2.11.0 那版用固定容差 0.01，于是实测 1.3807 写成「≈1.37」能过 ——
+# 差 0.0099 < 0.01。而**那恰恰是本次修复的起因**：AGENTS.md §2.1 禁止把
+# 「大概差不多」写成实测值，而一次专门修「没人看守的对外数字」的提交，
+# 自己刚写进去的数字就不是实测值，自己刚加的门禁还正好把它放了过去。
+#
+# 「1.4 对 1.3807」是诚实的取整，「1.37 对 1.3807」不是。判据必须能区分这两者。
+_RATIO_RE = re.compile(r"行数比\s*[≈~]?\s*(\d+(?:\.\d+)?)")
+
+
+def _is_honest_rounding(claimed: str, real: float) -> bool:
+    places = len(claimed.split(".")[1]) if "." in claimed else 0
+    return round(real, places) == float(claimed)
 
 
 def claim_readme_metrics() -> dict:
@@ -264,22 +282,26 @@ def claim_readme_metrics() -> dict:
     found = [int(x) for x in re.findall(r"\*\*(\d+)\s*条\*\*\s*主张", readme)]
     counts_ok = bool(found) and all(n == expected for n in found)
 
-    # 「测试/主代码行数比 ≈X」—— v2.11.0 的复核顺手量到实测是 **1.37**，
-    # 而 docs/FAQ.md 写的是「≈1.1」。差得不多，但那是**错的**，而且
-    # **没有任何门禁校它** —— 又是本文件开头那条病。与其把它列进
-    # 「尚无数据的主张」，不如接进这条已经算好行数的门禁：口径现成。
+    # 「测试/主代码行数比 ≈X」—— v2.11.0 的复核量到它当时是 1.37，而
+    # docs/FAQ.md 写的是「≈1.1」。差得不多，但那是**错的**，而且
+    # **没有任何门禁校它**。与本文件开头那条病同形：对外数字漂了没人叫。
+    # 与其把它列进「尚无数据的主张」，不如接进这条已经算好行数的门禁。
+    #
+    # 判据是「诚实取整」而不是固定容差 —— 见 `_is_honest_rounding` 的注释。
     ratio_real = _count_ratio()
     ratio_problems = []
     for doc in _METRIC_DOCS:
         path = ROOT / doc
-        if not path.is_file():
+        if not path.is_file() or doc in _METRIC_DOCS_EXEMPT:
             continue
         for lineno, line in enumerate(
                 path.read_text(encoding="utf-8").splitlines(), 1):
-            for claimed in re.findall(r"行数比\s*[≈~]?\s*(\d+(?:\.\d+)?)", line):
-                if abs(float(claimed) - ratio_real) > 0.01:
+            for claimed in _RATIO_RE.findall(line):
+                if not _is_honest_rounding(claimed, ratio_real):
                     ratio_problems.append(
-                        f"{doc}:{lineno} 写 {claimed}，实测 {ratio_real}")
+                        f"{doc}:{lineno} 写 {claimed}，实测 {ratio_real}，"
+                        f"按 {len(claimed.split('.')[-1]) if '.' in claimed else 0} "
+                        f"位取整得不到它")
     ratio_ok = not ratio_problems
 
     detail = (f"README 写 {claimed_lines} 行 / {claimed_modules} 个模块；"
@@ -310,7 +332,11 @@ _BENCH_SKIP_CELLS = ("交付上限", "达成度")   # 公式列，不是实测�
 #
 # 小数点漂移和这个不是一回事：**多报一个不存在的胜**，比错一个百分点严重
 # 得多 —— 它是这类项目最容易被追问、也最经不起追问的一句话。
-_VERDICT_RE = re.compile(r"(\d+)\s*胜(?:\s*(\d+)\s*平)?\s*(\d+)\s*负")
+_VERDICT_RE = re.compile(
+    r"([\d,]+)\s*胜"
+    r"(?:\s*[、，,/／]?\s*([\d,]+)\s*平)?"
+    r"\s*[、，,/／]?\s*"
+    r"([\d,]+)\s*负")
 _BENCH_VERDICTS = (("交付", "verdict_delivery"),
                    ("同预算", "verdict_budget"),
                    ("全量", "verdict_full"))
@@ -345,15 +371,30 @@ def _bench_verdict_counts(datasets: dict, counterpart: str = "Drain3") -> dict:
 
 
 def _verdict_has_data(datasets: dict, label: str, counterpart: str) -> bool:
-    """基线里到底有没有这个「口径 × 对照组」的实测。
+    """基线里到底有没有这个「口径 × 对照组」的**完整**实测。
 
     **「全是 0」和「没测过」是两件事。** 缺 `verdict_full_logslop` 时重算
     出来是 0 胜 0 平 0 负，拿它去比文档里的「10 胜 0 平 0 负」会得到一条
     **永远判红**的门禁；反过来把它当成真的 0，又会永远判绿。
-    混同这两者，就是这个项目最熟的那种病：测量环节静默失能。
+
+    这里用 `all()` 而不是 `any()`：只要**有一个**数据集缺这个字段，场次就
+    是不完整的，拿它算出来的数会**假红**而且怪错了对象 ——
+    「只有一个数据集缺 verdict_delivery」实测会算出 0 胜 1 平 8 负，
+    然后反过来指责文档写错了。
+
+    同时要求取值落在「胜/平/负」之内：基线里出现 `"tie"` 之类时，
+    同样属于「量不出来」，不是「量出来是 0」。
     """
     key = dict(_BENCH_VERDICTS)[label] + _VERDICT_COUNTERPARTS[counterpart]
-    return any(key in rec for rec in datasets.values())
+    values = [rec.get(key) for rec in datasets.values()]
+    if not values or any(v is None for v in values):
+        return False
+    return all(v in ("胜", "平", "负") for v in values)
+
+
+def _num(s: str) -> int:
+    """`1,210` 与 `1210` 是同一个数 —— 千分位不能让它读成 `210`。"""
+    return int(str(s).replace(",", ""))
 
 
 def _verdict_claims(line: str):
@@ -370,12 +411,31 @@ def _verdict_claims(line: str):
     对照组名，距离相同时取左边的那个（中文里限定词总是先引出被限定的数）。
     没有标签也没有对照组的（「历史叙述里的 7 胜 2 负」）原样交出去，
     由调用方按「无法判定口径」处理 —— 不猜。
+
+    **这条判据的已知边界**（实测出来的，记在这里而不是假装没有）：
+    「最近」是**位置启发式**，它分不清「这一行的场次属于前面那个口径」
+    和「这一行后半段夹了一句历史数字」。把 `docs/BENCHMARK.md` 289–297
+    段（第一轮的「3 胜 2 负」）合并成一行时，那个 3/0/2 会被判给同段的
+    「交付口径」而报假红。四份受校文档现状误报为 0（22 处全对），
+    所以这是**潜伏**的；但它确实存在，写法一改就可能撞上。
+
+    口径与场次**跨行**时完全不管 —— 只进 `unlabeled` 计数。四份受校文档
+    现在的 5 处 unlabeled 全是历史叙述（「撤回的严格档」「第一轮 3 胜 2 负」
+    「CI 全绿 5 胜 0 负」「9 个 7 胜 2 负」），本就不该判红。
+    这是为躲开「交付上限」「全级别」而故意选的：跨行窗口匹配会在这类词上乱抓，
+    而**一条会误报的门禁比没有门禁更糟** —— 它把真漂移淹没在噪音里。
     """
     matches = list(_VERDICT_RE.finditer(line))
     if not matches:
         return []
+    # 口径标签的**可用出现位置**。判据与 `_bench_columns` 对表头用的是同一套
+    # 跳过词：「交付上限」「达成度」这些是**公式列**，不是实测口径 ——
+    # 表格侧早就躲掉了，胜负侧当时没跟上，于是
+    # `| HPC | 27.0% | 8 胜 1 平 1 负 | 交付上限 27.0% |` 会把场次判给「交付」而报假红。
     labels = sorted((line.find(lb), lb) for lb, _ in _BENCH_VERDICTS
-                    if line.find(lb) >= 0)
+                    if line.find(lb) >= 0
+                    and not any(bad in line[line.find(lb):line.find(lb) + 6]
+                                for bad in _BENCH_SKIP_CELLS))
     cps = sorted((line.find(cp), cp) for cp in _VERDICT_COUNTERPARTS
                  if cp in line)
 
@@ -445,7 +505,8 @@ def _bench_verdict_problems(doc_name: str, doc_text: str, datasets: dict,
 
 def _verdict_triple(m) -> tuple:
     """`1 胜 9 负` 是合法的写法：没写平就是零平。"""
-    return (int(m.group(1)), int(m.group(2) or 0), int(m.group(3)))
+    return (_num(m.group(1)), _num(m.group(2)) if m.group(2) else 0,
+            _num(m.group(3)))
 
 # 每一处**当前**结论的副本都要对账。v2.11.0 才发现第三份：docs/FAQ.md 的
 # Q2 有一张同口径的表，v2.10.0 那条只认 README 的门禁照样放过它。
@@ -563,6 +624,7 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
     problems: list = []
     rows_total = 0
     checked = 0
+    cells_unmeasured: list = []
     seen_datasets: set = set()
     tables = _bench_tables(doc_text) if check_tables else []
     if check_tables and not tables:
@@ -603,6 +665,11 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
                 claimed = _pct(cells[cols[key]])
                 actual = rec.get(key)
                 if claimed is None or actual is None:
+                    # 对照臂是 None（那一次没跑 LogsLop）时**静默 continue**，
+                    # 于是 `checked` 悄悄少几格而 detail 只字不提 —— 160 格
+                    # 和 157 格在界面上长得一样。记下来，报给人看。
+                    if claimed is not None:
+                        cells_unmeasured.append(f"{doc_name} {name} {label}")
                     continue
                 checked += 1
                 # 在**百分点**上比，并给浮点表示留一丝余量。
@@ -617,9 +684,18 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
             if "events" not in cols:
                 continue                    # FAQ 那张表没列事件数，不查这一格
             got = cells[cols["events"]].strip().replace(",", "")
-            if got.isdigit() and int(got) != rec["events"]:
+            # `rec["events"]` 是硬索引：基线里任一数据集缺这个字段就 KeyError，
+            # 而 `gather()` 没有兜底 —— 一条门禁因为数据残缺**崩掉**，带
+            # traceback 打死整个 prove.py。同一个循环上面几行已经为指标列
+            # 用了 `rec.get(key)` 并注明「崩掉虽然也是红的，却红得没有信息」，
+            # 这里当时没跟上。
+            actual_events = rec.get("events")
+            if actual_events is None:
+                cells_unmeasured.append(f"{doc_name} {name} 标注事件")
+                continue
+            if got.isdigit() and int(got) != actual_events:
                 problems.append(
-                    f"{doc_name} {name} 标注事件：文档 {got} vs 实测 {rec['events']}")
+                    f"{doc_name} {name} 标注事件：文档 {got} vs 实测 {actual_events}")
     # 基线里有、本文档一张表里却一行都没有的数据集。
     #
     # 只判「表还在不在」漏掉了**更常见**的那一半：删掉一行（哪怕只删
@@ -637,6 +713,7 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
     v_problems, _seen, v_checked, notes = _bench_verdict_problems(
         doc_name, doc_text, datasets)
     problems.extend(v_problems)
+    notes["cells_unmeasured"] = cells_unmeasured
     return rows_total, checked, v_checked, problems, notes
 
 
@@ -702,6 +779,7 @@ def claim_benchmark_table() -> dict:
     verdicts = 0
     unverifiable: list = []
     unlabeled = 0
+    cells_unmeasured: list = []
     seen_docs = []
     for doc_name in _BENCH_VERDICT_DOCS:
         doc_path = ROOT / doc_name
@@ -718,6 +796,7 @@ def claim_benchmark_table() -> dict:
         verdicts += v
         unverifiable.extend(notes["unverifiable"])
         unlabeled += notes["unlabeled"]
+        cells_unmeasured.extend(notes["cells_unmeasured"])
         seen_docs.append(f"{doc_name}×{n_tables}" if check_tables
                          else f"{doc_name}(无表)")
         problems.extend(probs)
@@ -735,6 +814,9 @@ def claim_benchmark_table() -> dict:
                    f"（如 {'、'.join(unverifiable[:2])}）")
     if unlabeled:
         detail += f"；{unlabeled} 处胜负未带口径，无从判定对账对象，仅统计不判红"
+    if cells_unmeasured:
+        detail += (f"；{len(cells_unmeasured)} 格基线里没有实测值，"
+                   f"未参与对账（如 {'、'.join(cells_unmeasured[:2])}）")
     return claim("基准表与实测一致", not problems,
                  detail + "｜重跑：python scripts/benchmark_loghub.py "
                           "--budgets 32000 --write-baseline")
