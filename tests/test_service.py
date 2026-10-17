@@ -206,14 +206,42 @@ class TestSerialization:
         assert c["count"] == len(c["instances"])
         assert "variables" in c
 
-    def test_top_n_truncates(self, result):
+    def test_top_n_truncates(self):
+        """top_n 必须真的截断 —— 且不依赖样例日志的簇数。
+
+        旧写法第一行是 `if full["total_clusters"] <= 2: pytest.skip(...)`，
+        那是**回归发生了才 skip**：聚类一旦退化到簇数不足，这条断言永远
+        不会执行、永远不会失败，测试套件照样绿。方向恰好错了 —— 截断
+        逻辑失效、簇数塌缩，正是最该变红的时候。
+
+        所以这里现造日志：4 个明显不同的异常模板 × 3 次 = 稳定 4 个簇，
+        与 examples/ 下任何样例的聚类行为无关。
+        """
+        templates = [
+            ("db", "connection reset by peer on primary shard"),
+            ("net", "dns lookup failed for upstream gateway"),
+            ("io", "disk quota exceeded on volume data-01"),
+            ("jvm", "outofmemoryerror java heap space gc overhead limit"),
+        ]
+        text = "\n".join(
+            f"2024-01-01 10:{i:02d}:{i:02d} ERROR [{tag}] {msg}"
+            for i in range(3) for tag, msg in templates) + "\n"
+        result = S.analyze(text=text, params={"levels": ["ERROR", "FAIL"]})
+
         full = S.result_to_dict(result)
-        if full["total_clusters"] <= 2:
-            pytest.skip("样例簇数不足，跳过截断断言")
+        # 硬断言，不是「前置条件」。合成日志凑不出 3 个簇，说明聚类行为
+        # 变了 —— 那本身就是要报的缺陷，必须红，不能滑过去。
+        assert full["total_clusters"] >= 3, \
+            f"合成日志只聚出 {full['total_clusters']} 个簇，聚类行为可能已退化"
+        assert full["shown_clusters"] == full["total_clusters"]
+        assert full["top_n_truncated"] is False
+
         cut = S.result_to_dict(result, top_n=2)
         assert cut["shown_clusters"] == 2
+        assert len(cut["clusters"]) == 2
         assert cut["top_n_truncated"] is True
-        assert cut["total_clusters"] == full["total_clusters"]
+        assert cut["total_clusters"] == full["total_clusters"], \
+            "截断的是展示，不是总数"
 
     def test_without_samples(self, result):
         c = S.cluster_to_dict(result.clusters[0], include_sample=False)
