@@ -29,7 +29,7 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from log_ai_compressor.constants import (
     CASCADE_KEYWORDS,
@@ -724,31 +724,33 @@ class EvidenceAssessment:
         }
 
 
-def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
-                    result: Optional[AnalysisResult] = None
-                    ) -> EvidenceAssessment:
-    """评估「凭这份日志能不能定论」，并列出证据缺口。
+class _EvidenceInventory(NamedTuple):
+    """一次评估的「事实底账」：判定与缺口都只从它推导，不各自重算。"""
 
-    设计立场：**不猜**。拿不出因果链就说证据不足，并精确说明补什么才
-    能定论 —— 这比给一个自信的错误根因有用得多。
+    confirmed: List[ErrorCluster]
+    likely: List[ErrorCluster]
+    has_timestamps: bool
+    has_stacks: bool
+    module_count: int
+    cross_chain_count: int
+    chain_count: int
+    levels: List[str]
 
-    判定完全由确定性规则得出，不含任何模型推断。
 
-    Args:
-        clusters: 已完成智能分析的簇列表
-        stats: 本次运行的统计信息
+def _inventory_evidence(clusters: List[ErrorCluster], stats: RunStats,
+                        result: Optional[AnalysisResult]
+                        ) -> Tuple[_EvidenceInventory, List[str]]:
+    """盘点「手上有什么」，并给出人类可读的 inputs_used 清单。
 
-    Returns:
-        EvidenceAssessment：判定 + 候选 + 缺口清单
+    缺口清单要有对照物，必须先说清「已有什么」—— 否则用户会去补一份
+    他其实已经有的证据。所以这一步**先于**缺口判定，且只算一遍。
     """
     confirmed = [c for c in clusters if c.root_cause_confidence == CONF_CONFIRMED]
     likely = [c for c in clusters
               if c.is_root_cause and c.root_cause_confidence == CONF_LIKELY]
 
     inputs_used: List[str] = []
-    gaps: List[EvidenceGap] = []
 
-    # --- 证据维度盘点：先把"手上有什么"记清楚，缺口才有对照 ---
     has_timestamps = any(
         c.first_seen is not None for c in clusters) or stats.time_start is not None
     if has_timestamps:
@@ -761,8 +763,7 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
         inputs_used.append("堆栈（可取 Caused-by 因果链）")
 
     modules = {c.module for c in clusters if c.module}
-    multi_module = len(modules) > 1
-    if multi_module:
+    if len(modules) > 1:
         inputs_used.append(f"多模块覆盖（{len(modules)} 个模块）")
 
     # 优化缺陷：调用链是本工具能**自己补上**的证据缺口。结构化日志里
@@ -776,10 +777,27 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
             f"调用链（{len(chains)} 条，跨服务 {len(cross)} 条，"
             f"trace_id/request_id 关联）")
 
-    levels = {c.level for c in clusters}
-    multi_level = len(levels) > 1
-    if multi_level:
-        inputs_used.append(f"多级别分布（{'/'.join(sorted(levels))}）")
+    levels = sorted({c.level for c in clusters})
+    if len(levels) > 1:
+        inputs_used.append(f"多级别分布（{'/'.join(levels)}）")
+
+    inv = _EvidenceInventory(
+        confirmed=confirmed, likely=likely,
+        has_timestamps=has_timestamps, has_stacks=has_stacks,
+        module_count=len(modules), chain_count=len(chains),
+        cross_chain_count=len(cross), levels=levels)
+    return inv, inputs_used
+
+
+def _collect_gaps(inv: _EvidenceInventory, clusters: List[ErrorCluster],
+                  stats: RunStats) -> List[EvidenceGap]:
+    """列出「还缺什么才能定论」—— 每条都是独立的确定性规则。
+
+    与 inputs_used 用同一份底账：已经自己填掉的缺口一律不再申报。
+    """
+    gaps: List[EvidenceGap] = []
+    confirmed = inv.confirmed
+    cross = inv.cross_chain_count
 
     # --- 缺口 1：没有确定性因果链 ---
     if not confirmed:
@@ -794,7 +812,7 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
         ))
 
     # --- 缺口 2：单一模块，无法跨服务定因 ---
-    if not multi_module and clusters:
+    if inv.module_count <= 1 and clusters:
         # 有跨服务调用链时，"看不到调用关系"这条已经不成立了 —— 缺的是
         # 更上游的日志，而不是关联本身。申报一个已经被自己填掉的缺口，
         # 等于让用户去补一份他其实已经有的证据。
@@ -816,7 +834,7 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
     # 已经拿到确定性因果链时不报这条：结论已经定了，再要求补关联键是
     # 噪音（和 no_causal_chain 在 CONFIRMED 时不报是同一个道理 ——
     # 缺口清单是"还缺什么才能定论"，不是"还缺什么锦上添花"）。
-    if clusters and not chains and not confirmed:
+    if clusters and not inv.chain_count and not confirmed:
         gaps.append(EvidenceGap(
             code="no_correlation_id",
             title="日志里没有任何关联键",
@@ -829,7 +847,7 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
         ))
 
     # --- 缺口 3：无时间戳，无法定先后 ---
-    if not has_timestamps:
+    if not inv.has_timestamps:
         gaps.append(EvidenceGap(
             code="no_timestamps",
             title="无时间戳",
@@ -840,7 +858,7 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
         ))
 
     # --- 缺口 4：无堆栈 ---
-    if not has_stacks:
+    if not inv.has_stacks:
         gaps.append(EvidenceGap(
             code="no_stacks",
             title="无异常堆栈",
@@ -851,9 +869,9 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
         ))
 
     # --- 缺口 5：候选难分伯仲 ---
-    if likely:
-        top = max(likely, key=lambda c: c.priority)
-        rivals = [c for c in likely
+    if inv.likely:
+        top = max(inv.likely, key=lambda c: c.priority)
+        rivals = [c for c in inv.likely
                   if c is not top and top.priority - c.priority < 5]
         if rivals:
             gaps.append(EvidenceGap(
@@ -867,7 +885,8 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
             ))
 
     # --- 缺口 6：缺少常态基线 ---
-    if stats.error_lines and stats.error_lines >= 10 and not has_timestamps:
+    if (stats.error_lines and stats.error_lines >= 10
+            and not inv.has_timestamps):
         gaps.append(EvidenceGap(
             code="no_baseline",
             title="无历史基线",
@@ -878,30 +897,26 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
         ))
 
     gaps.sort(key=lambda g: -g.weight)
+    return gaps
 
+
+def _decide_verdict(inv: _EvidenceInventory, clusters: List[ErrorCluster]
+                    ) -> Tuple[str, str, bool, List[ErrorCluster]]:
+    """给出判定 + headline + 能否定论，外加排好序的候选列表。
+
+    与 candidates 必须是**同一套排序**（v2.8.0 修过一次）。
+    此前 headline 取 `confirmed[0]` —— 入参顺序的第一个，于是 headline 随
+    调用方的簇顺序变化而 candidates 恒定：同一份报告里两个字段自相矛盾
+    （headline 点名 A，候选清单首位是 B）。当时 `analyze_clusters` 恰好
+    先排序再调用，端到端看不出来；但 assess_evidence 是**公开函数**，
+    一旦新增调用点或调整先后，就会静默退化成「点名了另一个簇」。
+    """
+    confirmed, likely = inv.confirmed, inv.likely
     candidates = sorted(confirmed or likely,
                         key=lambda c: (-c.priority, -c.count))
-    cand_dicts = [{
-        "id": c.cluster_id,
-        "level": c.level,
-        "module": c.module or "",
-        "summary": c.summary,
-        "count": c.count,
-        "priority": c.priority,
-        "confidence": c.root_cause_confidence,
-        "reason": c.root_cause_reason,
-        "evidence_lines": [c.first_line, c.last_line],
-    } for c in candidates[:5]]
 
     if confirmed:
         verdict = CONF_CONFIRMED
-        # 必须与 candidates 用**同一套排序**（v2.8.0 修）。
-        # 此前这里写的是 `confirmed[0]` —— 直接取入参顺序的第一个，于是
-        # headline 随调用方的簇顺序变化，而 candidates 恒定：两个字段
-        # 在同一份报告里自相矛盾（headline 点名 A，候选清单首位是 B）。
-        # 目前 `analyze_clusters` 恰好先排序再调用，所以端到端看不出来；
-        # 但 assess_evidence 是**公开函数**（tests 直接调），一旦新增调用
-        # 点、或调整两处调用的先后，就会静默退化成「点名了另一个簇」。
         top = max(confirmed, key=lambda c: (c.priority, c.count))
         headline = (f"已定位根因：{top.summary[:60]}"
                     f"（Caused-by 因果链直连，见第 {top.first_line} 行）")
@@ -922,6 +937,51 @@ def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
     if not candidates and verdict != CONF_INSUFFICIENT:
         verdict = CONF_INSUFFICIENT
         can_conclude = False
+
+    return verdict, headline, can_conclude, candidates
+
+
+def assess_evidence(clusters: List[ErrorCluster], stats: RunStats,
+                    result: Optional[AnalysisResult] = None
+                    ) -> EvidenceAssessment:
+    """评估「凭这份日志能不能定论」，并列出证据缺口。
+
+    设计立场：**不猜**。拿不出因果链就说证据不足，并精确说明补什么才
+    能定论 —— 这比给一个自信的错误根因有用得多。
+
+    判定完全由确定性规则得出，不含任何模型推断。
+
+    本函数只做编排，三步各自独立、可单测：
+      1. ``_inventory_evidence`` 盘点「手上有什么」（inputs_used）
+      2. ``_collect_gaps``       列「还缺什么」（gaps）
+      3. ``_decide_verdict``     定档并排候选（verdict / headline）
+    拆开的理由：v2.9.9 之前这三段挤在一个 209 行 / 34 分支的函数里，
+    改任何一段都要通读全部才能确认没弄坏另外两段 —— 而这个函数直接决定
+    「敢不敢下结论」，是最不该难以审阅的一段。
+
+    Args:
+        clusters: 已完成智能分析的簇列表
+        stats: 本次运行的统计信息
+        result: 分析结果，提供调用链等补充证据
+
+    Returns:
+        EvidenceAssessment：判定 + 候选 + 缺口清单
+    """
+    inv, inputs_used = _inventory_evidence(clusters, stats, result)
+    gaps = _collect_gaps(inv, clusters, stats)
+    verdict, headline, can_conclude, candidates = _decide_verdict(inv, clusters)
+
+    cand_dicts = [{
+        "id": c.cluster_id,
+        "level": c.level,
+        "module": c.module or "",
+        "summary": c.summary,
+        "count": c.count,
+        "priority": c.priority,
+        "confidence": c.root_cause_confidence,
+        "reason": c.root_cause_reason,
+        "evidence_lines": [c.first_line, c.last_line],
+    } for c in candidates[:5]]
 
     return EvidenceAssessment(
         verdict=verdict,
