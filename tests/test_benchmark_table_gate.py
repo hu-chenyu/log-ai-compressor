@@ -595,12 +595,20 @@ def test_verdict_with_no_measured_combination_is_reported_not_silently_green():
 
 
 def test_a_wrong_tally_next_to_a_right_one_is_still_caught():
-    """(c) 一行两个数、一个对一个错 —— 错的那个必须判红。"""
+    """(c) **同一口径**写两次、一个对一个错 —— 错的那个必须判红。
+
+    这里必须是**同一个口径**的两处场次：v2.11.0 的「只要有一个对得上
+    就算过」正是被这个形状抓住的（实测：旧代码对下面这句 `problems=[]`）。
+
+    写成两个**不同**口径的话，这条测试在旧代码上也照样通过 —— 那是装饰，
+    而且装饰得很有说服力。钉它的那次变异（把逐个校改回「有对上的就放过」）
+    在旧式输入下是全绿的。
+    """
+    text = "交付口径第一轮 0 胜 1 平 9 负，重跑后写成 0 胜 0 平 9 负。\n"
     probs, _seen, n, _notes = prove._bench_verdict_problems(
-        "t", "交付口径 0 胜 1 平 9 负、同预算档 7 胜 2 平 1 负。\n",
-        _REAL_BASE["datasets"])
-    assert n == 2
-    assert len(probs) == 1 and "7 胜 2 平 1 负" in probs[0], probs
+        "t", text, _REAL_BASE["datasets"])
+    assert n == 2, f"只认出 {n} 处"
+    assert len(probs) == 1 and "0 胜 0 平 9 负" in probs[0], probs
 
 
 def test_verdict_unlabeled_claims_are_counted_not_judged():
@@ -614,6 +622,103 @@ def test_verdict_unlabeled_claims_are_counted_not_judged():
     assert probs == [], probs
     assert n == 0
     assert notes["unlabeled"] == 1, notes
+
+
+# ---------------------------------------------------------------------------
+# v2.11.1 第三轮：判据自己的盲区（外部复核实测出来的）
+# ---------------------------------------------------------------------------
+def test_tallies_separated_by_chinese_punctuation_are_still_recognised():
+    """`0 胜、1 平、9 负` 曾经**整句静默消失** —— checked=0 且 unlabeled=0。
+
+    正则只认空格，于是改个标点整条断言就从射程里溜走，门禁一声不吭。
+    这是这一整轮要治的病的最后一种形态：不是量错，是**根本没量**。
+    """
+    for text in ("交付口径 0 胜、1 平、9 负。",
+                 "交付口径 0 胜 / 1 平 / 9 负。",
+                 "交付口径 0 胜，1 平，9 负。"):
+        probs, _seen, n, notes = prove._bench_verdict_problems(
+            "t", text + "\n", _REAL_BASE["datasets"])
+        assert n == 1, f"{text!r} 一处都没校到（unlabeled={notes['unlabeled']}）"
+        assert probs == [], probs
+
+
+def test_thousands_separator_in_a_tally_is_not_read_as_a_smaller_number():
+    """`1,210 胜` 曾经被读成 `210 胜` —— 而同一段对 events 是会剥逗号的。
+
+    指标列剥了逗号、场次列没剥，同一个文件里两套口径。
+    """
+    _p, _s, n, _notes = prove._bench_verdict_problems(
+        "t", "全量口径 1,210 胜 3 平 40 负。\n", _REAL_BASE["datasets"])
+    assert n == 1
+    claims = prove._verdict_claims("全量口径 1,210 胜 3 平 40 负。\n")
+    assert claims[0][1] == (1210, 3, 40), claims
+
+
+def test_a_formula_column_header_is_not_mistaken_for_a_caliber():
+    """「交付上限」是**公式列**不是实测口径 —— 表格侧早躲了，胜负侧当时没躲。
+
+    `| HPC | 27.0% | 8 胜 1 平 1 负 | 交付上限 27.0% |` 曾把场次判给
+    「交付」而报假红。假红会把真漂移淹没在噪音里，代价不低于漏红。
+    """
+    line = "| HPC | 27.0% | 8 胜 1 平 1 负 | 交付上限 27.0% |\n"
+    probs, _seen, n, _notes = prove._bench_verdict_problems(
+        "t", line, _REAL_BASE["datasets"])
+    assert probs == [], probs
+    assert n == 0, "「交付上限」被当成了口径标签"
+
+
+def test_a_partially_filled_baseline_does_not_produce_a_false_red():
+    """基线里**只有一个**数据集缺 verdict_delivery 时不许假红。
+
+    `any()` 会把「测了 9 个」当成「测过了」，于是重算出 0 胜 1 平 8 负，
+    然后反过来指责文档写错了 —— 而且怪错了对象（文档是对的）。
+    """
+    base = json.loads(json.dumps(_REAL_BASE))
+    for rec in base["datasets"].values():
+        if rec.get("verdict_delivery") == "平":      # 那个平局数据集
+            rec.pop("verdict_delivery")
+    probs, _seen, n, notes = prove._bench_verdict_problems(
+        "t", "对 Drain3 的战绩：交付口径 0 胜 1 平 9 负。\n", base["datasets"])
+    assert probs == [], f"残缺基线造出了假红：{probs}"
+    assert n == 0
+    assert notes["unverifiable"], "残缺必须被报成「无实测可对账」"
+
+
+def test_an_out_of_domain_tally_value_is_treated_as_unmeasured():
+    """基线里出现 `"tie"` 之类时属于「量不出来」，不是「量出来是 0」。"""
+    base = json.loads(json.dumps(_REAL_BASE))
+    for rec in base["datasets"].values():
+        if rec.get("verdict_delivery") == "平":
+            rec["verdict_delivery"] = "tie"
+    probs, _seen, n, notes = prove._bench_verdict_problems(
+        "t", "交付口径 0 胜 1 平 9 负。\n", base["datasets"])
+    assert probs == [], f"把 'tie' 当成 0 会报假红：{probs}"
+    assert notes["unverifiable"]
+
+
+def test_a_missing_events_field_does_not_crash_prove():
+    """基线里缺 `events` 曾经直接 KeyError 打死整个 prove.py。
+
+    `gather()` 没有兜底，一条门禁因为数据残缺崩掉、带 traceback——
+    「崩掉虽然也是红的，却红得没有信息」，而且它把**其他**主张一起带走了。
+    """
+    base = json.loads(json.dumps(_REAL_BASE))
+    base["datasets"]["HPC"].pop("events", None)
+    out = prove._bench_doc_problems("README.md", _REAL_README, base["datasets"])
+    problems = out[3]
+    assert not any("events" in p and "标注事件" in p for p in problems), problems
+    notes = out[4]
+    assert notes["cells_unmeasured"], "缺实测值的那几格必须被报出来"
+
+
+def test_an_unmeasured_comparison_cell_is_reported_not_silently_skipped():
+    """对照臂是 None 时曾经静默 `continue` —— 160 格和 157 格长得一模一样。"""
+    base = json.loads(json.dumps(_REAL_BASE))
+    for rec in base["datasets"].values():
+        rec["logslop"] = None
+    notes = prove._bench_doc_problems("README.md", _REAL_README,
+                                      base["datasets"])[4]
+    assert notes["cells_unmeasured"], "少校了几格却一声不吭"
 
 
 # ---------------------------------------------------------------------------

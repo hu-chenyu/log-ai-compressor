@@ -428,6 +428,22 @@ class TestLayeringGateDiscoversEntryLayers:
         assert c["holds"] is False
         assert "app.py" in c["detail"], c["detail"]
 
+    def test_a_declared_layer_that_no_longer_exists_also_fails(self, tmp_path,
+                                                              monkeypatch):
+        """**对称差**的另一个方向：名单里留着一个磁盘上已被删掉的层。
+
+        这一条不能靠「加一层」的那几条兜住：把 `drift` 从对称差改成
+        `discovered - 声明`（只留一个方向），前两条照样红，只有这条会
+        变绿 —— 而它恰恰是唯一能抓住这个方向的。
+        """
+        self._repo(tmp_path, {})
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        monkeypatch.setattr(prove, "_LAYER_ROOTS",
+                            tuple(prove._LAYER_ROOTS) + ("ghost_layer",))
+        c = prove.claim_layering()
+        assert c["holds"] is False, "名单里留着一个已不存在的层却判通过"
+        assert "ghost_layer" in c["detail"], c["detail"]
+
 
 class TestConfidenceGateCanActuallyFail:
     """`claim_confidence` 曾是 `... if not has_chain else True` 的恒真分支。"""

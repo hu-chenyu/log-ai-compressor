@@ -156,6 +156,79 @@ service/constants），并要求发现结果与 `_LAYER_ROOTS` **相等**：加�
 （实测那个 skip **目前没有在生效** —— 样例日志当前 8 簇。它是潜伏陷阱，
 不是在放过已经发生的回归。）
 
+### 第三轮复核：门禁自己的 11 个盲区，其中一条是我自己刚写错的数字
+
+第二轮的修复被再次独立复核（8 组定向问题 + 25 次变异）。先说清楚一件事，
+免得把「门禁测试没牙」误报成「门禁没修好」：**生产代码的七个洞基本都真的
+修上了** —— 25 次变异里挡住的那些，挡的位置全对。
+
+但复核判定这一轮**不合格**，两条硬红线：
+
+**1. 在一次专门修「没人看守的对外数字」的提交里，我写进了一个不是实测值的数字（🔴）**
+
+`docs/FAQ.md` 的「测试/主代码行数比」写的是 **≈1.37**，实测 **1.3807**。
+而同一笔提交里新加的那条门禁用固定容差 0.01 ——
+`abs(1.37 - 1.38) = 0.0099 < 0.01` —— **正好把它放了过去**。
+
+两件事同时发生，所以比「写错一个数」更糟：数字是错的，门禁是绿的，
+而门禁存在的理由恰恰就是校这个数字。
+
+判据改成**诚实取整**：按文档写的那个数**自己的小数位**去四舍五入实测值，
+必须正好得到它。于是
+
+    1.38 对 1.3807  →  通过（诚实）
+    1.37 对 1.3807  →  判红（不诚实）
+    1.4  对 1.3807  →  通过（1 位取整，诚实）
+
+**固定容差这个设计本身就是错的**：它可以被调成刚好放过某一个特定的错值。
+真正的判据不是「差得小不小」，而是「这个数是不是实测值取整得来的」。
+
+**2. 三条新门禁的测试是装饰（🔴）**
+
+§2.2 要求每条门禁都配一条「改坏被守的那一行 → 断言必须变红」。
+25 次变异里有 3 次**没有让目标测试变红**：
+
+| 变异 | 目标测试 | 结果 |
+| --- | --- | --- |
+| 同行同口径退回「有一个对得上就算过」 | `test_a_wrong_tally_next_to_a_right_one_is_still_caught` | **PASSED** |
+| `drift` 从对称差退化成单向差 | `test_dropping_a_layer_from_the_declaration_also_fails` | **PASSED** |
+| 门禁自己的正则被打坏 | `test_the_ratio_is_really_what_the_docs_say` | **PASSED** |
+
+三条都逐个查证过不是变异打偏：
+
+- 第一条的测试输入是**两个不同口径**的场次，旧逻辑根本碰不到它 ——
+  真正触发 (c) 的是**同一口径写两次、一对一错**。生产代码是对的，
+  而测试测的是**另一件事**。这类「测试还在响，守的不是它写的那件事」
+  比没有测试更难发现。
+- 第二条只覆盖了「加一层」和「从名单删一层」，漏了「**名单里留着一个
+  磁盘上已经不在的层**」—— 而那是唯一能抓住单向差的用例。
+- 第三条在测试文件里**把正则抄了一份**，所以门禁的正则坏掉时它照样绿。
+  这正是「变异改错一侧」的陷阱：测的是测试自己。
+
+**其余 8 条：判据自己的盲区**
+
+| 问题 | 修法 |
+| --- | --- |
+| `0 胜、1 平、9 负`（中文标点分隔）**整句静默消失**，`checked=0` 且 `unlabeled=0` | 正则接受顿号 / 逗号 / 斜杠作分隔符 |
+| 千分位没剥：`1,210 胜` 被读成 `210 胜`（同文件对 `events` 是剥的，两套口径） | 统一走 `_num()` |
+| `_verdict_has_data` 用 `any`：只有一个数据集缺字段时**假红且怪错对象**（文档是对的，门禁却指责它） | 改 `all()`，且取值必须落在「胜/平/负」域内 |
+| 基线缺 `events` → `KeyError` **打死整个 prove.py**（`gather()` 没有兜底，会把其它主张一起带走） | 改 `rec.get()` + 计入「未对账」 |
+| 对照臂为 `None` 时静默 `continue`，`checked` 从 160 悄悄降到 157 而 detail 只字不提 | 计入 `cells_unmeasured` 并报进 detail |
+| `\| HPC \| 27.0% \| 8 胜 1 平 1 负 \| 交付上限 27.0% \|` 把场次判给「交付」而假红（表格侧早就躲「交付上限」，胜负侧当时没躲） | 复用同一套 `_BENCH_SKIP_CELLS` |
+| `_code_metrics` 与 `_count_lines_in` 把同一个口径写了两遍 —— 换个算法就漂 | 前者改为调用后者 |
+| `_METRIC_DOCS` 没有「要么在名单里、要么写明豁免」的看门狗，三份里两份空转 | 加看门狗；豁免必须写理由 |
+
+**一条记录下来而没有修的边界**
+
+胜负判据的「最近」是**位置启发式**，它分不清「这一行的场次属于前面那个口径」
+和「这一行后半段夹了一句历史数字」。把 `docs/BENCHMARK.md` 289–297 段
+（第一轮的「3 胜 2 负」）合并成一行时，那个 3/0/2 会被判给同段的「交付口径」
+而报假红。
+
+四份受校文档现状误报为 0（22 处全对），所以它是**潜伏**的；但它确实存在，
+写法一改就可能撞上。写进 `_verdict_claims` 的 docstring 而不是假装没有 ——
+这与 AGENTS.md §4b 对确定性边界的处理是同一个做法。
+
 ### 新增门禁
 
 | 门禁 | 守的是什么 |
@@ -176,6 +249,17 @@ service/constants），并要求发现结果与 `_LAYER_ROOTS` **相等**：加�
 | `test_doc_without_a_table_is_not_charged_for_missing_rows` | 无表文档不得报「缺数据集的行」—— 防新门禁自己造出假红 |
 | `TestLayeringGateDiscoversEntryLayers`（5 条） | 接入层自动发现：加一层不登记判红、删一层也判红、**登记之后必须真的扫它** |
 | `tests/test_web_server_boundaries.py`（5 条） | `/api/fs/file` 限根、不泄露根外路径是否存在、`can_go_up` 随根变 |
+| `test_a_wrong_tally_next_to_a_right_one_is_still_caught`（重写） | 改成**同一口径**写两次、一对一错 —— 旧写法在旧代码上就通过，是装饰 |
+| `test_a_declared_layer_that_no_longer_exists_also_fails` | 名单里留着磁盘上已不存在的层也要判红（唯一能抓住 `drift` 单向差的那条） |
+| `test_tallies_separated_by_chinese_punctuation_are_still_recognised` | 顿号 / 斜杠分隔的场次不许静默消失 |
+| `test_thousands_separator_in_a_tally_is_not_read_as_a_smaller_number` | `1,210 胜` 不许被读成 `210 胜` |
+| `test_a_formula_column_header_is_not_mistaken_for_a_caliber` | 「交付上限」是公式列，不是实测口径 |
+| `test_a_partially_filled_baseline_does_not_produce_a_false_red` | 基线**只缺一个**数据集的字段时不许假红、不许怪错对象 |
+| `test_an_out_of_domain_tally_value_is_treated_as_unmeasured` | 基线出现 `"tie"` 之类属于「量不出来」，不是「量出来是 0」 |
+| `test_a_missing_events_field_does_not_crash_prove` | 基线缺 `events` 不得 KeyError 打死整个 prove.py |
+| `test_an_unmeasured_comparison_cell_is_reported_not_silently_skipped` | 对照臂为 `None` 时少校的几格必须报出来 |
+| `test_the_ratio_gate_cannot_be_appeased_by_a_loose_tolerance` | 固定容差不能被调成刚好放过某个特定错值 |
+| `test_every_doc_mentioning_the_ratio_is_listed` | 「行数比」抄进第五个文件必须有人发现；豁免必须写理由 |
 
 ### 记成明示决定的已知例外
 
