@@ -153,8 +153,14 @@ def test_no_ignore_rule_carries_a_trailing_comment():
     ".coverage.machine.99.1",
     "coverage.xml",
     ".coveragerc.ci",
-    ".pytest_cache",
-    ".ruff_cache",
+    # 下面两条**必须带尾部斜杠**：`.gitignore` 里它们写成 `.pytest_cache/`，
+    # 是**目录**规则，而 git 只在路径确实存在且是目录时才匹配目录规则。
+    # v2.11.1 首次发版实测踩过：probe 写成 `.pytest_cache`（无斜杠）时，
+    # 本地绿（跑过 pytest，目录真实存在）、CI 红（干净 checkout 里不存在，
+    # git 按文件判断，目录规则不命中）—— **同一个探针在两个环境里语义不同**，
+    # 而本地那次绿什么也没证明。
+    ".pytest_cache/",
+    ".ruff_cache/",
 ])
 def test_artifact_rules_actually_take_effect(probe: str):
     """行为口径：问 git 本人「这个文件你管不管」，而不是比对文本。
@@ -170,3 +176,20 @@ def test_artifact_rules_actually_take_effect(probe: str):
         env=_ENV,
     )
     assert proc.returncode == 0, f"git 不忽略 {probe} —— 规则写了却没生效"
+
+
+def test_a_directory_rule_is_probed_as_a_directory():
+    """反向：目录规则**也**必须真的生效 —— 用尾部斜杠问。
+
+    守的是「目录规则被改坏/被行内注释废掉」这条路。本地跑过 pytest 时
+    `.pytest_cache` 真实存在，无斜杠的探针照样绿；CI 上干净 checkout 里
+    不存在，无斜杠的探针会红 —— 两次「红绿相反」都源于同一个陷阱。
+    """
+    text = GITIGNORE.read_text(encoding="utf-8")
+    dirs = [s.rstrip("/") for s in _patterns(text) if s.endswith("/")]
+    assert dirs, "夹具前提：.gitignore 里至少有一条目录规则"
+    for d in dirs:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", f"{d}/"],
+            cwd=ROOT, capture_output=True, env=_ENV)
+        assert proc.returncode == 0, f"git 不忽略目录规则 {d}/"
