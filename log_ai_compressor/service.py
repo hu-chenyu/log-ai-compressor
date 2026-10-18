@@ -623,9 +623,19 @@ def verify_result(result: AnalysisResult) -> Dict[str, Any]:
     - 源文件已不在（换机器、日志轮转清理）→ MISSING_SOURCE；
     - 粘贴文本没有可回读的源文件 → NO_SOURCE，如实说明而不是谎称通过。
 
-    verdict 只有三种：VERIFIED（全对）/ TAMPERED（有对不上的）/
-    NO_EVIDENCE（本来就没有证据）。**没有"大部分通过"这个档位** ——
-    一份掺了假证据的报告不该因为大部分为真就放行。
+    verdict 有四档，必须写在同一行（折行会被 tests/test_verdict_surfaces.py
+    判成漏档）：
+
+        VERIFIED（全对）/ TAMPERED（回读过且对不上）/ UNVERIFIABLE（有引用但一条都回读不了）/ NO_EVIDENCE（本来就没有证据）
+
+    **没有"大部分通过"这个档位** —— 一份掺了假证据的报告不该因为大部分为真
+    就放行。
+
+    UNVERIFIABLE 与 TAMPERED 的区别是**方向**的：前者是「验不了」，后者是
+    「查出了对不上的东西」。把它们混为一谈等于指控一个没发生的篡改 ——
+    v2.11.1 在这一层分开了，但 CLI / MCP / Web 的措辞一度仍按三档写，
+    详见 cli.py 的 `_VERDICT_EXIT`。（另：那句枚举若被折行，
+    tests/test_verdict_surfaces.py 会判成漏档，所以请保持同一行。）
     """
     refs = [ref for c in result.clusters for ref in c.evidence]
     report = verify_refs(refs).as_dict()
