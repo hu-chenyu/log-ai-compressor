@@ -31,10 +31,11 @@ CI 的 `windows-3.12` 矩阵也在守它）。它必须保持**纯 ASCII + CRLF*
 ## 2. 跑起来看看
 
 ```bash
-log-ai-compressor run examples/sample_system.log -f summary
+log-ai-compressor run examples/sample_system.log -f json -o report.json
 log-ai-compressor verify --report report.json      # 重读原文自校验
 python -m pytest -q                                # 全量测试应该十几秒内跑完
-python scripts/prove.py                            # 10 条自证主张应全部成立
+python scripts/prove.py                            # 11 条自证主张应全部成立
+python scripts/mutation_scorecard.py               # 17 条已知危险变异应全被抓住
 ```
 
 ## 3. 分支与提交

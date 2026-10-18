@@ -17,6 +17,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import re
+import shutil
 import sys
 
 import pytest
@@ -43,6 +44,7 @@ prove = _load_prove()
 _REAL_METRICS = prove._code_metrics()
 _REAL_COUNT = len(prove._CLAIM_FNS)
 _REAL_RATIO = prove._count_ratio()
+_REAL_DENOM = prove._coverage_denominator()
 
 
 def _rewrite(text: str, old: str, new: str) -> str:
@@ -58,8 +60,15 @@ def gate(tmp_path, monkeypatch):
     同时把 _code_metrics 钉成**真实**值：临时目录里没有 log_ai_compressor/，
     不钉住的话行数与模块数会算成 0，门禁会因为另一个原因变红 ——
     那样测的就不是「条数对不对」，而是「目录存不存在」。
+
+    `_coverage_denominator` 同样要钉：它会去读 `ROOT/pyproject.toml`，
+    临时目录里没有那个文件，于是抛 FileNotFoundError —— 同样是「因为
+    另一个原因变红」。覆盖率分母有自己的门禁
+    （`TestCoverageDenominatorIsGated`），这里只让它别挡路。
     """
     monkeypatch.setattr(prove, "_code_metrics", lambda: dict(_REAL_METRICS))
+    monkeypatch.setattr(prove, "_coverage_denominator",
+                        lambda: _REAL_DENOM)
 
     def _run(readme_text: str) -> dict:
         (tmp_path / "README.md").write_text(readme_text, encoding="utf-8")
@@ -85,9 +94,15 @@ class TestReadmeLineRatioIsGated:
         不钉的话，ROOT 指到临时目录后 `_code_metrics()` 会算成 0 行 0 模块
         —— 门禁会「因为另一个原因变红」，那样测的就不是「比值对不对」，
         而是「目录存不存在」。
+
+        `_coverage_denominator` 同理：它要读 `ROOT/pyproject.toml`，
+        临时目录里没有。它自己有门禁（`TestCoverageDenominatorIsGated`），
+        这里只让它别在这几条里挡路。
         """
         monkeypatch.setattr(prove, "_code_metrics", lambda: dict(_REAL_METRICS))
         monkeypatch.setattr(prove, "_count_ratio", lambda: _REAL_RATIO)
+        monkeypatch.setattr(prove, "_coverage_denominator",
+                            lambda: _REAL_DENOM)
 
     def _run(self, tmp_path, monkeypatch, faq_text: str) -> dict:
         self._pin(monkeypatch)
@@ -170,6 +185,108 @@ class TestReadmeLineRatioIsGated:
         """没写「行数比」的文档不得被凭空判红 —— 假红比漏红更糟。"""
         c = self._run(tmp_path, monkeypatch, "这里没有任何行数比。\n")
         assert c["holds"] is True, c["detail"]
+
+
+class TestCoverageDenominatorIsGated:
+    """README 里「96% 是在 N 行上算的」这个分母必须与仓库一致。
+
+    它此前**完全没有门禁**：`claim_readme_metrics` 只看「生产代码」那一行，
+    而分母写在下面的引用块里。于是批 1 给 `server.py` 加了 46 行之后，
+    分母从 7,144 变成 7,224，而 prove.py 全绿 ——
+    **同一篇文档里两行数字，一行有人校一行没有。**
+    """
+
+    def test_the_omit_list_comes_from_pyproject(self):
+        """分母必须按 `pyproject.toml` 的 omit 名单算，不能另抄一份。
+
+        名单另抄一份的话，它漂了你却不知道；`test_coverage_omit_watchdog.py`
+        钉的是 pyproject 那份。
+        """
+        import tomllib
+        cfg = tomllib.loads(
+            (_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        omit = cfg["tool"]["coverage"]["run"]["omit"]
+        denom, omitted, names = _REAL_DENOM
+        assert names == list(omit), (
+            f"门禁用的是 {names}，pyproject 里是 {omit}")
+        assert omitted > 0, "omit 名单非空，却一行都没减掉"
+
+    def test_denominator_is_total_minus_omitted(self):
+        denom, omitted, _ = _REAL_DENOM
+        assert denom == _REAL_METRICS["lines"] - omitted, _REAL_DENOM
+        assert denom < _REAL_METRICS["lines"], "omit 没生效，分母等于全量"
+
+    def test_the_real_readme_holds(self):
+        assert prove.claim_readme_metrics()["holds"] is True, (
+            "真实 README 与仓库不一致 —— 分母该回填了")
+
+    def test_a_stale_denominator_goes_red(self, tmp_path, monkeypatch):
+        readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+        m = re.search(r"是在\s*([\d,]+)\s*行上算的", readme)
+        assert m, "README 里找不到那句「是在 N 行上算的」"
+        good = m.group(1)
+        broken = readme.replace(f"是在 {good} 行上算的",
+                                "是在 7,144 行上算的", 1)
+        assert broken != readme, "替换空转了 —— README 写法可能变了"
+        (tmp_path / "pyproject.toml").write_text(
+            (_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+            encoding="utf-8")
+        (tmp_path / "README.md").write_text(broken, encoding="utf-8")
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        assert prove.claim_readme_metrics()["holds"] is False, (
+            "分母写错却仍然判成立 —— 这道门禁是装饰的")
+
+
+class TestTokenRatiosAreReconciled:
+    """`docs/BENCHMARK.md` 的 token 表 → 散落在三份文档里的「压缩比 N 倍」。
+
+    这条链此前**完全不存在**：那张表不在 `benchmark_baseline.json` 里
+    （基线只存百分数与胜负），于是表里的数和散文里的数谁也不校。
+    实测：表是 15,299,983 → 746，而 README / FAQ / POSITIONING 三处写的
+    不是同一个数（其中一处写的是 12,289）。
+
+    所以这里要守两件事：**数对得上**，以及**这道检查本身还在**。
+    """
+
+    def test_the_table_is_parsed(self):
+        rows = prove._token_table()
+        assert rows, "docs/BENCHMARK.md 里找不到那张 token 压缩表"
+        assert "OpenStack" in rows, rows.keys()
+        raw, ours, d3 = rows["OpenStack"]
+        assert raw > 0 and ours > 0 and d3 > 0, rows["OpenStack"]
+
+    def test_the_current_docs_agree_with_the_table(self):
+        problems, note = prove._token_ratio_problems()
+        assert not problems, (
+            "表与散文的派生比值对不上：\n" + "\n".join(problems) + f"\n（{note}）")
+
+    def test_a_stale_ratio_in_any_doc_is_caught(self, tmp_path, monkeypatch):
+        real = _ROOT / "README.md"
+        good = real.read_text(encoding="utf-8")
+        m = re.search(r"([\d,]+)\s*倍是\s*OpenStack", good)
+        assert m, "README 里找不到 OpenStack 那句压缩比 —— 写法变了先更新本测试"
+        broken = good.replace(m.group(1), "12,289", 1)
+        assert broken != good, "替换空转了"
+        (tmp_path / "README.md").write_text(broken, encoding="utf-8")
+        for rel in ("docs/FAQ.md", "docs/POSITIONING.md", "docs/BENCHMARK.md"):
+            d = tmp_path / rel
+            d.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(_ROOT / rel, d)
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        problems, _ = prove._token_ratio_problems()
+        assert problems, "把三处之一的压缩比改错却仍然判通过"
+        assert any("12289" in p for p in problems), problems
+
+    def test_a_time_ratio_is_not_mistaken_for_a_compression_ratio(self):
+        """反例对照：耗时比（「慢 48 倍」）不该被当成压缩比来校。
+
+        第一版判据只认「同行出现数据集名 + N 倍」，于是把三处**耗时**
+        比也报成了不一致 —— 假红。门禁一旦开始报不成立的东西，
+        人就不会再读它。
+        """
+        problems, _ = prove._token_ratio_problems()
+        joined = "\n".join(problems)
+        assert "耗时" not in joined and "慢 " not in joined, joined
 
 
 class TestReadmeClaimCountIsGated:

@@ -369,6 +369,61 @@ def cmd_rules(args) -> int:
     return EXIT_OK
 
 
+#: `verify` 的 verdict → (该说的话, 退出码)。
+#:
+#: 修的是 v2.11.1 那个「方向相反的假警报」在 **CLI 这一层**的漏网：
+#: `core/evidence.py` 早已把 `UNVERIFIABLE` 独立成档（**源不可读 ≠ 被篡改**），
+#: 但这里只认 `VERIFIED` / `NO_EVIDENCE`，剩下的一律落进
+#: 「存在对不上的引用 —— 日志可能已被修改」的兜底分支。
+#:
+#: 实测（把源日志轮转走之后复核）：
+#:
+#:     自校验结论：UNVERIFIABLE
+#:     存在对不上的引用 —— 结论可能来自已被修改的日志，请勿直接采信。   ← stderr
+#:     exit 1
+#:
+#: 日志根本没被改过，只是没了。那不是「不够谨慎」，是**指控了一个没有发生的
+#: 事** —— 而且它会让照着这个退出码写 CI 的人无端地把排查结果判成失败。
+#:
+#: 退出码为什么与 `NO_EVIDENCE` 一样取 0：两者都是「工具跑完了，结论写在
+#: stdout 的 `自校验结论：` 里」，不是「校验失败」。**验不了不是被抓了**。
+#: 真要区分「验过了」与「验不了」，读 verdict 字段，不要拿退出码当结论。
+#: 退出码为什么 `UNVERIFIABLE` 也取 1（v2.11.1 的明确决定，不是我这一版改的）：
+#: 结论**已经无法被核实**，返回 0 等于说「那份报告还成立」—— 而它并未成立，
+#: 只是验不了。两者对读报告的人意义完全不同。
+#:
+#: 但**措辞**必须分开：退出码 1 说的是「你没通过这一关」，不是「有人动了
+#: 你的日志」。第一版把 UNVERIFIABLE 掉进兜底分支，屏幕上打出的是
+#: 「结论可能来自已被修改的日志，请勿直接采信」—— 日志根本没被改过，
+#: 只是轮转走了。那是指控一个没有发生的事，而
+#: tests/test_forensics.py 那条既有用例只查了 stdout，**stderr 里的指控
+#: 从来没被任何测试看见过**。
+_VERDICT_EXIT = {
+    "VERIFIED": (
+        "每条结论都能在原始日志里逐行复核。", EXIT_OK),
+    "NO_EVIDENCE": (
+        "没有可回读的证据引用（粘贴文本，或条目超出摄入窗口）。", EXIT_OK),
+    "UNVERIFIABLE": (
+        "有引用，但**一条都回读不了**（源文件已删 / 被轮转清理 / 粘贴文本没有"
+        "源）—— 这说明「验不了」，**不是**「查出问题」。结论可能仍然正确，"
+        "但本机已无从复核；要复核请把原始日志找回来。", EXIT_ERROR),
+    "TAMPERED": (
+        "存在对不上的引用 —— 日志**确实被改过**，结论可能来自旧版本，请勿直接采信。",
+        EXIT_ERROR),
+}
+
+
+def _verdict_exit(report: dict) -> int:
+    """JSON 模式下按 verdict 决定退出码。
+
+    四档**全部**列在 `_VERDICT_EXIT` 里，而不是让 TAMPERED 掉进兜底分支：
+    兜底分支说的是「对不上」，于是将来**新加**的任何一个档位都会被默认当成
+    坏消息 —— 一个还没想清楚的档位，先被当成指控发出去了。
+    真出现表里没有的 verdict，仍然失败（那是没兑现的承诺，不该放行）。
+    """
+    return _VERDICT_EXIT.get(report.get("verdict"), ("", EXIT_ERROR))[1]
+
+
 def cmd_verify(args) -> int:
     """证据自校验：把结论的出处拉回原始日志逐条核对。
 
@@ -452,7 +507,7 @@ def cmd_verify(args) -> int:
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        return EXIT_OK if report["ok"] else EXIT_ERROR
+        return _verdict_exit(report)
 
     mode_label = ("复核已导出报告" if args.report else "当场自检（仅证明此刻自洽）")
     print(f"模式：{mode_label}")
@@ -470,15 +525,13 @@ def cmd_verify(args) -> int:
                   file=sys.stderr)
     print()
     print(f"自校验结论：{report['verdict']}")
-    if report["verdict"] == "VERIFIED":
-        print("每条结论都能在原始日志里逐行复核。")
-        return EXIT_OK
-    if report["verdict"] == "NO_EVIDENCE":
-        print("没有可回读的证据引用（粘贴文本，或条目超出摄入窗口）。")
-        return EXIT_OK
-    print("存在对不上的引用 —— 结论可能来自已被修改的日志，请勿直接采信。",
-          file=sys.stderr)
-    return EXIT_ERROR
+    text, code = _VERDICT_EXIT.get(report["verdict"], ("", EXIT_ERROR))
+    if code == EXIT_OK:
+        print(text)
+    else:
+        print(text or ("出现未知的自校验结论 —— 工具契约被改过，"
+                        "请当成失败处理，不要当成通过。"), file=sys.stderr)
+    return code
 
 
 def cmd_web(args) -> int:

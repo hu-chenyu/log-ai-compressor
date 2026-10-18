@@ -43,8 +43,8 @@ INSTRUCTIONS = f"""\
 
   「这个结论靠谱吗 / 日志是不是被人改过」
       → verify_evidence。它重读原始日志逐行核对每条结论的出处摘要，
-        返回 VERIFIED / TAMPERED。**这个工具不需要你相信它**，
-        你可以自己跑这一步。
+        返回 VERIFIED / TAMPERED / UNVERIFIABLE / NO_EVIDENCE。
+        **这个工具不需要你相信它**，你可以自己跑这一步。
 
 ## 怎么读它的输出（这条比工具本身更重要）
 
@@ -354,7 +354,9 @@ def get_cluster_detail(
         "取证自校验：核对结论的出处是否仍与原始日志一致。"
         "传 report_path 复核一份已导出的 JSON 报告（推荐：报告发出后"
         "日志可能已被修改或轮转清理）；只传 path 是当场自检。"
-        "返回 VERIFIED / TAMPERED / NO_EVIDENCE。"
+        "返回 VERIFIED / TAMPERED / UNVERIFIABLE / NO_EVIDENCE。"
+        "**UNVERIFIABLE 不等于 TAMPERED**：前者是「源读不到，验不了」，"
+        "后者是「回读过了，对不上」。把它们混为一谈，等于指控一个没发生的篡改。"
         "本工具的立场是「你不必相信我，自己复核」—— "
         "在把结论当成事实转述给用户之前跑这一步。"
     ),
@@ -384,7 +386,7 @@ def verify_evidence(
         rule: 解析规则
 
     Returns:
-        {"ok": bool, "verdict": "VERIFIED"|"TAMPERED"|"NO_EVIDENCE",
+        {"ok": bool, "verdict": "VERIFIED"|"TAMPERED"|"UNVERIFIABLE"|"NO_EVIDENCE",
          "mode": "report"|"self-check", "checked": n, "matched": n,
          "mismatched": n, "fingerprint": sha256, "citations": [...]}
         ok 是**校验结论**（True 仅当全部证据对得上）：ok=False 时**不要**

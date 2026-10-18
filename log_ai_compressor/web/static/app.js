@@ -455,7 +455,9 @@ function renderVerdict(data) {
  * 存在理由：取证层的核心主张「每条结论都能被独立复核」必须在浏览器里
  * 也当场可验 —— 用户不能只能在命令行跑 verify 才知道自己的日志有没有
  * 被改过，否则「可复核」只是一句 README 里的漂亮话。
- * 结果只有 VERIFIED / TAMPERED / NO_EVIDENCE 三档，没有「大部分通过」。
+ * 结果只有 VERIFIED / TAMPERED / UNVERIFIABLE / NO_EVIDENCE 四档，没有「大部分通过」。
+ * UNVERIFIABLE 与 TAMPERED 必须分开：前者是「源读不到，验不了」，
+ * 后者是「回读过了，对不上」。把前者显示成后者等于指控一个没发生的篡改。
  */
 async function verifyEvidence() {
   if (!State.jobId) { toast('请先分析', 'err'); return; }
@@ -470,10 +472,11 @@ async function verifyEvidence() {
     const r = await api('/api/verify', {
       method: 'POST', body: JSON.stringify({ job_id: State.jobId }),
     });
-    const ok = r.verdict === 'VERIFIED';
-    const cls = ok ? 'ok' : (r.verdict === 'NO_EVIDENCE' ? 'warn' : 'bad');
-    const label = { VERIFIED: '全部核对通过', TAMPERED: '存在对不上的出处',
-                    NO_EVIDENCE: '无源文件可回读' }[r.verdict] || r.verdict;
+    // UNVERIFIABLE 用 warn 而不是 bad：源读不到是「验不了」，不是「被抓了」。
+    const cls = r.verdict === 'VERIFIED' ? 'ok'
+      : (r.verdict === 'TAMPERED' ? 'bad' : 'warn');
+    // 四档写在同一行：tests/test_verdict_surfaces.py 按「同行枚举」校漏档。
+    const label = { VERIFIED: '全部核对通过', TAMPERED: '存在对不上的出处', UNVERIFIABLE: '源读不到，验不了（不是被篡改）', NO_EVIDENCE: '无源文件可回读' }[r.verdict] || r.verdict;
     const bad = (r.details || []).filter((d) => d.status !== 'MATCH');
     out.innerHTML = `<div class="verify-box ${cls}">
       <div class="verify-head">${esc(label)} <span class="dim">${esc(r.verdict)}</span></div>

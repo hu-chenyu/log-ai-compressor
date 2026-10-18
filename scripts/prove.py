@@ -214,19 +214,38 @@ _METRIC_DOCS_EXEMPT = {
                     "它必然记着若干个已经作废的旧比值"}
 
 
+def _count_lines_of(path) -> int:
+    """单个文件的非空非注释行 —— 口径与 `_count_lines_in` 完全一致。"""
+    n = 0
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        s = raw.strip()
+        if s and not s.startswith("#"):
+            n += 1
+    return n
+
+
 def _count_lines_in(root_name: str) -> int:
     """与 `_code_metrics` **同一个口径**数某个目录下的非空非注释行。
 
     口径必须共用一个函数：两个地方各写一遍，换个算法就漂了 ——
     而漂了的恰好是一个对外数字。
     """
-    total = 0
-    for p in (ROOT / root_name).rglob("*.py"):
-        for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            s = raw.strip()
-            if s and not s.startswith("#"):
-                total += 1
-    return total
+    return sum(_count_lines_of(p) for p in (ROOT / root_name).rglob("*.py"))
+
+
+def _coverage_denominator() -> tuple[int, int, list]:
+    """(分母, 被 omit 掉的行数, omit 名单)。
+
+    `pyproject.toml` 的 `[tool.coverage.run] omit` 决定分母，而这份名单本身
+    由 `tests/test_coverage_omit_watchdog.py` 钉住。名单直接从 pyproject 读，
+    不在这里另抄一份 —— 抄的那份会漂，而漂掉的又是一个对外数字。
+    """
+    import tomllib
+    cfg = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    omit = list(cfg.get("tool", {}).get("coverage", {}).get("run", {})
+                .get("omit", []) or [])
+    omitted = sum(_count_lines_of(ROOT / o) for o in omit if (ROOT / o).is_file())
+    return _code_metrics()["lines"] - omitted, omitted, omit
 
 
 def _count_ratio() -> float:
@@ -310,16 +329,35 @@ def claim_readme_metrics() -> dict:
                         f"位取整得不到它")
     ratio_ok = not ratio_problems
 
+    # 「96% 是在 N 行上算的」—— 覆盖率分母。
+    #
+    # 这个数此前**根本没有门禁**：本 claim 只看「生产代码」那一行，而分母
+    # 写在下面的引用块里。于是批 1 给 server.py 加了 46 行之后，分母从
+    # 7,144 变成 7,224，而 prove.py 全绿。
+    #
+    # 形状与 v2.11.0 那条「行数比 ≈X」完全同源：**渲染出来的数字与算出来的
+    # 数字，永远不会在文本里相遇**，除非有人显式把它们连起来。
+    denom_real, omitted_lines, omit_names = _coverage_denominator()
+    got_denom = re.search(r"是在\s*([\d,]+)\s*行上算的", readme)
+    if not got_denom:
+        denom_ok = False
+        denom_note = "README 里找不到「96% 是在 N 行上算的」那句"
+    else:
+        denom_claimed = int(got_denom.group(1).replace(",", ""))
+        denom_ok = denom_claimed == denom_real
+        denom_note = (f"覆盖率分母写 {denom_claimed}，实测 {denom_real}"
+                      f"（{m['lines']} − {omitted_lines}，omit={omit_names}）")
+
     detail = (f"README 写 {claimed_lines} 行 / {claimed_modules} 个模块；"
               f"实测 {m['lines']} 行 / {m['modules']} 个模块"
               f"（口径：log_ai_compressor/**/*.py 非空非注释行）；"
               f"README 写自证主张 {found or '未找到'} 条，"
               f"本文件实际登记 {expected} 条；"
-              f"测试/主代码行数比实测 {ratio_real}")
+              f"测试/主代码行数比实测 {ratio_real}；{denom_note}")
     if ratio_problems:
         detail += "；" + "；".join(ratio_problems[:3])
     return claim("README 工程指标与仓库一致",
-                 metrics_ok and counts_ok and ratio_ok, detail)
+                 metrics_ok and counts_ok and ratio_ok and denom_ok, detail)
 
 
 # 「本项目」自己的口径列。它们的存在本身就说明这是一张**证据保留率**表。
@@ -833,6 +871,103 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
     return rows_total, checked, v_checked, problems, notes
 
 
+_TOKEN_TABLE_MARK = "原始 tokens（旧口径）"
+#: 会引用那张 token 表里的**派生比值**的文档。
+#: POSITIONING.md 那一行原本不点数据集名 —— 那等于比值无从判定来源，
+#: 现在那一行自己写了来源，才进得了对账射程。
+_TOKEN_RATIO_DOCS = ("README.md", "docs/FAQ.md", "docs/POSITIONING.md",
+                     "docs/BENCHMARK.md")
+
+
+def _token_table() -> dict:
+    """`docs/BENCHMARK.md` 那张 token 压缩表：数据集 -> (原始, 本项目, Drain3)。
+
+    与保留率表**不是同一张**，而且它此前**既没有实测对账、也没有任何内部
+    一致性检查** —— `docs/benchmark_baseline.json` 里根本没有这三个数
+    （基线只存百分数与胜负）。于是散落在 README / FAQ / POSITIONING 里的
+    「压缩比 N 倍」是从这张表除出来的，却没人校过：表是
+    15,299,983 → 746，而三处散文写的不是同一个数。
+    """
+    path = ROOT / "docs" / "BENCHMARK.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        # 缺表时返回空，让 `_token_ratio_problems` 报一句人能读懂的
+        # 「找不到那张 token 压缩表」，而不是抛一个 FileNotFoundError ——
+        # 与本 claim 处理「缺 baseline 文件」的方式保持一致。
+        return {}
+    rows: dict = {}
+    in_table = False
+    for ln in text.splitlines():
+        if _TOKEN_TABLE_MARK in ln:
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        s = ln.strip()
+        if not s.startswith("|"):
+            break
+        cells = [c.strip().replace("**", "") for c in s.strip("|").split("|")]
+        if len(cells) != 4 or cells[0] in ("数据集", ""):
+            continue
+        try:
+            rows[cells[0]] = tuple(int(c.replace(",", "")) for c in cells[1:4])
+        except ValueError:
+            continue
+    return rows
+
+
+def _token_ratio_problems() -> tuple:
+    """表 → 散文那一步的对账。返回 (问题列表, 说明)。"""
+    import re
+    rows = _token_table()
+    if not rows:
+        return ["docs/BENCHMARK.md 里找不到那张 token 压缩表"
+                "（文件缺失，或表头「原始 tokens（旧口径）」被改了）"], "找不到表"
+
+    problems: list = []
+    checked = 0
+    for ds, (raw, ours, _d3) in rows.items():
+        if ours <= 0:
+            continue
+        expect = raw // ours
+        for doc in _TOKEN_RATIO_DOCS:
+            path = ROOT / doc
+            if not path.is_file():
+                continue
+            for lineno, ln in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1):
+                # 必须**同时**出现数据集名与「压缩」二字才算数。
+                # 第一版只认数据集名，于是把「HealthApp 上慢 48 倍」这种
+                # **耗时**比也当成了压缩比来校 —— 三处假红。
+                # 假红比假绿好，但门禁一旦开始报不成立的东西，人就不会再读它。
+                if ds not in ln or "压缩" not in ln:
+                    continue
+                for raw_n in re.findall(r"([\d,]+)\s*倍", ln):
+                    checked += 1
+                    claimed = int(raw_n.replace(",", ""))
+                    if claimed != expect:
+                        problems.append(
+                            f"{doc}:{lineno} 写 {ds} 压缩比 {claimed} 倍，"
+                            f"按表算是 {expect} 倍（{raw:,} ÷ {ours}）")
+    d3 = [v[2] for v in rows.values() if v[2] > 0]
+    if len(d3) >= 2:
+        span = max(d3) // min(d3)
+        bench = (ROOT / "docs" / "BENCHMARK.md").read_text(encoding="utf-8")
+        for raw_n in re.findall(r"跨度\s*([\d,]+)\s*倍", bench):
+            checked += 1
+            claimed = int(raw_n.replace(",", ""))
+            if claimed != span:
+                problems.append(
+                    f"docs/BENCHMARK.md 写 Drain3 跨度 {claimed} 倍，"
+                    f"按表算是 {span} 倍（{max(d3):,} ÷ {min(d3):,}）")
+    os_row = rows.get("OpenStack", (0, 0, 0))
+    note = (f"token 表 {len(rows)} 行，散文里 {checked} 处派生比值已对账"
+            f"（OpenStack {os_row[0]:,} ÷ {os_row[1]} = {os_row[0] // os_row[1]:,}）"
+            if os_row[1] else "token 表已解析")
+    return problems, note
+
+
 def claim_benchmark_table() -> dict:
     """**每一处**公开的基准表都必须与最近一次全量实测逐格相等。
 
@@ -919,9 +1054,12 @@ def claim_benchmark_table() -> dict:
                          else f"{doc_name}(无表)")
         problems.extend(probs)
 
+    ratio_problems, ratio_note = _token_ratio_problems()
+    problems.extend(ratio_problems)
+
     detail = (f"对账 {'、'.join(seen_docs) or '无'} 共 {rows_total} 行："
               f"{checked} 格百分数 + {verdicts} 处胜负场次"
-              f"（容差 0.05pp）；"
+              f"（容差 0.05pp）；{ratio_note}；"
               + ("；".join(problems[:6]) if problems else "全部一致")
               + ("；…" if len(problems) > 6 else ""))
     # 覆盖不到的地方必须**说出来**。一条只报「校了 N 处全对」的门禁，
