@@ -193,15 +193,30 @@ log-ai-compressor mcp --install claude-code
 ```
 
 仓库根目录的 [`server.json`](server.json) 就是官方 Registry 的清单格式，
-登记名也已经定好。
+登记名 `io.github.hu-chenyu/log-ai-compressor` **已于 2026-10-18 提交**，
+指向 PyPI 上的 `log-ai-compressor` 2.11.2（stdio，`uvx` 拉起）。
 
-**但它还没有提交到 Registry，所以现在不能按官方名自动发现安装** ——
-请用上面那条 `mcp --install` 命令显式装。
-（2026-10-18 实查官方 Registry API：`?search=log-ai-compressor` 返回 0 条，
-同一接口用已知存在的 `filesystem` 做阳性对照返回 30 条，所以是「没登记」
-而不是「查不到」。它以前在这里写着「已收录」，那是假的。）
+自己复核，不必只信这段话：
 
-提交时官方会抓该版本 PyPI README 里的这个标记来校验包，所以标记一直放在正文里
+```bash
+curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.hu-chenyu/log-ai-compressor"
+```
+
+2026-10-18 实查：全名查返回 `count=1`，条目 version 为 `2.11.2`；同一接口拿已知
+存在的 `filesystem` 做阳性对照返回 30 条 —— 所以那个 1 是「查到了」，
+不是「这个接口只会回 0」。
+
+这一段改过两次，两次都是照实写：第一版写着「已收录」而当时实测是 0 条，
+第二版写成「清单已备好、尚未提交」。查证日期和阳性对照都留在上面，
+好让下一个人不必只能相信作者。
+
+登记由 [`publish-mcp.yml`](https://github.com/hu-chenyu/log-ai-compressor/blob/main/.github/workflows/publish-mcp.yml)
+在 GitHub Actions 里用 OIDC 提交（推 tag 或手工触发都会跑，不需要存放任何密钥）。
+提交前它核对 tag / server.json / pyproject 三份版本号、对官方 checksums 校验发布器
+二进制、再跑一遍活校验器；提交后按**全名精确匹配**回查 —— `count > 0` 会被同名
+子串命中，那种绿灯是假的。
+
+官方校验包归属时抓该版本 PyPI README 里的这个标记，所以标记一直放在正文里
 （`tests/test_registry_manifest.py` 盯着它，防止哪天被压缩进 HTML 注释而失效）：
 
 ```yaml
