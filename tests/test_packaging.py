@@ -198,10 +198,60 @@ class TestRequirementsFiles:
                 f"{name} 第 {lineno} 行是 shell 命令：{line!r}")
 
     def test_cheatsheet_is_separate(self):
-        """安装速查表必须放在不会被执行的文件里。"""
+        """安装速查表必须放在**任何消费者都不会解析错**的文件里。
+
+        原来这条只要求「不被 pip 执行」。2026-10-19 加了 dependabot.yml
+        之后就不够了：Dependabot 的 pip 生态按 `requirements*.txt` 通配扫
+        **全部**文件（不区分 pip 会不会执行），而 requirements-optional.txt
+        里一行 `pip install log-ai-compressor` 让整个 Dependabot run 报
+        `dependency_file_not_evaluatable` 变红。修法是把命令注释掉 ——
+        内容一个字没少，仍然能复制去跑，但它同时是合法的 requirements 文件。
+        """
         assert (BASE / "requirements-optional.txt").is_file()
         text = (BASE / "requirements-optional.txt").read_text(encoding="utf-8")
         assert "pip install" in text, "速查表应含 pip install 示例"
+
+    #: **每一个** requirements*.txt，不只是 pip 会执行的那两个。
+    #:
+    #: 判据放宽的来由：Dependabot 按通配扫全部文件，见上面那条的说明。
+    #: 原来的 EXECUTED 只覆盖 pip，而「只有会被执行的那两个才需要合法」
+    #: 这条假设在 2026-10-19 被实测证伪了。
+    ALL_REQUIREMENTS = tuple(sorted(p.name for p in BASE.glob("requirements*.txt")))
+
+    def test_the_glob_actually_finds_every_requirements_file(self):
+        """判据不能落在一个空集上。
+
+        集合从 glob 动态取，若哪天 glob 写错而恰好仍匹配到至少一个文件，
+        覆盖面就会静默缩小。所以把「至少包含已知的三个」写成断言。
+        """
+        for expected in ("requirements.txt", "requirements-dev.txt",
+                         "requirements-optional.txt"):
+            assert expected in self.ALL_REQUIREMENTS, (
+                "glob 没扫到 %s —— 覆盖面变了，先更新本测试（当前：%s）"
+                % (expected, self.ALL_REQUIREMENTS))
+
+    @pytest.mark.parametrize("name", ALL_REQUIREMENTS)
+    def test_every_requirements_file_is_parseable_by_any_consumer(self, name):
+        """每一行要么是 pip 选项，要么是合法 requirement。
+
+        这条与上面的 `test_every_line_is_a_valid_requirement` 逐行判据相同，
+        区别只在**范围**：那条只管 pip 会执行的两个文件，那条正是漏掉了
+        Dependabot 会读的那一个 —— 而漏掉的那个让 CI 变红了。
+        """
+        from packaging.requirements import InvalidRequirement, Requirement
+        for lineno, line in self._spec_lines(name):
+            if self._is_option(line):
+                continue
+            try:
+                Requirement(line)
+            except InvalidRequirement as exc:
+                pytest.fail(
+                    f"{name} 第 {lineno} 行不是合法的 requirement：{line!r}\n"
+                    f"  原因：{exc}\n"
+                    f"  requirements*.txt 只能写包名/URL/pip 选项，不能写 shell "
+                    f"  命令 —— pip 与 Dependabot 都会在这里报错，且 Dependabot "
+                    f"  的失败会让整条更新流程变红。\n"
+                    f"  要给人看的安装命令请注释掉（`# pip install ...`）。")
 
     def test_dev_requirements_install_the_package_extras(self):
         """CI 靠这个文件装 web/mcp/ai，否则接入层测试会被 skip 或收集失败。"""

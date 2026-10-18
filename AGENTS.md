@@ -299,6 +299,15 @@ fix(report): 「变更关联」吃掉 Mac 全篇 33%，且它根本不是变更
   cmd.exe 逐字节按控制台代码页解析批处理，裸 LF 或非 ASCII 字节都会导致解析错位。
 - 其余源码与文档按 `.gitattributes` 统一 LF。改完用**二进制读**复核行尾：
   `Path.read_text()` 会走通用换行把 CRLF 归一成 LF，自检会得到一个百分之百确定的假结论。
+- **会打印中文的 `scripts/*.py`，开头必须有 stdout/stderr 的 UTF-8 兜底**
+  （照抄 `scripts/adversarial_eval.py` 那段）。Windows 控制台默认 cp1252，
+  打印中文会抛 `UnicodeEncodeError`：**门禁本身全绿，step 却红了**，
+  而 ubuntu 两条全绿。症状看起来像功能坏了，实际与代码质量毫无关系。
+  `tests/test_windows_console_encoding.py` 钉住它 —— 新脚本忘了加就会在
+  windows 矩阵上现形。
+- **`requirements*.txt` 的每一行都要能被机器解析**，不管 pip 会不会执行它。
+  Dependabot 按通配扫全部文件，"这里只是给人看的"不成立（见
+  `requirements-optional.txt` 开头那段事故记录）。要放安装命令就加 `# `。
 
 ---
 
