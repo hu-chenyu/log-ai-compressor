@@ -23,6 +23,20 @@ updates:
   # （requirements*.txt 只是 pip 的入口，内容与它一致）。
   # 所以 directory 必须指到仓库根，而不是 requirements.txt 所在处 ——
   # 指错目录的 Dependabot 配置不报错，只是不再提 PR，非常安静。
+  #
+  # `directory: "/"` 的代价（2026-10-19 实测踩过）：它按
+  # `requirements*.txt` **通配扫全部文件**，不区分「pip 会不会执行」。
+  # 于是 `requirements-optional.txt` —— 一个开头写着「本文件不会被任何
+  # 流程执行」的纯人读速查表 —— 让整条 run 报
+  #   dependency_file_not_evaluatable: Invalid requirement:
+  #   'pip install log-ai-compressor'
+  # 而**该文件里的注释写着「本文件不会被任何流程执行」**：
+  # 没有任何流程执行它，但确实有流程**解析**它。
+  #
+  # 修法在 requirements-optional.txt 那边（把命令写成注释，文件同时是
+  # 合法 requirements），守卫在 tests/test_packaging.py
+  # ::TestRequirementsFiles（判据从「两个文件」放宽到「通配扫到的每一个」，
+  # 外加一条断言确保那个通配不是空的 —— 判据落在空集上时它照样报绿）。
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
