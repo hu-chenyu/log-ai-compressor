@@ -195,7 +195,7 @@ log-ai-compressor mcp --install claude-code
 
 仓库根目录的 [`server.json`](server.json) 就是官方 Registry 的清单格式，
 登记名 `io.github.hu-chenyu/log-ai-compressor` **已于 2026-10-18 提交**，
-指向 PyPI 上的 `log-ai-compressor` 2.11.3（stdio，`uvx` 拉起）。
+指向 PyPI 上的 `log-ai-compressor` 2.11.4（stdio，`uvx` 拉起）。
 
 自己复核，不必只信这段话：
 
@@ -203,11 +203,17 @@ log-ai-compressor mcp --install claude-code
 curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.hu-chenyu/log-ai-compressor"
 ```
 
-2026-10-18 实查：全名查返回 `count=2` —— 同一个登记名下挂着 2.11.2 与 2.11.3
-**两个版本**，`isLatest` 指向 `2.11.3`。所以复核时必须**全名 + 版本**一起看：
-只看名字或只看 `count` 都会对着旧版本报「已收录」。同一接口拿已知存在的
-`everything` 做阳性对照返回真实条目（`com.everythingmeetsai/archive`）——
-所以那个 2 是「查到了」，不是「这个接口只会回 0」。
+2026-10-18 实查（读满响应全长 12,618 字符，不是只看前几条）：全名查返回
+`count=3` —— 同一个登记名下挂着 2.11.2 / 2.11.3 / 2.11.4 **三个版本**，
+`isLatest` 指向 `2.11.4`（`publishedAt` 2026-10-18T14:07:06Z）。所以复核时必须
+**全名 + 版本**一起看：只看名字或只看 `count` 都会对着旧版本报「已收录」。
+同一接口拿已知存在的 `everything` 做阳性对照返回真实条目
+（`com.everythingmeetsai/archive`）—— 所以那个 3 是「查到了」，
+不是「这个接口只会回 0」。
+
+> 「只看前 N 个版本会得出相反结论」这件事已经踩过两次：响应里**第一条通常是
+> 旧版本**，而「找出新登记的那个」这个任务本身要求的恰恰是最后一条。
+> 只读前 4000 字符时看到的是 `2.11.2`，照那个写就是错的。
 
 这一段改过三次，三次都是照实写：第一版写着「已收录」而当时实测是 0 条，
 第二版写成「清单已备好、尚未提交」，第三版才是真登记。查证日期、版本与阳性对照
