@@ -74,6 +74,31 @@ class TestTheMutationTableIsHonest:
             f"这些变异的锚点在目标文件里找不到了：{stale}\n"
             f"先判断它们是否还有意义，别直接改松锚点。")
 
+    def test_every_anchor_is_unique_in_its_target(self):
+        """锚点必须**恰好出现一次**。
+
+        施加时是 ``text.replace(m.old, m.new, 1)`` —— 只改第一处。锚点不唯一时，
+        变异很可能落到判据根本不看的那一处，于是报出「变异存活」。而那个结论
+        是**假的**：守卫没变弱，是变异压根没落到被读的那份上 ——
+        它看起来完全像「守卫已经失去牙齿」。
+
+        实测踩到过：``publish-mcp.yml`` 里那个 ``?search=`` 的 URL 在 publish
+        的回查与 verify 的自检中各有一处。锚点从唯一变成两处之后，那条变异
+        改到了 publish，而判据读 verify，于是「存活」。
+        """
+        bad = []
+        for m in MS.MUTATIONS:
+            p = m.path()
+            if not p.is_file():
+                continue
+            n = p.read_text(encoding="utf-8").count(m.old)
+            if n != 1:
+                bad.append((m.id, n))
+        assert not bad, (
+            f"这些变异的锚点在目标文件里不是恰好出现一次：{bad}\n"
+            "不唯一意味着 replace(old, new, 1) 可能改到判据不看的地方，"
+            "报出来的「存活」是假结论。把锚点加长到唯一，别改短。")
+
     def test_every_mutation_names_the_tests_that_must_catch_it(self):
         """不声明判定测试的变异，记的是谁的账都说不清。"""
         missing = [m.id for m in MS.MUTATIONS if not m.tests]
@@ -106,13 +131,19 @@ class TestTheMutationTableIsHonest:
 # ---------------------------------------------------------------------------
 class TestTheScorecardCanGoRed:
     def test_a_surviving_mutation_fails_the_verdict(self):
-        """构造一条**注定活下来**的变异：改一个没有任何测试会看它读的文件。"""
+        """构造一条**注定活下来**的变异：改一个没有任何测试会看它读的文件。
+
+        锚点必须**唯一** —— 记分卡施加时是 `replace(old, new, 1)`，只改第一处。
+        这条探针原先用 `old="本项目"`，而它在 FAQ.md 里出现 24 次，于是变异
+        落在了一个判据不看的位置上，被新增的唯一性守卫直接拒绝跑 ——
+        **而它本来只是想造一条「存活」的变异，并不靠这条锚点当缺陷**。
+        """
         m = MS.Mutation(
             id="probe/does-not-care",
             why="故意选一个与判定测试无关的目标：这条必然存活",
             target="docs/FAQ.md",
-            old="本项目",
-            new="本项目 ",
+            old="全历史 0 处密钥泄露",
+            new="全历史 0 处密钥泄露 ",
             tests=["tests/test_adversarial_scorecard_gate.py"],
         )
         summary = MS.scorecard(mutations=[m])
@@ -163,3 +194,23 @@ def test_it_refuses_a_stale_anchor_instead_of_passing():
     with pytest.raises(SystemExit) as e:
         MS.scorecard(mutations=[bad])
     assert "锚点" in str(e.value)
+
+
+def test_it_refuses_an_ambiguous_anchor_instead_of_passing():
+    """锚点在目标文件里出现多次时必须**拒绝跑**，而不是改第一处就继续。
+
+    与上面那条「锚点没了」的同类：跳过一个可疑变异再报「全部有牙齿」，
+    是本脚本最容易犯的假绿。这里更隐蔽 —— 它**不会**报跳过，它会诚实地
+    报「这条变异存活」，而那个结论恰恰是错的。
+    """
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    doubled = next(w for w in ("log-ai-compressor", "pytest", "README")
+                   if readme.count(w) > 1)
+    bad = MS.Mutation(id="probe/ambiguous", why="锚点不唯一",
+                      target="README.md", old=doubled, new="x",
+                      tests=["tests/test_adversarial_scorecard_gate.py"])
+    with pytest.raises(SystemExit) as e:
+        MS.scorecard(mutations=[bad])
+    msg = str(e.value)
+    assert "次" in msg and "唯一" in msg, (
+        f"拒绝的理由必须讲清「锚点出现了几次」，实际：{msg!r}")

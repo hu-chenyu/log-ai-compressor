@@ -103,33 +103,74 @@ jobs:
         run: ./mcp-publisher login github-oidc
 
       - name: Publish
-        run: ./mcp-publisher publish
-
-      - name: Verify the listing is actually reachable
-        # 「命令返回 0」不等于「登记生效了」—— 中间还有索引。
-        # 判据是**全名精确命中**，不是 count > 0：
-        # 搜 `log-ai-compressor` 会连别的条目一起命中，那种绿灯是假的。
-        # （`GET /v0/servers/<id>` 实测返回 404，只能用 search。）
         run: |
           set -euo pipefail
           name="$(python3 -c "import json;print(json.load(open('server.json'))['name'])")"
+          declared="$(python3 -c "import json;print(json.load(open('server.json'))['version'])")"
+
+          # 「目标版本在不在册」必须能独立回答。
+          # 实测踩到过：Registry 自己的 nginx 返回 504 Gateway Time-out ——
+          # **服务端可能已经提交了，只是响应没回来**。盲目重试会撞上
+          # "version already exists"，把一次其实成功的发布报成失败。
+          already_listed() {
+            curl -fsS --get 'https://registry.modelcontextprotocol.io/v0/servers' \
+                     --data-urlencode "search=$name" \
+              | python3 -c '
+          import json, sys
+          want_name, want_ver = sys.argv[1], sys.argv[2]
+          doc = json.load(sys.stdin)
+          hits = [s["server"] for s in doc.get("servers", []) if s["server"]["name"] == want_name]
+          sys.exit(0 if want_ver in [h["version"] for h in hits] else 1)
+          ' "$name" "$declared"
+          }
+
+          for i in 1 2 3; do
+            if ./mcp-publisher publish; then
+              echo "publish ok (attempt $i)"
+              exit 0
+            fi
+            echo "::warning::publish 第 $i 次失败 —— 先问一句 $declared 在不在册，再决定要不要重试"
+            if already_listed; then
+              echo "::notice::第 $i 次虽然报错，但 $declared 已在册；以查询结果为准，不盲目重试"
+              exit 0
+            fi
+            sleep $((i * 20))
+          done
+          echo "::error::publish 连续 3 次失败，且 $declared 始终不在册"
+          exit 1
+
+      - name: Verify the listing is actually reachable
+        # 判据是**全名 + 版本**双重精确匹配，两条都不能少：
+        #
+        #   · 只看名字 —— 名字命中但挂着旧版本时会放行；而 Registry 上
+        #     长期存在同一个 name 的多个版本是常态，不是异常。
+        #   · 只看 count > 0 —— 会被同名子串命中，那种绿灯是假的。
+        #
+        # `GET /v0/servers/<id>` 实测返回 404 Endpoint not found，只能用 search。
+        run: |
+          set -euo pipefail
+          name="$(python3 -c "import json;print(json.load(open('server.json'))['name'])")"
+          declared="$(python3 -c "import json;print(json.load(open('server.json'))['version'])")"
           for i in 1 2 3 4 5 6; do
             body="$(curl -fsS --get 'https://registry.modelcontextprotocol.io/v0/servers' \
                      --data-urlencode "search=$name")"
             if printf '%s' "$body" | python3 -c '
           import json, sys
-          want = sys.argv[1]
+          want_name, want_ver = sys.argv[1], sys.argv[2]
           doc = json.load(sys.stdin)
-          hits = [s["server"] for s in doc.get("servers", []) if s["server"]["name"] == want]
+          hits = [s["server"] for s in doc.get("servers", []) if s["server"]["name"] == want_name]
           if not hits:
               sys.exit(1)
-          got = sorted(h["version"] for h in hits)
-          print("登记已生效：%s  version=%s" % (want, ",".join(got)))
-          ' "$name"; then
+          versions = sorted(h["version"] for h in hits)
+          if want_ver not in versions:
+              print("名字命中了但版本不对：要 %s，Registry 上是 %s" % (want_ver, versions))
+              sys.exit(1)
+          print("登记已生效：%s  version=%s" % (want_name, versions))
+          ' "$name" "$declared"; then
               exit 0
             fi
             echo "第 $i 次还没命中（可能仍在索引）"
             sleep 10
           done
-          echo "::error::重试 6 次仍查不到 $name —— 登记没有生效，不要当作已完成"
+          echo "::error::重试 6 次仍查不到 $name 的 $declared —— 登记没有生效，不要当作已完成"
           exit 1
