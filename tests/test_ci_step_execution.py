@@ -409,3 +409,77 @@ def test_stdout_is_reconfigured_statically():
     guards = [n for n in ast.walk(tree)
               if isinstance(n, ast.Attribute) and n.attr == "reconfigure"]
     assert guards, "对账段里找不到 stdout/stderr 的 reconfigure 调用"
+
+
+# ---------------------------------------------------------------------------
+# 「N 道门禁」这个数不许漂
+# ---------------------------------------------------------------------------
+#: 哪几步算门禁 —— 白名单**两个方向都要封闭**：
+#: 名单外多了一步没人发现，和名单里多写一步一样，都是同一个形状的假绿。
+_GATE_STEPS = {
+    "Lint (ruff)",
+    "Adversarial evaluation (scorecard)",
+    "Determinism check (same input -> same fingerprint)",
+    "Self-proof (every README claim must hold)",
+    "Reproducible build check (same source -> same bytes)",
+    "Unit & integration tests with coverage",
+    "Mutation scorecard (do the tests still have teeth?)",
+}
+
+#: 不是门禁的：装环境 / 装依赖 / 产物构建 / 传产物。
+#: 「Build sdist and wheel」本身不是门禁 —— 它是「构建可复现」那一步的
+#: 前置条件；把前置当门禁数进去，门禁数就和「有几道防线」脱钩了。
+_NON_GATE_STEPS = {
+    "Install dependencies",
+    "Build sdist and wheel",
+}
+
+
+def _run_step_names() -> set:
+    """只取**自己跑代码**（有 `run:`）的步骤 —— `uses:` 那类（checkout /
+    setup-python / 传产物）是环境与搬运，不是门禁。"""
+    doc = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+    return {str(s.get("name", "")) for s in doc["jobs"]["test"]["steps"]
+            if "run" in s and str(s.get("name", "")).strip()}
+
+
+class TestGateCountCannotDrift:
+    def test_the_two_lists_partition_every_run_step(self):
+        steps = _run_step_names()
+        assert "" not in steps, "ci.yml 里有一个没有名字的 run 步骤"
+        unknown = steps - _GATE_STEPS - _NON_GATE_STEPS
+        assert not unknown, (
+            f"ci.yml 新增了这些会跑代码的步骤，但没被归类进门禁或非门禁：\n"
+            f"  {sorted(unknown)}\n"
+            f"请把它加进 _GATE_STEPS 或 _NON_GATE_STEPS —— "
+            f"**不分类就会静默漏数**，而门禁数正是 README/AGENTS.md 对外写的。")
+        ghost = (_GATE_STEPS | _NON_GATE_STEPS) - steps
+        assert not ghost, f"名单里这些步骤在 ci.yml 里已经不存在了：{sorted(ghost)}"
+
+    def test_the_documented_count_matches_the_workflow(self):
+        actual = len(_GATE_STEPS)
+        cn = {2: "两", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七"}
+        word = cn.get(actual, str(actual))
+        docs = {
+            "README.md": f"{word}道门禁",
+            "docs/FAQ.md": f"**{word}道** CI 门禁",
+            "AGENTS.md": f"CI 的{word}道门禁",
+        }
+        wrong = {}
+        for rel, needle in docs.items():
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            if needle not in text:
+                wrong[rel] = needle
+        assert not wrong, (
+            f"ci.yml 实际有 {actual} 道门禁，但文档没这么写：{wrong}\n"
+            f"对外数字必须能被数出来，不能靠人记得同步。")
+
+    def test_the_mutation_step_runs_on_one_matrix_only(self):
+        """变异测试量的是测试质量，与 OS / Python 版本无关；跑三遍是浪费。"""
+        doc = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+        step = next(s for s in doc["jobs"]["test"]["steps"]
+                    if str(s.get("name", "")).startswith("Mutation scorecard"))
+        cond = str(step.get("if", ""))
+        assert "matrix.os" in cond and "matrix.python" in cond, (
+            f"变异记分卡那一步没有限制到单矩阵，会在三格上重复跑：if={cond!r}")
+
