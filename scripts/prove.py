@@ -207,7 +207,13 @@ def _code_metrics() -> dict:
 
 # 会被 `claim_readme_metrics` 逐个扫「对外工程数字」的文档。
 # 每加一份文档，就多一处能悄悄漂移的地方 —— 与基准表那份白名单同一个道理。
-_METRIC_DOCS = ("README.md", "docs/FAQ.md", "CONTRIBUTING.md")
+_METRIC_DOCS = ("README.md", "docs/FAQ.md", "CONTRIBUTING.md",
+                # docs/EVALUATION.md 里粘了一段 prove.py 的输出，其中「测试/
+                # 主代码行数比实测 1.57」是**关于本仓库的对外数字**。
+                # tests/test_prove_claims_gate.py 的看门狗要求凡是写了行数比
+                # 的文档都得进这份名单 —— 与其把粘贴的输出重写掉，不如让它
+                # 一起被对账：比值一变，这份快照就该跟着更新。
+                "docs/EVALUATION.md")
 # 写了这几个字但**刻意不校**的文档。没有理由的豁免等于给自己开后门。
 _METRIC_DOCS_EXEMPT = {
     "CHANGELOG.md": "历史快照，AGENTS.md §2.4 明说刻意不重写 —— "
