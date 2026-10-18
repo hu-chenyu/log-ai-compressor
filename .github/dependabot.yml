@@ -1,0 +1,61 @@
+# 依赖更新的自动化
+#
+# # 为什么要显式写这个文件
+# -----------------------
+# `scripts/dep_audit_gate.py` 守的是「**现在**有没有已知漏洞」。
+# 它守不了的是「三个月后才发布出来的漏洞」—— 那一刻没有任何东西会红，
+# 而本项目上一次发版到下一次发版之间可能隔着很久。
+#
+# Dependabot 补的是这一段：它按固定节奏开 PR，PR 一开就**同时**跑
+# 本仓库的全部门禁（CI 的三条矩阵 + 变异记分卡），人只需要看 diff 和
+# 门禁结果。少了它，「有依赖漏洞扫描」这句话只覆盖了发布当天。
+#
+# 刻意不做的
+# ----------
+# * **不开 security updates 之外的自动合并**：本项目的依赖变更要连带
+#   重跑基准（改一个解析/掩码相关的传递依赖就可能改变聚类结果，
+#   见 AGENTS.md §2.3）。自动合并等于允许在没有重跑基准的情况下改产物。
+# * **不扫 GitHub Actions 版本**：下面已经开了 `github-actions` 生态，
+#   但它的 PR 只改 workflow 文件，跑的是同一条流水线，风险低于库依赖。
+version: 2
+updates:
+  # pip 依赖：pyproject.toml 是**唯一**的依赖声明来源
+  # （requirements*.txt 只是 pip 的入口，内容与它一致）。
+  # 所以 directory 必须指到仓库根，而不是 requirements.txt 所在处 ——
+  # 指错目录的 Dependabot 配置不报错，只是不再提 PR，非常安静。
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      # 同一轮里的小版本更新合成一个 PR：一次提 twenty 个只改版本号的
+      # PR 没人 review，合起来还能少跑二十遍全部门禁。
+      patch-updates:
+        update-types:
+          - "patch"
+      minor-updates:
+        update-types:
+          - "minor"
+
+  # 门禁工具本身也要跟上 —— bandit / pip-audit 过期了就会漏报。
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:30"
+      timezone: "Asia/Shanghai"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "build(ci)"

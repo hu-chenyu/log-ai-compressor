@@ -49,6 +49,23 @@ jobs:
       - name: Lint (ruff)
         run: ruff check log_ai_compressor tests scripts
 
+      - name: SAST (bandit baseline reconciliation)
+        # 第八道门禁。「bandit 有没有报」不是问题 —— 一开就是几十条，
+        # 逐条 nosec 等于没有检查。问题是「哪几条我知道、我判断过、
+        # 我写下了理由」，所以这道门禁对账的是 docs/sast_baseline.json：
+        #   新发现 -> 红（真问题就修，不该修就写理由加进去）
+        #   数量对不上 -> 红
+        #   豁免过期（代码里已经不报了，基线里还留着）-> 红
+        #   豁免没写 reason -> 红
+        run: python scripts/sast_gate.py
+
+      - name: Dependency vulnerability scan (pip-audit)
+        # 第九道门禁。依赖来源唯一：pyproject.toml 的 dependencies +
+        # optional-dependencies。本项目硬依赖只有 PyYAML 一条，这个门禁
+        # 之所以还留着，是因为「只有一个依赖」这句话必须是被扫过的。
+        # --self-check 先用 urllib3==1.25.8 做阳性对照证明它会红。
+        run: python scripts/dep_audit_gate.py --self-check
+
       - name: Adversarial evaluation (scorecard)
         # 这个项目的核心主张是「拿不出因果链就说证据不足」。主张不需要
         # 证明，但**必须被检验**：这里跑的是专门设计来误导本工具的场景
@@ -219,6 +236,15 @@ jobs:
                         f"口径同样是 ubuntu-3.12，二者必须相等")
                   sys.exit(1)
               print(f"明细对账通过：漏行 {n_valid - n_cov} / {n_valid} 语句")
+
+      - name: Performance regression (deterministic work counters)
+        # 第十道门禁，也是唯一一道**不看墙钟**的性能门禁。
+        # 墙钟跨机器不可比，且噪声只会向下 —— 把它做成红线只会收获一堆
+        # 假红，然后某天被人加 --continue-on-error 关掉。
+        # 硬门禁建在确定性计数上：同一份输入在任何 OS / Python 上必须
+        # 得到同一个整数（similarity 回退次数、ratio 计算次数、簇数、
+        # 条目数）。一次真实的性能回归必然让其中一个变大，且与机器无关。
+        run: python scripts/perf_gate.py
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4

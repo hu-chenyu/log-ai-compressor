@@ -1,0 +1,21 @@
+{
+  "_readme": "确定性工作量计数 = 硬门禁（任何平台都必须相等）；wall_clock = 只报告，不判定（见 scripts/perf_gate.py 顶部）。",
+  "workload": {
+    "lines": 8000,
+    "seed": 20241118
+  },
+  "counters": {
+    "mask_text": 2676,
+    "find_similar": 1085,
+    "ratio": 3439
+  },
+  "clusters": 193,
+  "entries": 1591,
+  "wall_clock": {
+    "windows-3-py3": {
+      "lines_per_second": 4013,
+      "seconds": 1.993,
+      "note": "仅供参考，不参与判定：跨机器不可比，且噪声只会向下。"
+    }
+  }
+}

@@ -30,6 +30,7 @@ import gzip
 import hashlib
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -40,13 +41,26 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
 
+def git_exe() -> str:
+    """解析 git 的绝对路径，解析不到就明确报错。
+
+    SAST（bandit B607）报的是「用部分路径启动进程」。这里不写 nosec，
+    因为确实能修：写死 `"git"` 会在 git 不在 PATH 时抛一个
+    `FileNotFoundError`，看不出是「git 缺失」还是「脚本跑错目录」。
+    """
+    exe = shutil.which("git")
+    if exe is None:
+        raise SystemExit("找不到 git —— 可复现构建需要用 git 取提交时间")
+    return exe
+
+
 def last_commit_epoch() -> int:
     """用最后一次提交的作者时间当 SOURCE_DATE_EPOCH。
 
     刻意不用「构建时刻」——那会让两次构建必然不同，可复现就无从谈起。
     """
     out = subprocess.run(
-        ["git", "log", "-1", "--format=%at"],
+        [git_exe(), "log", "-1", "--format=%at"],
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout.strip()
     return int(out)

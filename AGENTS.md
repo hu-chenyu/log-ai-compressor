@@ -127,7 +127,7 @@ v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一�
 
 ---
 
-## 4. CI 的七道门禁
+## 4. CI 的十道门禁
 
 改代码前要知道它们各自在守什么 —— **不要通过删断言、跳过测试、放宽阈值让 CI 变绿。**
 
@@ -140,6 +140,9 @@ v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一�
 | 5 | 构建 + 可复现性 | 同一份源码能否重建出**逐字节相同**的产物 |
 | 6 | `pytest --cov-fail-under=90` | 单测 + 覆盖率地板 |
 | 7 | `python scripts/mutation_scorecard.py` | **门禁本身有没有牙齿**。把每一处「曾经让门禁失明」的改动固化成变异，逐条施加回去，看负责它的那组测试会不会红。只跑 `ubuntu-3.12` |
+| 8 | `python scripts/sast_gate.py` | **静态分析发现是否都有交代**。bandit 一开几十条，逐条 `nosec` 等于没检查；判据是逐条对账 `docs/sast_baseline.json`，四件事都让门禁红：新发现 / 数量对不上 / **豁免过期** / **豁免没写理由**。三矩阵全跑 |
+| 9 | `python scripts/dep_audit_gate.py --self-check` | **声明依赖有没有已知漏洞**。来源唯一（`pyproject.toml`）。`--self-check` 先喂已知有漏洞的 pin，要求它必须报出来，否则返回 2（门禁自身失能）而不是绿 |
+| 10 | `python scripts/perf_gate.py` | **性能回归**。硬门禁建在**确定性工作量计数**上（相似度回退次数 / `ratio` 次数 / 掩码次数 / 簇数 / 条目数），同一份负载在任何机器上必须给出同一组整数。**墙钟只报告、不判定** —— 跨机器不可比，噪声只会向下，做成红线只会收获假红然后被人 `--continue-on-error` |
 
 矩阵是 `ubuntu-3.11` / `ubuntu-3.12` / `windows-3.12` 三条。
 `3.11` 是 `pyproject.toml` 的下限（改矩阵必须同步改那边），
@@ -148,6 +151,35 @@ v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一�
 
 覆盖率对账只在 `ubuntu-3.12` 上做：**覆盖率是平台相关的量**，
 README 里写的那个数就是 ubuntu-3.12 的实测值。地板（90%）三矩阵全卡。
+
+### 这张清单本身也有门禁在守
+
+第 8/9/10 道是 v2.11.5 新加的。**加了脚本、加了测试、本地跑绿，
+但没接进 workflow** —— 这种状态从外面完全看不出来：仓库里有东西，
+文档里也写着它有。所以 `tests/test_ci_gate_wiring.py` 做**双向**核对：
+
+* README 工程指标表里列出的每一道，`ci.yml` 里必须有一个**真正执行它**
+  的步骤（认 `run:` 正文，**不认步骤名**）；
+* `ci.yml` 里的每一道，README 里必须查得到；
+* 三道新门禁都不许带 `if:` 或 `continue-on-error`。
+
+「认步骤名不认行为」这个坑本项目栽过：变异 `registry/validate-step-emptied`
+把 `run: ./mcp-publisher validate` 换成 `run: echo`，步骤名还在、位置也对，
+而**非法清单会先碰到发布凭据再被校验**。
+
+### 三道新门禁的共同纪律：先证明自己会红
+
+它们各自用一种方式回答「我是不是只是在占位置」：
+
+| 门禁 | 自证方式 |
+| --- | --- |
+| SAST | 四种失效方式各有负向测试：新增发现 / 数量对不上 / 豁免过期 / 豁免无理由 |
+| 依赖扫描 | `urllib3==1.25.8` 阳性对照；扫不出来就返回 **2**，不返回 0 |
+| 性能回归 | `test_counters_are_not_silently_zero`：计数器为 0 即判红。**第一版正是恒为 0 而全绿** —— 仪表装在 `similarity()` 上，而热路径 `_find_similar` 根本不调它 |
+
+最后一条尤其值得记住：**报数为 0 的计数器等于没装**，
+而门禁对「0 与基线里的 0 相等」这件事毫无察觉。
+
 
 ### 基准数字有一条独立的对账链
 
@@ -208,6 +240,9 @@ ruff check log_ai_compressor tests scripts   # 规范
 python -m pytest -q                          # 全量测试
 python scripts/prove.py                      # 逐条重算 README 的主张
 python scripts/adversarial_eval.py           # 对抗性评分卡
+python scripts/sast_gate.py                  # 第八道：SAST 发现逐条对账
+python scripts/dep_audit_gate.py --self-check  # 第九道：依赖漏洞（含阳性对照）
+python scripts/perf_gate.py                  # 第十道：性能回归（确定性计数）
 
 # 诊断：有没有任何相似度量能把「该合并」和「不该合并」分开
 python scripts/diagnose_merge_decisions.py
@@ -215,6 +250,10 @@ python scripts/diagnose_merge_decisions.py
 # 基准（需要先 python scripts/fetch_datasets.py --all，约 178 MB）
 python scripts/benchmark_loghub.py --no-logslop --no-drain3 --budgets 32000
 python scripts/benchmark_loghub.py --budgets 32000 --write-baseline   # 顺带刷新基线
+
+# Loghub 标准解析协议（PA / GA），含 Drain3 对照臂
+python scripts/eval_logparser_pa_ga.py --csv docs/logparser_pa_ga.csv
+python scripts/eval_logparser_pa_ga.py --self-check   # 只验口径，不碰数据
 ```
 
 **全量 10 数据集基准很慢。** 单是 Hadoop 一个数据集，`run_one` 就要对

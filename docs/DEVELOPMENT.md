@@ -30,14 +30,60 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 单元测试，只能用场景 + 评分表来表达。
 
 CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
-`ubuntu-3.12`（最常用版本）、`windows-3.12`（行尾 / shell / 路径处理与
-unix 不同，且 `start.bat` 是 Windows 一等入口）。**六道门禁**：ruff →
-pytest + 覆盖率 ≥90% → 对抗性评分卡 → 确定性指纹 → 自证脚本 → 构建可复现性。
+`ubuntu-3.12`（最常用版本，也是覆盖率与变异记分卡的**参考矩阵**）、
+`windows-3.12`（行尾 / shell / 路径处理与 unix 不同，且 `start.bat` 是
+Windows 一等入口）。**十道门禁**：ruff → pytest + 覆盖率 ≥90% → 对抗性评分卡
+→ 确定性指纹 → 自证脚本 → 构建可复现性 → 变异存活率记分卡 →
+SAST → 依赖漏洞扫描 → 性能回归（逐条见 [`AGENTS.md` §4](AGENTS.md)）。
 自证脚本内部已扩到 **11 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
 v2.8.1 再加「README 架构树必须列全包内模块」，v2.9.0 加「接入层只经 service
 触达 core/export」，v2.9.1 再把「README 写的条数」本身也纳入对账，
 v2.10.0 加「**基准表逐格对账实测基线**」，v2.11.0 从只校 README 扩到**每一份副本**
 （README / docs/BENCHMARK.md / docs/FAQ.md），并把「N 胜 N 平 N 负」的场次也纳入重算）。
+
+### 三道新门禁（v2.11.5 起）
+
+它们有共同的纪律：**先证明自己会红**，否则「检查通过」只是占位。
+
+```bash
+python scripts/sast_gate.py                       # 第八道
+python scripts/dep_audit_gate.py --self-check     # 第九道（首次运行要联网）
+python scripts/perf_gate.py                       # 第十道
+```
+
+| 门禁 | 本地怎么验它会红 | 产物 |
+| --- | --- | --- |
+| SAST | `tests/test_sast_gate.py` 四条负向用例；`python scripts/sast_gate.py --print-baseline` 看当前发现 | `docs/sast_baseline.json` |
+| 依赖扫描 | `--self-check` 会先喂 `urllib3==1.25.8`（实测 21 条 advisory）；扫不出来返回 **2** | — |
+| 性能回归 | `tests/test_perf_gate.py::test_counters_are_not_silently_zero` | `docs/perf_baseline.json` |
+
+**SAST 基线怎么维护**：
+
+```bash
+python scripts/sast_gate.py --print-baseline   # 生成骨架（reason 全空，门禁会拒）
+```
+
+把它抄进 `docs/sast_baseline.json` 并**逐条写 reason**。门禁会在四种情况下红：
+新发现不在基线、数量对不上、**豁免过期**（代码里已不报错而基线里还留着）、
+**豁免没写 reason**。能修的一律先修 —— v2.11.5 建基线时修掉了 5 处，
+剩下 43 条才是真该留下的。
+
+**性能基线怎么维护**：
+
+```bash
+python scripts/perf_gate.py --write-baseline
+```
+
+只在**算法或剪枝有意改动**之后刷新。注意它比的是**确定性工作量计数**，
+同一份负载在任何 OS / Python 上必须给出同一组整数；墙钟写在
+`wall_clock` 里但**明确标注不参与判定** —— 跨机器不可比，噪声只会向下，
+做成红线只会收获一堆假红，然后某天被人加 `--continue-on-error` 关掉。
+
+**为什么它们接在三条矩阵上**（而不是像变异记分卡那样只跑参考矩阵）：
+变异记分卡量的是测试质量，与 OS / Python 无关；三道新门禁守的是
+「这个仓库此刻的安全与性能姿态」，而那恰恰是最可能在某一条矩阵上
+被新引入的问题悄悄带进来的地方。
+
 
 ### 基准数字的对账链
 

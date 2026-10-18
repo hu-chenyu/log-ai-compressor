@@ -107,13 +107,33 @@
 **这是本项目最值得记的一类**，因为它伪装成「有门禁」，而没有门禁你至少
 知道那里没检查。
 
-**已确认的三次**：
+**已确认的四次**：
 
 | # | 门禁 | 它怎么失能的 | 揭穿的判据 |
 | --- | --- | --- | --- |
 | 1 | 分层门禁（AST 核验四个接入层） | `for pkg in (pkg/"ai", ..., pkg/"cli", ...)` —— `cli` 是**文件**不是目录，`rglob` 静默返回空。扫了 0 个文件却打印「4 个接入层 AST 核验通过」 | 修好后它立刻变红，点名 `cli.py` 里 4 处真实越层 import |
 | 2 | `test_prove_claims_gate.py::_is_full_run`（子集运行时跳过对账） | 漏判 `config.args`，于是 `pytest <某文件>::<某类>::<某用例>` 也按「全量」口径去对账三千多行 README。**门禁永远在 skip** | 加了一条反向测试：直接读 `.github/workflows/ci.yml` 里那条 pytest 命令，断言参数全是 `--` 开头——**CI 配置本身成了被校对象** |
 | 3 | 行数比门禁 `prove.py::_RATIO_RE` | 正则要求数字**紧跟**「行数比」，而 `docs/EVALUATION.md` 粘的输出写的是「行数比**实测** 1.57」。文档被加进 `_METRIC_DOCS`，门禁却扫了 0 处照样报 PASS | 加上匹配后它立刻因 `1.57 ≠ 1.6` 变红——**这正是想要的顺序** |
+| 4 | 性能回归门禁的**计数器**（v2.11.5） | 仪表装在 `clustering.similarity()` 上，而热路径 `_find_similar` 直接用 `SequenceMatcher`，**根本不经过那个模块级函数**。计数恒为 **0**，而门禁比的是「实测 == 基线」—— 基线里也是 0，于是**每一条都绿** | `test_counters_are_not_silently_zero`：给每个计数设下限，为 0 即判红。同一事故已固化成变异 `perf/counter-instrumentation-removed` |
+
+第 4 条与前三条的区别值得单独说：前三条是**判据扫了 0 处**，
+第 4 条是**探针装在了没被执行的那条路上**。共同点是它们都产出了
+一句「检查通过」，而检查这件事压根没发生 —— 所以四者同属一类。
+
+还有一个**更隐蔽的同族**，v2.11.5 里踩了三次：
+
+> 判据用**文本搜索**去认一件**结构**的事，于是它先撞上了「解释为什么不用它」
+> 的那段话。
+
+| 判据 | 它搜什么 | 撞上了什么 |
+| --- | --- | --- |
+| 性能负载的时区守卫 | 源码里出现 `localtime` | 本文件顶部那段**解释为什么不用 localtime** 的 docstring |
+| PA 两侧共用归一化 | 源码里出现 `clean_regex_content` | 解释**为什么不抄**它的那段 |
+| CI 门禁不许 fail-open | 步骤体里出现 `continue-on-error` | 解释**为什么不用** `continue-on-error` 的注释 |
+
+三次的修法都一样：**判据认结构，不认文本** —— 用 `yaml.safe_load`
+读 `ci.yml`，用 `hasattr` 读模块，用正则只匹配**调用**（`localtime(`）
+而不是出现在任何位置。
 
 第 2 条还牵出一个更细的判据问题：`pytest` **不带路径参数时会把
 `testpaths` 展开进 `config.args`**（实测 `['tests']`），所以真正的分界是
@@ -126,7 +146,7 @@
 
 **现在由什么挡着**：CI 第七道门禁 `scripts/mutation_scorecard.py`。
 它把每一处「曾经让门禁失明的改动」固化成变异，逐条施加回去，看负责它的那组
-测试会不会红。**当前 45 条变异**，本地实跑击杀率 100%。
+测试会不会红。**当前 68 条变异**，本地实跑击杀率 100%。
 
 ---
 
@@ -278,7 +298,7 @@
 
 ```bash
 python scripts/prove.py               # 11 条主张逐条重算
-python scripts/mutation_scorecard.py  # 45 条变异：门禁本身有没有牙齿
+python scripts/mutation_scorecard.py  # 68 条变异：门禁本身有没有牙齿
 python scripts/adversarial_eval.py    # 该弃权时会不会闭嘴
 ```
 

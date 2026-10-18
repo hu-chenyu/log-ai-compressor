@@ -558,9 +558,13 @@ def run_one(ds: Dataset, budgets: List[int], levels: Optional[str],
         if not text and not cov:
             continue
         n_tok = estimate_tokens(text)
-        assert len(cov) <= n_shown, (
-            f"{label}：覆盖率报了 {len(cov)} 种事件，"
-            f"超过这一行展示的 {n_shown} 个 —— 指标在数报告里没出现的东西")
+        # 刻意不用 assert：`-O` 会把 assert 整条删掉，于是「覆盖率报了
+        # 报告里没出现的东西」这个不变量在优化模式下**静默失效**。
+        # 这正是 v2.9.4 那次撤回的形状，不该留一条能被优化关掉的检查。
+        if len(cov) > n_shown:
+            raise SystemExit(
+                f"{label}：覆盖率报了 {len(cov)} 种事件，"
+                f"超过这一行展示的 {n_shown} 个 —— 指标在数报告里没出现的东西")
         rows.append((label, f"{n_tok:,}", f"{ds.raw_tokens / max(n_tok, 1):,.0f}x",
                      pct(len(cov), total_events), f"{secs:.2f}s"))
 
