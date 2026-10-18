@@ -150,6 +150,33 @@ def check_publish_present(doc: dict) -> None:
         "步骤名对了不等于它真的跑了")
 
 
+def check_publish_tolerates_ambiguous_failure(runs: dict[str, str]) -> None:
+    """发布失败时，先问「到了吗」再决定要不要重试。
+
+    这条来自一次真实事故：Registry 自己的 nginx 返回
+    ``504 Gateway Time-out``，``mcp-publisher`` 报 publish failed，而
+    **服务端到底提交没有是未知的**。第一版工作流在这种失败上做两件错事：
+
+    1. 不重试 —— 把一次瞬时网关故障当成永久失败，登记从此卡在旧版本；
+    2. 不回查 —— ``Publish`` 一红，``Verify`` 被跳过，于是**没有人知道
+       服务端的真实状态**。
+
+    而盲目重试同样错：若第一次其实已提交，重试会撞上
+    "version already exists"，把一次**成功**的发布报成失败。所以重试前
+    必须先独立回答「目标版本在不在册」。
+    """
+    body = runs[PUBLISH_STEP]
+    assert "for i in 1 2 3" in body, (
+        "publish 没有重试 —— Registry 实测会返回 504，"
+        "单次尝试等于把瞬时故障当成永久失败")
+    # 认的是**调用点**而不是函数名：函数定义还在、调用被换掉的话，
+    # 「有没有回查」这件事已经变了，而只搜函数名会照样绿。
+    assert "if already_listed; then" in body, (
+        "重试前没有先独立回查「目标版本在不在册」。504 是有歧义的失败，"
+        "盲目重试会撞上 version already exists，"
+        "把一次其实成功的发布报成失败")
+
+
 def check_exact_name_verify(runs: dict[str, str]) -> None:
     body = runs[VERIFY_STEP]
     # 顺序有意：先查那条**实测不存在**的端点。
@@ -159,9 +186,15 @@ def check_exact_name_verify(runs: dict[str, str]) -> None:
     assert "/v0/servers/$name" not in body, (
         "GET /v0/servers/<id> 实测返回 404 Endpoint not found，这条端点不存在")
     assert "v0/servers'" in body, "自检应当走 ?search= 查询"
-    assert '["name"] == want' in body, (
+    assert '["name"] == want_name' in body, (
         "自检必须是全名精确匹配。count > 0 会被同名子串命中 —— "
         "搜 log-ai-compressor 会连别的条目一起算进来，那种绿灯是假的")
+
+    # 只核对名字是不够的：同一个 name 挂着多个版本是 Registry 的常态。
+    # v2.11.3 那次 504 事故的现场就是「名字命中、版本停在 2.11.2」。
+    assert "want_ver not in versions" in body, (
+        "自检没有核对**版本**。只认名字的话，Registry 上挂着旧版本也会放行 —— "
+        "而「登记生效了」这句话的全部内容就是那个版本号")
 
 
 def check_manual_trigger(doc: dict) -> None:
@@ -210,6 +243,9 @@ class TestWorkflowIsWellFormed:
     def test_post_publish_verification_is_exact_match(self):
         check_exact_name_verify(_runs(_doc()))
 
+    def test_publish_tolerates_an_ambiguous_failure(self):
+        check_publish_tolerates_ambiguous_failure(_runs(_doc()))
+
     def test_both_triggers_are_present(self):
         check_manual_trigger(_doc())
 
@@ -228,6 +264,20 @@ def _mutant(tmp_path: Path, old: str, new: str) -> Path:
     assert old in src, f"变异锚点不在工作流原文里：{old!r}"
     dst = tmp_path / "publish-mcp.yml"
     dst.write_text(src.replace(old, new, 1), encoding="utf-8")
+    return dst
+
+
+def _mutant_all(tmp_path: Path, old: str, new: str) -> Path:
+    """替换**全部**出现处。
+
+    有些锚点在工作流里不止一处（publish 与 verify 都查 `?search=`），
+    只改第一处会改到另一个 step，而判据读的是指定 step —— 变异看着落地了，
+    被判据读的那份其实没动。
+    """
+    src = _text()
+    assert old in src, f"变异锚点不在工作流原文里：{old!r}"
+    dst = tmp_path / "publish-mcp.yml"
+    dst.write_text(src.replace(old, new), encoding="utf-8")
     return dst
 
 
@@ -279,9 +329,9 @@ class TestGuardsHaveTeeth:
             check_version_guard(_runs(_doc(p)))
 
     def test_emptying_the_publish_step_is_caught(self, tmp_path):
-        """只把 run 换成 echo、步骤名留着 —— 必须照样被抓住。"""
-        p = _mutant(tmp_path, "run: ./mcp-publisher publish",
-                    "run: echo 'publish skipped'")
+        """只把真正的调用换成 echo、步骤名留着 —— 必须照样被抓住。"""
+        p = _mutant(tmp_path, "if ./mcp-publisher publish; then",
+                    "if echo 'publish skipped'; then")
         with pytest.raises(AssertionError, match="mcp-publisher publish"):
             check_publish_present(_doc(p))
 
@@ -312,12 +362,31 @@ class TestGuardsHaveTeeth:
             check_validate_precedes_login(doc)
 
     def test_loosening_exact_match_to_a_bare_count_is_caught(self, tmp_path):
-        p = _mutant(tmp_path, '["name"] == want', '["name"]')
+        # 必须替换全部：`s["server"]["name"] == want_name` 里含有
+        # `["name"] == want_name` 作子串，只改第一处会落到 publish 那一步，
+        # 而判据读的是 verify —— 变异看着落地了，被读的那份其实没动。
+        p = _mutant_all(tmp_path, '["name"] == want_name', '["name"]')
         with pytest.raises(AssertionError, match="全名精确匹配"):
             check_exact_name_verify(_runs(_doc(p)))
 
+    def test_removing_the_publish_retry_is_caught(self, tmp_path):
+        p = _mutant(tmp_path, "for i in 1 2 3", "for i in 1")
+        with pytest.raises(AssertionError, match="重试"):
+            check_publish_tolerates_ambiguous_failure(_runs(_doc(p)))
+
+    def test_neutralising_the_ambiguity_recheck_is_caught(self, tmp_path):
+        """函数定义还在、调用点被换掉 —— 只搜函数名的判据会照样绿。"""
+        p = _mutant(tmp_path, "if already_listed; then", "if false; then")
+        with pytest.raises(AssertionError, match="回查|独立"):
+            check_publish_tolerates_ambiguous_failure(_runs(_doc(p)))
+
+    def test_dropping_the_version_check_in_verify_is_caught(self, tmp_path):
+        p = _mutant(tmp_path, "want_ver not in versions", "False")
+        with pytest.raises(AssertionError, match="版本"):
+            check_exact_name_verify(_runs(_doc(p)))
+
     def test_using_the_nonexistent_direct_endpoint_is_caught(self, tmp_path):
-        p = _mutant(tmp_path, "/v0/servers'", "/v0/servers/$name'")
+        p = _mutant_all(tmp_path, "/v0/servers'", "/v0/servers/$name'")
         with pytest.raises(AssertionError, match="404|不存在"):
             check_exact_name_verify(_runs(_doc(p)))
 

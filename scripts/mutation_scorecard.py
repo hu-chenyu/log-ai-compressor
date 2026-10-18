@@ -378,10 +378,12 @@ MUTATIONS: List[Mutation] = [
     Mutation(
         id="registry/dead-endpoint-verify",
         why="自检改用 GET /v0/servers/<id> —— 该端点实测返回 404，"
-            "于是「登记生效」永远验不出来，而命令本身返回 0",
+            "于是「登记生效」永远验不出来，而命令本身返回 0。"
+            "锚点必须长到**唯一**：这个 URL 在 publish 的回查与 verify 的"
+            "自检里各有一处，锚点短了就只会改到 publish，而判据读的是 verify",
         target=".github/workflows/publish-mcp.yml",
-        old="registry.modelcontextprotocol.io/v0/servers'",
-        new="registry.modelcontextprotocol.io/v0/servers/$name'",
+        old='body="$(curl -fsS --get \'https://registry.modelcontextprotocol.io/v0/servers\'',
+        new='body="$(curl -fsS --get \'https://registry.modelcontextprotocol.io/v0/servers/$name\'',
         tests=["tests/test_publish_mcp_workflow.py"],
     ),
     # ---- sdist 交付完整性（v2.11.3 批8） ------------------------------
@@ -394,6 +396,26 @@ MUTATIONS: List[Mutation] = [
         old="include AUDIT.md",
         new="# include AUDIT.md",
         tests=["tests/test_sdist_contents.py"],
+    ),
+    # ---- 发布路径遇到模糊失败（v2.11.3 批9） --------------------------
+    Mutation(
+        id="registry/no-retry-on-ambiguous-failure",
+        why="发布失败不重试 —— Registry 实测会返回 504，"
+            "单次尝试把一次瞬时网关故障当成永久失败，登记从此卡在旧版本",
+        target=".github/workflows/publish-mcp.yml",
+        old="for i in 1 2 3; do",
+        new="for i in 1; do",
+        tests=["tests/test_publish_mcp_workflow.py"],
+    ),
+    Mutation(
+        id="registry/verify-skips-version",
+        why="发布后自检只核对名字不核对版本 —— 同一个 name 挂着旧版本也放行。"
+            "这正是 504 事故现场的样子：名字命中、版本停在 2.11.2，"
+            "而「登记生效了」这句话的全部内容就是那个版本号",
+        target=".github/workflows/publish-mcp.yml",
+        old="want_ver not in versions",
+        new="False",
+        tests=["tests/test_publish_mcp_workflow.py"],
     ),
 ]
 
@@ -416,12 +438,29 @@ def _precondition(m: Mutation) -> None:
     p = m.path()
     if not p.is_file():
         raise SystemExit(f"[{m.id}] 目标文件不存在：{m.target}")
-    if m.old not in p.read_text(encoding="utf-8"):
+    hits = p.read_text(encoding="utf-8").count(m.old)
+    if hits == 0:
         raise SystemExit(
             f"[{m.id}] 锚点在 {m.target} 里找不到了 —— 代码已经变了，"
             f"这条变异要么已无意义、要么需要重写。\n"
             f"  找不到：{m.old[:80]!r}\n"
             f"  **不要**为了让脚本跑通就把锚点改松。")
+    if hits > 1:
+        # 施加时是 `text.replace(m.old, m.new, 1)` —— 只改**第一处**。
+        # 锚点不唯一时，变异很可能落在一个判据根本不看的地方，于是报出
+        # 「变异存活」。那个结论是错的：守卫没变弱，是变异压根没落到
+        # 被读的那份上 —— 而**看起来**完全像「守卫已经失去牙齿」。
+        #
+        # 实测踩到过：publish-mcp.yml 里 `.../v0/servers'` 同时出现在
+        # publish 的回查与 verify 的自检里；锚点从唯一变成两处之后，
+        # 变异改到了 publish，而判据读 verify，于是「存活」。
+        raise SystemExit(
+            f"[{m.id}] 锚点在 {m.target} 里出现 {hits} 次 —— "
+            "只替换第一处很可能改错地方，于是报出「变异存活」，"
+            "而那个结论是假的（守卫没弱，是变异没落到被读的那份上）。\n"
+            f"  锚点：{m.old[:80]!r}\n"
+            "  把锚点加长到**唯一**，或显式改 replace 的语义；"
+            "**不要**为了让脚本跑通就把锚点改短或改松。")
     if not m.tests:
         raise SystemExit(f"[{m.id}] 没声明判定它的测试 —— 那这条记的是谁的账？")
 
