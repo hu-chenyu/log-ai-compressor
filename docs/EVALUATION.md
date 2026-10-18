@@ -47,26 +47,54 @@ $ python scripts/prove.py
   PASS  确定性：同输入同结论
         3 次运行产生 1 个指纹 （一致）
   PASS  证据可复核：每条结论带行号出处且核对通过
-        8/8 个簇带出处；自校验 VERIFIED，匹配 8/8
+        8/8 个簇带出处；自校验 VERIFIED，匹配 9/9
   PASS  置信档位：无因果链时零确定性断言
-        日志含 Caused-by：True；判 CONFIRMED 0 个；verdict=LIKELY
+        日志含 1 条 Caused-by；判 CONFIRMED 1 个（不得超过链数，且每个须有链证据）；verdict=CONFIRMED
   PASS  压缩：投喂口径远小于原文，且完整报告体积如实报出
-        原始 ≈934 tok → summary ≈453 tok （2.1x）→ md ≈9,204 tok
+        原始 ≈934 tok → summary ≈363 tok （2.6x）→ md ≈8,935 tok；注意：本日志只有 52 行，
+        完整 md 报告比原文**大** 9.6 倍 —— 小文件上带样例与上下文的完整报告必然比原文长，
+        这是事实不是缺陷；大数据集上的口径见 docs/BENCHMARK.md
   PASS  对抗性评测：该弃权时确实弃权
         10 场景 35/35 通过；正确弃权率 100.0%；自信错误率 0.0%
   PASS  结构化日志：JSON 认领 / 普通文本不误判
+        JSON 认领 trace_id='abc123def'；普通文本误判=False
   PASS  轻量安装：硬依赖不含 Web/MCP/AI
         硬依赖 ['PyYAML>=6.0']
+  PASS  分层：接入层只经 service 触达 core/export
+        实际扫描 10 个文件（ai=4 cli=1 mcp=2 web=3）AST 核验通过
+  PASS  README 工程指标与仓库一致
+        README 写 7870 行 / 32 个模块；实测 7870 行 / 32 个模块；README 写自证主张
+        [11] 条，本文件实际登记 11 条；测试/主代码行数比实测 1.57；覆盖率分母写 7233，
+        实测 7233（7870 − 637，omit=['log_ai_compressor/cli.py']）
+  PASS  架构树列全包内模块
+        24 个模块全部在架构树里
+  PASS  基准表与实测一致
+        对账 README.md×1、docs/BENCHMARK.md×2、docs/FAQ.md×1、docs/POSITIONING.md(无表)
+        共 40 行：160 格百分数 + 22 处胜负场次（容差 0.05pp）；token 表 5 行，散文里 4 处
+        派生比值已对账（OpenStack 15,299,983 ÷ 746 = 20,509）；全部一致
 
 尚无数据的主张（刻意列出，不藏）
   ?  根因判定的真实数据集覆盖度
   ?  与云平台根因准确率的对比
+
+总判定：全部主张成立
 ```
 
-注意压缩那一行：在这个 **52 行的小日志**上，完整 md 报告比原文**大 9.9 倍**。
+> 上面是**粘贴的输出**，不是保证。上面几行数字里，行数 / 主张条数 / 覆盖率分母
+> 由门禁实时对账，而 token 压缩比那组来自 Loghub 真实数据集、跑一次要两小时，
+> **不在这条 CI 上**。要当前的真值就跑一遍：
+>
+> ```bash
+> python scripts/prove.py
+> ```
+>
+> （上一版这里贴的是六处过时的输出：8 条主张、8/8 匹配、2.1x、9.9 倍，
+> 与当时的仓库都对不上 —— 而它是**被读者当作证据引用**的那一屏。）
+
+注意压缩那一行：在这个 **52 行的小日志**上，完整 md 报告比原文**大 9.6 倍**。
 脚本不回避这一点 —— 完整报告带样例与上下文，小文件上必然比原文长，这是事实。
-压缩比 15x–388x 那组数字来自 Loghub 真实数据集，口径见 BENCHMARK 的
-[`docs/BENCHMARK.md`](docs/BENCHMARK.md)，**不要拿本节的小文件数字去宣称压缩比**。
+大数据集上的压缩比是 **28x–85x**，口径见 BENCHMARK 的
+[`docs/BENCHMARK.md`](BENCHMARK.md)，**不要拿本节的小文件数字去宣称压缩比**。
 
 `prove.py` 也是 CI 门禁之一：README 与产品不允许漂移。
 
