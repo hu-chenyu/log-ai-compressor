@@ -166,10 +166,11 @@ jobs:
           is_ref = ("${{ matrix.os }}" == "ubuntu-latest"
                     and "${{ matrix.python }}" == "3.12")
           cov = Path("coverage.xml")
+          src = ""
           try:
+              src = cov.read_text(encoding="utf-8")
               pct = round(float(re.search(
-                  r'line-rate="([0-9.]+)"',
-                  cov.read_text(encoding="utf-8")).group(1)) * 100)
+                  r'line-rate="([0-9.]+)"', src).group(1)) * 100)
           except (OSError, AttributeError, ValueError):
               print("解析 coverage.xml 失败：文件不存在或格式不对")
               if is_ref:
@@ -190,6 +191,34 @@ jobs:
                         f" ubuntu-3.12，二者必须相等")
                   sys.exit(1)
               print(f"覆盖率对账通过：README 与 ubuntu-3.12 实测均为 {pct}%")
+
+              # 「漏行 N / M 语句」这两个数**此前没有任何门禁校过**。
+              # 上面那段只读 line-rate、比的是百分比，而 README 那一行同时
+              # 印着这两个明细 —— 整个仓库里一处「漏行」都搜不到（v2.11.2
+              # 实测：grep 字面量为 0 命中，于是「没人校」这个结论成立；
+              # 反过来，只搜字面量不足以下结论，要搜**它怎么被算出来**）。
+              #
+              # 一个没人复现过的数字等于营销，包括 README 里的。
+              detail = re.search(r"漏行\s*([\d,]+)\s*/\s*([\d,]+)\s*语句",
+                                 readme)
+              if not detail:
+                  print("README 里找不到「漏行 N / M 语句」，"
+                        "本门禁无法对账（别让它静默通过）")
+                  sys.exit(1)
+              try:
+                  n_valid = int(re.search(r'lines-valid="(\d+)"', src).group(1))
+                  n_cov = int(re.search(r'lines-covered="(\d+)"', src).group(1))
+              except (AttributeError, ValueError):
+                  print("coverage.xml 里读不到 lines-valid / lines-covered")
+                  sys.exit(1)
+              c_missing = int(detail.group(1).replace(",", ""))
+              c_valid = int(detail.group(2).replace(",", ""))
+              if (c_valid, c_missing) != (n_valid, n_valid - n_cov):
+                  print(f"README 写漏行 {c_missing} / {c_valid} 语句，"
+                        f"ubuntu-3.12 实测 {n_valid - n_cov} / {n_valid} —— "
+                        f"口径同样是 ubuntu-3.12，二者必须相等")
+                  sys.exit(1)
+              print(f"明细对账通过：漏行 {n_valid - n_cov} / {n_valid} 语句")
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4

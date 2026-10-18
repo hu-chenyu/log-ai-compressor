@@ -365,6 +365,34 @@ class TestExport:
         r = client.post("/api/export", json={"job_id": job_id, "format": "md"})
         assert r.status_code == 200 and len(r.text) > 50
 
+    # ── 非法自定义打码规则：两条导出路径都必须 400 ──────────────────────
+    # v2.11.2：core 的 redact_text 遇到非法正则改抛 ValueError，而接入层
+    # 只认 ServiceError。翻译一度只写在 `export_text` 里，于是 compare
+    # 分支（它直接调 redact_text、绕过 export_text）拿到的是未翻译的
+    # ValueError —— 同一个输入，普通导出 400、compare 导出 **500**。
+    #
+    # 这两条必须成对：只有一条时，改坏的是「另一条路径」也照样全绿。
+    @pytest.mark.parametrize("mode", ["single", "compare"])
+    def test_illegal_custom_rule_is_400_not_500(self, client, mode):
+        if mode == "compare":
+            job_id = _run(client, mode="compare", paths=[str(V1), str(V2)])
+        else:
+            job_id = _run(client, paths=[str(V1)])
+        r = client.post("/api/export", json={
+            "job_id": job_id, "format": "md", "redact": True,
+            "custom_rules": ["CUST-["]})
+        assert r.status_code == 400, f"{mode} 导出返回 {r.status_code}"
+        assert "不是合法正则" in r.text
+
+    def test_a_legal_custom_rule_still_exports(self, client):
+        """反向对照：别把判据修成「见 custom_rules 就 400」。"""
+        job_id = _run(client, paths=[str(V1)])
+        r = client.post("/api/export", json={
+            "job_id": job_id, "format": "md", "redact": True,
+            "custom_rules": [r"app_v1"]})
+        assert r.status_code == 200
+        assert "app_v1" not in r.text, "合法规则没生效"
+
 
 # ---------------------------------------------------------------------------
 # AI 端点

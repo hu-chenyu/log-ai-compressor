@@ -216,9 +216,33 @@ class VerifyReport:
         }
 
 
+#: `_read_range` 的三种结果，**必须分开**。
+#:
+#: 修复缺陷（v2.11.2）：原先三种情况都返回 `None`，而调用方只把 `None`
+#: 当成「行数不够」→ 记 `mismatched` → verdict 变 `TAMPERED`。于是
+#: **文件正被另一个进程独占**（正在写入 / 正在轮转 / 编辑器开着，
+#: 这是日志场景里最常见的一种状态）会被报成「日志确实被改过，
+#: 请勿直接采信」，并让退出码变成 1。
+#:
+#: 实测（Windows，msvcrt 独占锁住前 64 字节，内容一个字没改）：
+#:
+#:     证据：共 9 条引用，匹配 0 条，失配 9 条，源不可读 0 条
+#:     自校验结论：TAMPERED      exit 1
+#:     ── 解锁后再验 ──
+#:     每条结论都能在原始日志里逐行复核。   exit 0   （内容逐字节相同）
+#:
+#: 「读不到」被并进「对不上」，是把**没发生过的事**当成证据。
+_READ_OK = "ok"
+_READ_OUT_OF_RANGE = "out_of_range"
+_READ_UNREADABLE = "unreadable"
+
+
 def _read_range(path: Path, line_start: int, line_end: int,
-                encoding: str = "") -> Optional[List[str]]:
-    """按 1-based 行号读取区间；越界或读不到返回 None。
+                encoding: str = ""):
+    """按 1-based 行号读取区间，返回 (状态, 行列表)。
+
+    状态是上面三个常量之一：读到了 / 读到了但行数不够 / **压根读不到**。
+    最后一类不是篡改证据，只是现在验不了。
 
     修复缺陷#1：回读必须与摄入同一条解码路径 —— 优先用证据记录的
     encoding（用户强制编码时自动探测会猜错），未记录（旧版报告）则
@@ -235,9 +259,13 @@ def _read_range(path: Path, line_start: int, line_end: int,
                 if i > line_end:
                     break
                 out.append(line)
-            return out if len(out) == line_end - line_start + 1 else None
     except OSError:
-        return None
+        # 独占锁 / 权限 / 临时 IO 错误。这说明**验不了**，不是「对不上」。
+        return _READ_UNREADABLE, None
+    if len(out) != line_end - line_start + 1:
+        # 读到了，但那一段行数不够 —— 文件被截短了，**这才是真的变了**。
+        return _READ_OUT_OF_RANGE, None
+    return _READ_OK, out
 
 
 def verify_refs(refs: Iterable[EvidenceRef]) -> VerifyReport:
@@ -268,8 +296,17 @@ def verify_refs(refs: Iterable[EvidenceRef]) -> VerifyReport:
                                    "status": "MISSING_SOURCE",
                                    "source": ref.source})
             continue
-        lines = _read_range(real, ref.line_start, ref.line_end, ref.encoding)
-        if lines is None:
+        state, lines = _read_range(real, ref.line_start, ref.line_end,
+                                   ref.encoding)
+        if state == _READ_UNREADABLE:
+            # 记 missing_source 而不是 mismatched：一条都回读不了 → verdict
+            # 自然是 UNVERIFIABLE（「验不了」），而不是 TAMPERED。
+            report.missing_source += 1
+            report.details.append({"evidence_id": ref.evidence_id,
+                                   "status": "UNREADABLE",
+                                   "source": ref.source})
+            continue
+        if state == _READ_OUT_OF_RANGE:
             report.mismatched += 1
             report.details.append({"evidence_id": ref.evidence_id,
                                    "status": "OUT_OF_RANGE",

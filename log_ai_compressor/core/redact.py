@@ -52,6 +52,42 @@ def _mask_ipv4(text: str) -> str:
     return "".join(out)
 
 
+def compile_custom_rules(rules) -> list:
+    """把自定义规则全部**先编译一遍**，非法的一条当场报错。
+
+    修复缺陷（v2.11.2）：原先是在 `re.sub` 上 try/except `re.error` 然后
+    `pass` —— 一条写错的自定义规则**静默地什么也不做**。实测：
+
+        合法规则  account CUST-998877 locked  ->  account [自定义] locked
+        非法规则  account CUST-998877 locked  ->  account CUST-998877 locked
+
+    用户以为自己加了一条打码规则、报告已经脱敏，实际敏感串**原样出去**，
+    而屏幕上没有任何提示。对一个卖点里写着「出站打码」的工具，
+    **静默地不打码比报错严重得多**：报错只损失一次操作，
+    静默则把秘密送出去且不自知。
+
+    原注释里写着「非法正则已在界面层拦截」——**那句话是假的**：Web 前端恒传
+    `custom_rules: []`（app.js），界面层压根没有自定义规则的入口，也就从没
+    拦过任何东西。**不要把校验寄托在调用方身上** ——「我以为别处已经校验过」
+    是这类校验最常见的消失方式。
+
+    抛 `ValueError` 而不是自定义异常：core 层不该反向依赖 service，
+    由 `service.export_text` 把它翻成 `ServiceError`（Web 层已接成 400）。
+    """
+    compiled = []
+    for i, rule in enumerate(rules or []):
+        if not rule:
+            continue
+        try:
+            compiled.append(re.compile(rule))
+        except re.error as exc:
+            raise ValueError(
+                f"第 {i + 1} 条自定义打码规则不是合法正则，已**拒绝导出**而不是"
+                f"悄悄跳过（跳过的后果是该规则本该遮住的内容原样出现在报告里）："
+                f"{rule!r} —— {exc}") from exc
+    return compiled
+
+
 def redact_text(text: str, custom_rules: list = None) -> str:
     """出站打码（顺序敏感：Bearer > 密钥键值 > URL 账号 > 邮箱 > 电话 > IP）。
 
@@ -59,8 +95,8 @@ def redact_text(text: str, custom_rules: list = None) -> str:
     规则会把 Bearer 当作值吞掉（Authorization=[密钥]），真正的 token
     反而残留（自测发现的顺序缺陷）。
 
-    优化缺陷R103：用户自定义正则追加到最后一道防线，每行一条
-    （非法正则已在界面层拦截）。命中统一替换为 [自定义]。
+    用户自定义正则追加到最后一道防线。**非法正则一律抛错**，理由见
+    `compile_custom_rules`。
     """
     text = _MASK_BEARER.sub(r"\1 [密钥]", text)
     text = _MASK_SECRET_KV.sub(lambda m: m.group(1) + "=[密钥]", text)
@@ -68,10 +104,6 @@ def redact_text(text: str, custom_rules: list = None) -> str:
     text = _MASK_EMAIL.sub("[邮箱]", text)
     text = _MASK_PHONE.sub("[电话]", text)
     text = _mask_ipv4(text)
-    for rule in (custom_rules or []):
-        if rule:
-            try:
-                text = re.sub(rule, "[自定义]", text)
-            except re.error:
-                pass
+    for pattern in compile_custom_rules(custom_rules):
+        text = pattern.sub("[自定义]", text)
     return text

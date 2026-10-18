@@ -30,7 +30,7 @@ from log_ai_compressor.core.evidence import (
 )
 from log_ai_compressor.core.models import AnalysisResult, ErrorCluster
 from log_ai_compressor.core.pipeline import analyze_file, analyze_files, analyze_text
-from log_ai_compressor.core.redact import redact_text
+from log_ai_compressor.core.redact import redact_text as _core_redact_text
 from log_ai_compressor.export.reporters import (
     SECTIONS_ALL,
     brief_summary,
@@ -56,6 +56,28 @@ DEFAULT_LEVELS = ("ERROR", "FAIL")
 
 class ServiceError(ValueError):
     """参数校验失败（接入层应转成 4xx 而非 5xx）。"""
+
+
+def redact_text(text: str,
+                custom_rules: Optional[Sequence[str]] = None) -> str:
+    """出站打码 —— service 层的门：core 的 `ValueError` 在这里变 `ServiceError`。
+
+    core 层不该反向依赖 service，所以遇到非法自定义正则时它抛的是
+    `ValueError`；而各接入层只认 `ServiceError`（Web 层把它接成 400）。
+    **翻译必须发生在门面上，不能指望每个调用点各接一遍。**
+
+    第一版只把翻译写在 `export_text` 里面。Web 的 compare 导出直接调
+    `redact_text`、**绕过了** `export_text` —— 于是同一个非法正则，普通导出
+    返回 400，compare 导出返回 **500**。同一个约定散在三个调用点，
+    就是「下一个人漏一处」的起点。
+
+    注意 `ServiceError` 是 `ValueError` 的子类，所以这里不需要额外的
+    「原样重抛」分支：core 根本碰不到 `ServiceError`（它不依赖 service）。
+    """
+    try:
+        return _core_redact_text(text, custom_rules)
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +625,9 @@ def export_text(result: AnalysisResult, fmt: str, *,
     else:
         text = EXPORT_FORMATS[key](result, top_n=top_n)
     if redact:
+        # 翻译已经在 `redact_text` 门面里做过了，这里只管调。
+        # 宁可拒绝导出，也不悄悄跳过写错的那条规则：跳过的后果是本该
+        # 脱敏的内容原样出现在报告里，而调用方以为已经脱敏了。
         text = redact_text(text, list(custom_rules or []) or None)
     return text
 
