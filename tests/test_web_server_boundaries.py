@@ -30,7 +30,8 @@ from log_ai_compressor.web import server as S  # noqa: E402
 
 @pytest.fixture()
 def client():
-    with TestClient(S.create_app()) as c:
+    # 同 test_web：TestClient 的 Host 是 "testserver"，显式放行而不是走默认。
+    with TestClient(S.create_app(allowed_hosts=("testserver",))) as c:
         yield c
 
 

@@ -151,8 +151,8 @@ LogsLop（AMD 2026-07，去重工具，与证据保留**目标相反**）、tail
 
 | 指标 | 实测值 |
 | --- | --- |
-| 生产代码 | 7,796 行（32 个模块），硬依赖只有 PyYAML |
-| 测试 | **1,256 用例**，覆盖率 **96%**（漏行 156 / 3,947 语句），`ruff` 全绿 |
+| 生产代码 | 7,842 行（32 个模块），硬依赖只有 PyYAML |
+| 测试 | **1,285 用例**，覆盖率 **96%**（漏行 152 / 3,975 语句），`ruff` 全绿 |
 | CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**六道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 |
 | 自证脚本 | 现已断言 **11 条**主张，含「README 工程指标与架构树必须与仓库一致」「README 写的条数不许漂」「**每一处基准表逐格对账实测基线（含胜负场次与合计行）**」 |
 | 构建 | 可复现 —— 同源码两次构建字节相同，本地/PyPI/GitHub 三方 sha256 对账 |
@@ -180,12 +180,22 @@ log-ai-compressor run app.log --top 20 -o report.md
 # 复核一份报告的结论出处（报告发出去后日志可能已被改动或轮转清理）
 log-ai-compressor verify --report report.json
 
-# 让 AI Agent 直接调用本机日志（MCP Server，已收录官方 Registry）
+# 让 AI Agent 直接调用本机日志（MCP Server）
 pip install "log-ai-compressor[mcp]"
 log-ai-compressor mcp --install claude-code
 ```
 
-Agent 客户端可直接按官方 Registry 名发现安装：
+仓库根目录的 [`server.json`](server.json) 就是官方 Registry 的清单格式，
+登记名也已经定好。
+
+**但它还没有提交到 Registry，所以现在不能按官方名自动发现安装** ——
+请用上面那条 `mcp --install` 命令显式装。
+（2026-10-18 实查官方 Registry API：`?search=log-ai-compressor` 返回 0 条，
+同一接口用已知存在的 `filesystem` 做阳性对照返回 30 条，所以是「没登记」
+而不是「查不到」。它以前在这里写着「已收录」，那是假的。）
+
+提交时官方会抓该版本 PyPI README 里的这个标记来校验包，所以标记一直放在正文里
+（`tests/test_registry_manifest.py` 盯着它，防止哪天被压缩进 HTML 注释而失效）：
 
 ```yaml
 mcp-name: io.github.hu-chenyu/log-ai-compressor
