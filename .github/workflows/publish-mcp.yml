@@ -1,0 +1,135 @@
+name: publish-mcp-registry
+
+# 提交到官方 MCP Registry。为什么走 CI 而不是笔记本：
+#
+#   1. **凭据形态**。`mcp-publisher login github` 拿到的 token 只带一个
+#      权限：`{"action":"publish","resource":"io.github.<登录者>/*"}` ——
+#      命名空间由「谁登录」决定，不是清单写什么就是什么。用 OIDC 时命名空间
+#      由仓库 owner 推导，**结构上就对得上 `io.github.hu-chenyu/*`**。
+#   2. **可重复**。此前 `.github/` 下只有 ci.yml，没有任何 Registry 发布
+#      工作流（`AUDIT.md` 记着这个缺口）。发版漏登记、或清单版本与实际
+#      发布版本悄悄错开，都只能靠人记得。
+#
+# tag 触发不是多余的：Registry 按清单里的版本号记录条目，而包版本由
+# pyproject 决定。两者只要有一条发布路径忘了同步，Registry 上就会长期挂着
+# 一个**指向旧版本**的条目 —— 而它看起来完全正常。
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:          # 手工触发：补登记用
+
+# id-token 是 OIDC 的唯一凭据；contents 只用来 checkout。
+# 不要在这里塞 PAT —— 仓库里不该有长期存放的发布密钥。
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-mcp-registry
+  cancel-in-progress: false   # 发布不可中断：半途取消会留下未知状态
+
+jobs:
+  publish:
+    name: Publish server.json to the official MCP Registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard - the listing must describe the version being released
+        # 三份版本号必须一致：tag、server.json、pyproject。
+        # 少比任何一份，都会让 Registry 挂上一个指向别的版本的条目。
+        run: |
+          set -euo pipefail
+          declared="$(python3 -c "import json;print(json.load(open('server.json'))['version'])")"
+          packaged="$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          name="$(python3 -c "import json;print(json.load(open('server.json'))['name'])")"
+          echo "name=$name  server.json=$declared  pyproject=$packaged"
+
+          if [ "$declared" != "$packaged" ]; then
+            echo "::error::server.json 写 $declared，pyproject 写 $packaged —— 清单指向的包不是这次构建的那个"
+            exit 1
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$declared" != "$tag" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} 与 server.json 的 $declared 对不上；先改清单再打 tag"
+              exit 1
+            fi
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" != "tag" ] && [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "::warning::非 main 分支（${GITHUB_REF_NAME}）触发，确认这是有意的"
+          fi
+
+      - name: Install mcp-publisher (checksum-verified)
+        # 下载来的二进制先对官方 checksums，再执行。
+        # 「先校验再运行」不是洁癖：不校验就执行，等于把发布凭据的完整性
+        # 交给一条没被检查过的网络路径。
+        run: |
+          set -euo pipefail
+          ver=1.8.1
+          base="https://github.com/modelcontextprotocol/registry/releases/download/v${ver}"
+          asset="mcp-publisher_linux_amd64.tar.gz"
+          sums="registry_${ver}_checksums.txt"
+
+          curl -fsSL -o "$asset" "$base/$asset"
+          curl -fsSL -o "$sums" "$base/$sums"
+
+          expected="$(awk -v f="$asset" '$2 == f {print $1}' "$sums")"
+          if [ -z "$expected" ]; then
+            echo "::error::$sums 里没有 $asset 这一行 —— 拿不到基准值就等于没校验"
+            exit 1
+          fi
+          actual="$(sha256sum "$asset" | awk '{print $1}')"
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::校验和不符：期望 $expected，实际 $actual"
+            exit 1
+          fi
+          echo "sha256 verified: $actual"
+
+          tar xzf "$asset" mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Validate server.json against the live registry
+        # validate 不需要认证 —— 所以它可以在**拿到发布凭据之前**跑。
+        # 顺序是有意的：清单有问题就不该去碰发布权限。
+        run: ./mcp-publisher validate
+
+      - name: Authenticate (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish
+
+      - name: Verify the listing is actually reachable
+        # 「命令返回 0」不等于「登记生效了」—— 中间还有索引。
+        # 判据是**全名精确命中**，不是 count > 0：
+        # 搜 `log-ai-compressor` 会连别的条目一起命中，那种绿灯是假的。
+        # （`GET /v0/servers/<id>` 实测返回 404，只能用 search。）
+        run: |
+          set -euo pipefail
+          name="$(python3 -c "import json;print(json.load(open('server.json'))['name'])")"
+          for i in 1 2 3 4 5 6; do
+            body="$(curl -fsS --get 'https://registry.modelcontextprotocol.io/v0/servers' \
+                     --data-urlencode "search=$name")"
+            if printf '%s' "$body" | python3 -c '
+          import json, sys
+          want = sys.argv[1]
+          doc = json.load(sys.stdin)
+          hits = [s["server"] for s in doc.get("servers", []) if s["server"]["name"] == want]
+          if not hits:
+              sys.exit(1)
+          got = sorted(h["version"] for h in hits)
+          print("登记已生效：%s  version=%s" % (want, ",".join(got)))
+          ' "$name"; then
+              exit 0
+            fi
+            echo "第 $i 次还没命中（可能仍在索引）"
+            sleep 10
+          done
+          echo "::error::重试 6 次仍查不到 $name —— 登记没有生效，不要当作已完成"
+          exit 1
