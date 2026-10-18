@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import re
 import sys
 
 import pytest
@@ -30,6 +31,25 @@ def _load():
 
 
 MS = _load()
+
+
+def test_audit_doc_agrees_with_the_card_size():
+    """`AUDIT.md` 写的变异条数必须等于这张卡的实际长度。
+
+    AUDIT.md 里「**当前 N 条变异**」是本文档最有说服力的一句 —— 它宣称
+    门禁本身一直在被测量。而它天然不在任何对账名单里，于是这句话本身
+    就成了一个**没人看守的对外数字**：加了几条变异、忘了回头改文档，
+    读的人会拿一个旧数字当现状。
+
+    形态三的教训是「报「检查通过」但其实什么都没扫」；这里更朴素一点：
+    数字本身没人算。
+    """
+    audit = (_ROOT / "AUDIT.md").read_text(encoding="utf-8")
+    claimed = re.findall(r"当前\s*(\d+)\s*条变异", audit)
+    assert claimed, "AUDIT.md 里找不到「当前 N 条变异」—— 判据失效了"
+    for n in claimed:
+        assert int(n) == len(MS.MUTATIONS), (
+            f"AUDIT.md 写 {n} 条变异，记分卡实际 {len(MS.MUTATIONS)} 条")
 
 
 # ---------------------------------------------------------------------------
