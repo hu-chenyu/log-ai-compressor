@@ -27,7 +27,9 @@ STATIC = BASE / "log_ai_compressor" / "web" / "static"
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(create_app()) as c:
+    # TestClient 发的 Host 是 "testserver"。生产默认白名单只认回环写法，
+    # 这里显式把它加进来 —— 测试夹具不偷偷走后门，改哪个名字一目了然。
+    with TestClient(create_app(allowed_hosts=("testserver",))) as c:
         yield c
 
 

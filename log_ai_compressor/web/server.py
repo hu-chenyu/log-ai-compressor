@@ -4,8 +4,14 @@
 安全边界
 --------
 本服务只绑定 127.0.0.1，且只读用户自己机器上的文件。
-- 没有鉴权是有意的：它等价于「本机进程」，任何能访问 127.0.0.1 端口的
-  程序本来就能读这些文件（浏览器同源策略也阻止远端页面打这个端口）。
+- 没有鉴权是有意的：它等价于「本机进程」—— 但这个等价**成立的前提是
+  服务端校验 Host 头**，不是浏览器同源策略。同源策略挡不住 DNS rebinding：
+  攻击者把自己控制的 evil.test 解析到 127.0.0.1 后，浏览器发的是**同源**
+  请求（同源策略因此放行），可 Host 头是 evil.test，服务端若不校验就照样
+  应答。实测（2026-10-18 审计）：不校验时 `Host: evil.attacker.example` 与
+  `Host: localhost.evil.test:9999` 都返回 200 与完整负载。
+  所以边界是「**回环绑定 + Host 校验**」两道，缺一道「只有本机能访问」就不成立。
+  见下方 `_host_allowed`。
 - 文件浏览接口**默认**从用户主目录起步，但范围是**可选**的：设了
   LOG_AI_FS_ROOT 才限定在该根目录内，没设就**刻意不限范围**（理由见
   下方「关于范围限制」注释，它同时管住 /api/fs/list 与 /api/fs/file）。
@@ -16,10 +22,10 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
-from fastapi import Body, FastAPI, HTTPException, Query
-from fastapi.responses import Response
+from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -28,6 +34,37 @@ from log_ai_compressor import __app_name__, __version__, service as S
 from log_ai_compressor.web import jobs as J
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# Host 白名单的默认值。只认这三个回环写法；端口部分会先剥掉。
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# `--allow-remote` 的显式让步：调用方传 ("*",) 表示「用户已知情并主动放开」，
+# 此时不再校验 Host。见 serve()。
+_ALLOW_ANY_HOST = "*"
+
+
+def _host_name(value: str) -> str:
+    """从 Host 头里取出主机名，剥掉端口（IPv6 的 `[::1]:8765` 也要对）。"""
+    value = value.strip()
+    if value.startswith("["):                     # [::1]:8765
+        end = value.find("]")
+        return value[1:end] if end > 0 else value
+    if value.count(":") == 1:                     # 127.0.0.1:8765
+        return value.rsplit(":", 1)[0]
+    return value                                  # 裸 IPv6 ::1
+
+
+def _host_allowed(host_header: Optional[str], allowed: Iterable[str]) -> bool:
+    """这个 Host 头值在不在允许名单里。"""
+    allowed = {a.strip().lower() for a in allowed}
+    if _ALLOW_ANY_HOST in allowed:
+        return True
+    # 不带 Host（HTTP/1.0 客户端、进程内测试）不拦 —— 没有可伪造的来源。
+    if not host_header:
+        return True
+    name = _host_name(host_header).lower()
+    return name in allowed
+
 # 文件浏览器的默认起点是用户主目录（范围限制见下方 FS_ROOT 说明）
 HOME = Path(os.path.expanduser("~"))
 # 大文件自动提示阈值
@@ -144,7 +181,13 @@ def _within_root(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 # 应用工厂
 # ---------------------------------------------------------------------------
-def create_app() -> FastAPI:
+def create_app(*, allowed_hosts: Optional[Iterable[str]] = None) -> FastAPI:
+    """构造应用。
+
+    ``allowed_hosts`` 默认只认回环写法。传 ``("*",)`` 是 ``--allow-remote``
+    的显式让步（用户已知情并主动把服务暴露到网络上）。
+    """
+    hosts = tuple(allowed_hosts) if allowed_hosts is not None else _LOOPBACK_HOSTS
     app = FastAPI(
         title=f"{__app_name__} 本地服务",
         version=__version__,
@@ -152,6 +195,22 @@ def create_app() -> FastAPI:
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
     )
+
+    # ---- Host 白名单 ----------------------------------------------------
+    # 「只绑回环」单独**不足以**推出「只有本机能访问」：DNS rebinding 下
+    # 远端页面发的是同源请求，同源策略放行，Host 头却是攻击者的域名。
+    # 这一层与回环绑定是**两道独立的门**，少一道边界就不成立。
+    @app.middleware("http")
+    async def _guard_host(request: Request, call_next):
+        host_header = request.headers.get("host")
+        if not _host_allowed(host_header, hosts):
+            return JSONResponse(
+                {"ok": False,
+                 "error": f"拒绝非本机 Host：{host_header!r}。"
+                          "本服务只接受来自本机浏览器的请求。"},
+                status_code=403,
+            )
+        return await call_next(request)
 
     # ---- 健康检查 / 元信息 ---------------------------------------------
     @app.get("/api/health")
@@ -421,6 +480,13 @@ def serve(host: str = "127.0.0.1", port: int = 8765, *,
     if auto_port:
         port = pick_port(host, port)
 
+    # 只绑回环时 Host 校验才有意义（配合它构成两道门）；绑到非回环说明调用方
+    # 已经过 CLI 的 --allow-remote 显式确认，这时再拦 Host 只会让用户够不着
+    # 自己的服务，所以放行 —— 这一步的知情同意在 CLI 层，不在这里。
+    bound = _host_name(host).lower()
+    is_loopback = bound in _LOOPBACK_HOSTS or bound.startswith("127.")
+    allowed = None if is_loopback else (_ALLOW_ANY_HOST,)
+
     if open_browser:
         import threading
         import webbrowser
@@ -446,5 +512,6 @@ def serve(host: str = "127.0.0.1", port: int = 8765, *,
     print(f"  界面：  http://{host}:{port}/", flush=True)
     print(f"  API 文档：http://{host}:{port}/api/docs", flush=True)
     print("  数据不出网，按 Ctrl+C 停止", flush=True)
-    uvicorn.run(create_app(), host=host, port=port, log_level=log_level)
+    uvicorn.run(create_app(allowed_hosts=allowed), host=host, port=port,
+                log_level=log_level)
     return port
