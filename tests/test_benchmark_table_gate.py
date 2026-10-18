@@ -379,6 +379,37 @@ def test_non_benchmark_tables_are_not_mistaken_for_it():
                     "drain3", "logslop"}, f"认出的列字段不对：{sorted(keys)}"
 
 
+# 「数据集 + 标注事件」不足以说明这是一张基准表。v2.11.4 实测踩的就是这个：
+# 三档相似度那张表（`| 数据集 | 标注事件 | strict 0.95 | … |`）被认成基准表，
+# 于是 docs/BENCHMARK.md 报「认出 3 张基准表，应该是主表 + 达成度表」。
+# 它一列都映射不到基线字段 —— 表里全是**档位**，而基线只存 standard 那一档。
+_TIER_TABLE = (
+    "| 数据集 | 标注事件 | strict 0.95 | standard 0.85 | lenient 0.70 |\n"
+    "|---|---:|---:|---:|---:|\n"
+    "| Apache | 29 | 13.8% | 55.2% | 69.0% |\n"
+)
+
+
+def test_a_table_with_no_baseline_column_is_not_a_benchmark_table():
+    """判据要卡在「至少有一列真的能对账」，而不是卡在「像不像基准表」。"""
+    assert prove._bench_tables(_TIER_TABLE) == [], (
+        "一列基线字段都没有的表被认成了基准表")
+
+
+def test_one_real_column_is_enough_when_the_rest_of_the_shape_matches():
+    """收紧不许过头：只带一个口径列的表仍然要进对账。
+
+    与上面那条成对 —— 只测负向的话，「收紧成永不认出任何表」也能让它变绿，
+    而那正是本文件开头记着的那个病：门禁落在空集上，报的仍然是绿。
+    """
+    text = ("| 数据集 | 标注事件 | 本项目(全量) |\n"
+            "|---|---:|---:|\n"
+            "| Apache | 29 | 100.0% |\n")
+    tables = prove._bench_tables(text)
+    assert len(tables) == 1, f"只带一个口径列的表被漏掉了：认出 {len(tables)} 张"
+    assert {"events", "full"} <= set(tables[0][0]), sorted(tables[0][0])
+
+
 def _documentation_files() -> list:
     """仓库里的**文档**：根目录与 ``docs/`` 下的 .md。
 

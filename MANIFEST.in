@@ -42,7 +42,9 @@ recursive-include scripts *.py
 # docs 要带上 *.json：scripts/prove.py 会进 sdist，而它的一条主张
 # 要读 docs/benchmark_baseline.json 对账 README 的基准表。
 # 基线不进包 = 从 sdist 里跑 prove.py 必然那条红 —— 「检查器自己会坏」。
-recursive-include docs *.md *.jpg *.png *.svg *.json
+# *.csv 是相似度三档的原始逐行实测（2026-10-18 新增），BENCHMARK.md 那张
+# 表由它生成；文档里引用了它却不同步，等于引用了一个不在包里的东西。
+recursive-include docs *.md *.jpg *.png *.svg *.json *.csv
 recursive-include examples *.log *.md *.json
 
 # 运行时资源（wheel 由 [tool.setuptools.package-data] 负责，

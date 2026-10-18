@@ -417,6 +417,117 @@ MUTATIONS: List[Mutation] = [
         new="False",
         tests=["tests/test_publish_mcp_workflow.py"],
     ),
+    # ---- 注释强于代码（v2.11.4 批10） ----------------------------------
+    # 这一批的来源不是事故而是**外部评审**：它读代码时发现，docstring 里
+    # 「CONFIRMED 的唯一来源是 Caused by 链」这条承诺，管线上不可达，
+    # 可函数注释同时写着它也接受外部直接构造的簇 —— 于是那条兜底成了一条
+    # 从没被验证过的不变量。门禁守得住行为，守不住注释与代码的差距。
+    Mutation(
+        id="analysis/fallback-mints-confirmed",
+        why="兜底用 `CONF_CONFIRMED if c.is_root_cause` —— 「被标成根因」"
+            "本身就能拿到 CONFIRMED。只要外部调用方预设 is_root_cause、"
+            "不带任何因果链，本工具唯一敢说「就是它」的那一档就被白送了",
+        target="log_ai_compressor/core/analysis.py",
+        old="    for c in ordered:\n"
+            "        if not c.root_cause_confidence:\n"
+            "            c.root_cause_confidence = CONF_INSUFFICIENT",
+        new="    for c in ordered:\n"
+            "        if not c.root_cause_confidence:\n"
+            "            c.root_cause_confidence = (\n"
+            "                CONF_CONFIRMED if c.is_root_cause else CONF_INSUFFICIENT)",
+        tests=["tests/test_analysis.py"],
+    ),
+    Mutation(
+        id="analysis/confirmed-skips-citation-check",
+        why="CONFIRMED 跳过出处校验 —— 「已定位根因」却没有一行原文可回读。"
+            "报告里最硬的那句断言失去出处，比降级成 LIKELY 隐蔽得多。"
+            "判据在 test_forensics 而非 test_analysis：第一版指错了文件，"
+            "变异存活 —— 而存活的不是测试没牙齿，是判据找错了门",
+        target="log_ai_compressor/core/analysis.py",
+        old="                marked = _mark_causal_evidence(c, top)\n"
+            "        if not marked:",
+        new="                marked = _mark_causal_evidence(c, top)\n"
+            "        if False:",
+        tests=["tests/test_forensics.py"],
+    ),
+    # ---- 威胁模型：防御必须说清防不住谁（v2.11.4 批11） ------------------
+    Mutation(
+        id="security/docstring-reverts-to-security-boundary",
+        why="docstring 小节标题改回「安全边界」—— 它守的只有 DNS rebinding "
+            "一种，却重新对外做出「只有本机能访问」的整体断言。"
+            "外部评审的原话：这是个对称的漏洞（拿「边界为什么成立」当卖点，"
+            "却从没画过威胁模型）",
+        target="log_ai_compressor/web/server.py",
+        old="威胁模型\n--------\nv2.11.4：",
+        new="安全边界\n--------\nv2.11.4：",
+        tests=["tests/test_threat_model_wording.py"],
+    ),
+    Mutation(
+        id="security/docstring-hides-undefended-case",
+        why="docstring 删掉「不防本机同权限进程」这句承认 —— 那一类对手"
+            "本来就能读当前用户能读的一切，服务没扩大它的能力；"
+            "可一旦不写，基于这条边界做的安全推演就全错了",
+        target="log_ai_compressor/web/server.py",
+        old="**明确不防的：同一台机器上、同一权限级别的任何进程。**",
+        new="**本服务仅监听回环，仅本机可访问。**",
+        tests=["tests/test_threat_model_wording.py"],
+    ),
+    # ---- 三档表：逐格与汇总（v2.11.4 批12） ----------------------------
+    # 这张表是 BENCHMARK.md 里唯一一张主基准脚本**不生成**的表，所以它
+    # 只靠人抄就会变成 v2.9.9 那个事故的重演。判据反向：从原始 CSV 重算。
+    Mutation(
+        id="bench/tier-cell-drifts-from-csv",
+        why="三档表的一格与 docs/similarity_tiers.csv 对不上 —— 逐格数字漂了。"
+            "上一版（v2.9.9）就是在 README/BENCHMARK 的表漂了、"
+            "文档原地不动、六道门禁全绿",
+        target="docs/BENCHMARK.md",
+        old="| Apache | 29 | 13.8% | 55.2% |",
+        new="| Apache | 29 | 14.8% | 55.2% |",
+        tests=["tests/test_similarity_tiers_table.py"],
+    ),
+    Mutation(
+        id="bench/tier-summary-drifts-from-csv",
+        why="逐格全对、**汇总的胜负被改错** —— 这是最容易被顺手改掉的一行。"
+            "v2.9.9 就干过一次（把一处平局写成赢）",
+        target="docs/BENCHMARK.md",
+        old="| 全量口径独占最优 | **8 / 10** | 0 | 0 |",
+        new="| 全量口径独占最优 | **9 / 10** | 0 | 0 |",
+        tests=["tests/test_similarity_tiers_table.py"],
+    ),
+    Mutation(
+        id="bench/tier-table-claims-retune-is-fine",
+        why="删掉「不会因此改默认值」那句 —— 交付口径的赢家是 lenient 而当前"
+            "默认值不是，读者于是读成「建议改默认值」。而改了正是 §2.3 禁止的"
+            "对着评测集调参，且会让簇更粗、根因更不准（形态六）",
+        target="docs/BENCHMARK.md",
+        old="而本项目不会因此改默认值",
+        new="而本项目应该改默认值",
+        tests=["tests/test_similarity_tiers_table.py"],
+    ),
+    # ---- 认表判据的下限（v2.11.4 批13） --------------------------------
+    # 收紧认表判据和放宽一样要有人看着：改坏了不会让哪条主张变红，
+    # 只会在下次有人往 BENCHMARK.md 里加表时，把「认出几张表」这个
+    # 数字悄悄改掉。这两条盯的正是收紧本身，不是收紧的对象。
+    Mutation(
+        id="bench/baseline-column-floor-never-fires",
+        why="去掉「至少一列真的映射得到基线字段」这条下限 —— 三档相似度那张"
+            "表重新被认成基准表。认进来之后它报的问题全部是「基线里没有这一"
+            "列」，真漂移被埋在这类噪音里（v2.9.9 事故的形状，第二次）",
+        target="scripts/prove.py",
+        old="    if not _BENCH_COLUMN_KEYS & out.keys():\n        return {}",
+        new="    if False and not _BENCH_COLUMN_KEYS & out.keys():\n        return {}",
+        tests=["tests/test_benchmark_table_gate.py"],
+    ),
+    Mutation(
+        id="bench/baseline-column-floor-over-tightened",
+        why="把下限从「一列」改成「两列」 —— 收紧过头。真表照样有 5 列不受"
+            "影响，但**只带一个口径列**的那张（docs/BENCHMARK.md 的达成度表）"
+            "会被静默放过。只测负向用例的话，收紧过头和收紧到位长得一模一样",
+        target="scripts/prove.py",
+        old="    if not _BENCH_COLUMN_KEYS & out.keys():",
+        new="    if len(_BENCH_COLUMN_KEYS & out.keys()) < 2:",
+        tests=["tests/test_benchmark_table_gate.py"],
+    ),
 ]
 
 
