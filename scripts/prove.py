@@ -217,7 +217,12 @@ _METRIC_DOCS = ("README.md", "docs/FAQ.md", "CONTRIBUTING.md",
 # 写了这几个字但**刻意不校**的文档。没有理由的豁免等于给自己开后门。
 _METRIC_DOCS_EXEMPT = {
     "CHANGELOG.md": "历史快照，AGENTS.md §2.4 明说刻意不重写 —— "
-                    "它必然记着若干个已经作废的旧比值"}
+                    "它必然记着若干个已经作废的旧比值",
+    "AUDIT.md": "缺陷形态记录。形态二那张表要引述**当时**的实测值"
+                "（FAQ ≈1.1 / 当年 1.37），那些数早作废了；"
+                "AGENTS.md §2.4 明说历史引用刻意不重写，抹掉等于篡改历史。"
+                "本文档自己那两个条数（主张数、变异数）另有门禁校",
+}
 
 
 def _count_lines_of(path) -> int:

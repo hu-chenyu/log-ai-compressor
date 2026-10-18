@@ -667,3 +667,42 @@ def test_claim_evidence_still_passes_on_a_real_log():
 # 覆盖、实际不响，那比没有更糟。对账放在 CI 的 pytest 那一步之后
 # （`.github/workflows/ci.yml`，`Unit & integration tests with coverage`），
 # 那里是唯一拿得到它的时机。
+
+
+class TestAuditDocCountsAreGated:
+    """`AUDIT.md` 写的自证主张条数必须与实际登记的一致。
+
+    AUDIT.md 是一份**关于缺陷形态**的文档，它里面的数字同样是对外声明。
+    而它天然不在 `_METRIC_DOCS` 里（那里只有「行数比」那一种判据），
+    于是这份专门讲「没人看守的数字」的文档，自己会有一个没人看守的数字。
+
+    判据刻意与 README **用同一种写法**（`**N 条**主张`）—— 两份文档各写
+    各的、连正则都不同的话，加一条主张时要改两处而没人会想到第二处。
+
+    第一版 AUDIT.md 写的是「`prove.py` 的 11 条 claim」—— 那种写法
+    **根本抓不到**（源文件里没有「claim」这个中文标签），门禁对它完全
+    失明。与形态三同形：把文档列进名单容易，让判据真的扫到它不容易。
+    """
+
+    def _audit(self) -> str:
+        p = _ROOT / "AUDIT.md"
+        assert p.is_file(), "AUDIT.md 不见了 —— 这条门禁该删了"
+        return p.read_text(encoding="utf-8")
+
+    def test_the_claim_count_matches(self):
+        claimed = re.findall(r"\*\*(\d+)\s*条\*\*\s*主张", self._audit())
+        assert claimed, "AUDIT.md 里找不到「**N 条**主张」—— 判据失效了"
+        for n in claimed:
+            assert int(n) == _REAL_COUNT, (
+                f"AUDIT.md 写 {n} 条主张，实际登记 {_REAL_COUNT} 条")
+
+    def test_a_wrong_count_would_be_caught(self):
+        """判据要脆：不是「文档在名单里」，而是「它写错了门禁真的会响」。
+
+        这一条是给下一个人改判据时用的 —— 上一条能因为正则写坏而**一起
+        失效**，那时它会安静地什么也不做。
+        """
+        pattern = re.compile(r"\*\*(\d+)\s*条\*\*\s*主张")
+        assert pattern.search("现行 **999 条**主张里有 4 条专治这个")
+        assert not pattern.search("现行 999 条主张里有 4 条专治这个")
+
