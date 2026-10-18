@@ -24,6 +24,11 @@ include README.md
 include CHANGELOG.md
 include AGENTS.md
 include CONTRIBUTING.md
+# AUDIT.md：tests/test_mutation_scorecard.py 与 tests/test_prove_claims_gate.py
+# 都直接读它，而 tests/ 是随 sdist 交付的 —— 不收它，从源码交付里跑 pytest
+# 就会硬红两条 FileNotFoundError。同 AGENTS.md / CONTRIBUTING.md 的道理：
+# 这些文件靠裸 include，通配符够不到。
+include AUDIT.md
 include server.json
 include SKILL.md
 include requirements.txt

@@ -61,6 +61,23 @@ io.github.hu-chenyu/log-ai-compressor   version 2.11.2   →  PyPI log-ai-compre
 还留着，「validate 存在吗」这条守卫照样绿 —— 步骤名对了不等于它真的跑了。
 守卫有牙齿不等于红的原因指对了地方，所以每条变异都单独核过「红在哪一条」。
 
+### 🐛 sdist 里少一份 `AUDIT.md` —— 只有 `pip download` 的人会撞上
+
+`tests/test_mutation_scorecard.py` 与 `tests/test_prove_claims_gate.py` 都
+**无守卫直读** `AUDIT.md`，而 `tests/` 随 sdist 交付。于是 `MANIFEST.in`
+没把它收进去时：从 GitHub clone 的人跑 pytest 一切正常，**只有 pip download
+源码包的人**会拿到两条 `FileNotFoundError`。
+
+难查正是它一直没被发现的原因 —— 而这类缺陷属于「检查器自己会坏」：
+一条需要包外状态才成立的判据，在拿到源码的人手里是坏的，比没有更让人误解。
+
+修法是 `include AUDIT.md`（它在仓库根目录，不在任何 `recursive-include`
+扫得到的位置），并新增 `test_sdist_contains_audit_doc` 钉住**产物本身**，
+而不是「MANIFEST.in 有没有写那行字」—— 后者只测拼写。
+
+这条判据是先让它对着**修之前的** sdist 跑，确认它如实变红，再验证重建后变绿。
+它也已进记分卡（33 → 34），CI 上持续测量「这道守卫有没有牙齿」。
+
 ---
 
 ## [2.11.2] - 2026-10-18

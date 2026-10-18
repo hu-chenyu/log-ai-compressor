@@ -248,6 +248,30 @@ def test_sdist_contains_contributor_guides(sdist: tarfile.TarFile | None) -> Non
         "根目录的 .md 不会被 recursive-include 命中，必须裸 include。")
 
 
+def test_sdist_contains_audit_doc(sdist: tarfile.TarFile | None) -> None:
+    """`AUDIT.md` 必须在包里 —— 它是**测试自己**要读的数据文件。
+
+    这条的形状与 CHANGELOG / 贡献指南不同，所以要单独钉：
+
+    ``AUDIT.md`` 是缺陷形态记录，而 ``tests/test_mutation_scorecard.py`` 与
+    ``tests/test_prove_claims_gate.py`` 都**无守卫直读**它。tests/ 随 sdist
+    交付，于是文件一漏，从源码交付里跑 pytest 就是两条 FileNotFoundError。
+
+    它同时是「检查器自己会坏」那一类：一条需要包外状态才成立的判据，
+    在拿到源码的人手里是坏的，比没有更让人误解 —— 而且**难查**，因为
+    从 GitHub clone 的人一切正常，只有 pip download 的人会撞上。
+    """
+    assert _covered_by_manifest("AUDIT.md"), (
+        "MANIFEST.in 收不进 AUDIT.md —— 它在仓库根目录，"
+        "不在任何 recursive-include 能扫到的位置，必须裸 include")
+
+    if sdist is None:
+        pytest.skip("dist/ 下没有 sdist，跳过产物层校验")
+    assert "AUDIT.md" in _sdist_names(sdist), (
+        "sdist 里没有 AUDIT.md —— 从源码交付里跑 pytest 会有两条 "
+        "FileNotFoundError，而从 GitHub clone 的人永远碰不到")
+
+
 def test_sdist_contains_benchmark_baseline(sdist: tarfile.TarFile | None) -> None:
     """``docs/benchmark_baseline.json`` 必须在包里。
 
