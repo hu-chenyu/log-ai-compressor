@@ -40,6 +40,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 import time
@@ -528,12 +529,286 @@ MUTATIONS: List[Mutation] = [
         new="    if len(_BENCH_COLUMN_KEYS & out.keys()) < 2:",
         tests=["tests/test_benchmark_table_gate.py"],
     ),
+
+    # -----------------------------------------------------------------------
+    # 批 6：SAST / 依赖扫描 / 性能回归 / PA-GA 这四组门禁
+    #
+    # 加这一批的原因与前面几批一样：记分卡守的是**历史批次**，
+    # 新写的门禁如果只「跑着」而没人验证它有没有牙齿，那么半年后
+    # 没人说得清它们是守着的还是只是占着位置。
+    # -----------------------------------------------------------------------
+    Mutation(
+        id="sast/reason-becomes-optional",
+        why="豁免的 reason 变成可选 —— 这道门禁就退化成「bandit 的发现"
+            "都在名单里」。名单只增不减，最后是一张没人看过的旧账。"
+            "**没有理由的豁免等于开后门**，这句话必须由门禁执行",
+        target="scripts/sast_gate.py",
+        old='        if not str(e.get("reason") or "").strip():',
+        new='        if False and not str(e.get("reason") or "").strip():',
+        tests=["tests/test_sast_gate.py"],
+    ),
+    Mutation(
+        id="sast/stale-entry-ignored",
+        why="不再检测**过期豁免**。少了这一条，基线只增不减：代码里早就"
+            "不报的东西还留在名单上，没有人会去删，而它在纸面上看起来"
+            "仍然是「已被复核过」",
+        target="scripts/sast_gate.py",
+        old="        if counts.get(key, 0) == 0:",
+        new="        if False:",
+        tests=["tests/test_sast_gate.py"],
+    ),
+    Mutation(
+        id="sast/documented-count-drifts-from-baseline",
+        why="文档里写的豁免条数与基线对不上。**这一条是真的发生过**："
+            "`tests/test_dep_audit_gate.py` 去掉一个用不上的 "
+            "`import subprocess` 之后，基线里那条 B404 变成过期条目、门禁"
+            "正确地红了；而我照着 `len(entries)` 把 DEVELOPMENT.md 的 43 改成"
+            "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
+            "正在报的债。照着它数，文档就会比门禁多报一条",
+        target="docs/DEVELOPMENT.md",
+        old="剩下 43 条才是真该留下的。",
+        new="剩下 44 条才是真该留下的。",
+        tests=["tests/test_sast_gate.py"],
+    ),
+    Mutation(
+        id="sast/exclude-count-hardcoded-again",
+        why="排除理由里的条数又被写死。**这一条是真的发生过**：理由里写着"
+            "「全量套件 2,307 条」，写死的当天是对的，之后每加一批测试它就"
+            "悄悄变成一句假话 —— 而它出现在**门禁输出**里，读者会当成实测值。"
+            "实测值早已漂到两千四百多",
+        target="scripts/sast_gate.py",
+        old='     "pytest 的断言就是这门语言的表达方式，逐条豁免既没意义也写不完"\n'
+            '     "（本次扫描实测排除量见下方输出，不是写死的数字）。"',
+        new='     "pytest 的断言就是这门语言的表达方式，逐条豁免既没意义也写不完，"\n'
+            '     "全量套件 2,487 条。"',
+        tests=["tests/test_sast_gate.py"],
+    ),
+    Mutation(
+        id="sast/reported-exclusion-count-stopped-following-the-scan",
+        why="输出里的排除条数不再跟着本次扫描走，改成一个常量。数字仍然"
+            "「看起来是实测的」，但它已经与这一次运行无关 —— 这比完全不报"
+            "这个数更糟，因为它让人以为有人量过",
+        target="scripts/sast_gate.py",
+        old='        print("  %s @ %s —— %s（本次实测 %d 条）" % (tid, prefix, why, n))',
+        new='        print("  %s @ %s —— %s（本次实测 2487 条）" % (tid, prefix, why))',
+        tests=["tests/test_sast_gate.py"],
+    ),
+    Mutation(
+        id="sast/unknown-finding-tolerated",
+        why="新发现不再让门禁红。于是「代码里新冒出来的洞」被静默吸收 —— "
+            "而这正是 SAST 存在的唯一理由",
+        target="scripts/sast_gate.py",
+        old="        if e is None:",
+        new="        if e is None and False:",
+        tests=["tests/test_sast_gate.py"],
+    ),
+    Mutation(
+        id="sast/b101-exclude-widened-to-package",
+        why="把 tests/ 下的 B101 排除写宽成**整个项目**都排除。于是"
+            "log_ai_compressor/ 与 scripts/ 里的裸 assert 一起消失 —— "
+            "而发布代码里的裸 assert 是真问题（-O 会整条删掉）。"
+            "排除项和基线条目一样，是一种「我决定过」的记录，写宽了就没人再看",
+        target="scripts/sast_gate.py",
+        old='    ("B101", "tests/",',
+        new='    ("B101", "",',
+        tests=["tests/test_sast_gate.py"],
+    ),
+    Mutation(
+        id="perf/counter-instrumentation-removed",
+        why="**这一条是真的发生过。** 第一版把仪表装在 clustering."
+            "similarity() 上，而热路径 _find_similar 直接用 SequenceMatcher，"
+            "于是计数恒为 0、门禁每条都绿 —— 它守的路径一次都没被走到。"
+            "报数为 0 的计数器等于没装",
+        target="scripts/perf_gate.py",
+        old='        def ratio(self):\n'
+            '            counters["ratio"] += 1\n'
+            '            return super().ratio()',
+        new='        def ratio(self):\n'
+            '            return super().ratio()',
+        tests=["tests/test_perf_gate.py"],
+    ),
+    Mutation(
+        id="perf/counters-no-longer-compared",
+        why="只比簇数与条目数，不比工作量计数。于是真实的速度回归"
+            "（多扫一遍级别桶、剪枝被提前去掉）完全不会被拦到",
+        target="scripts/perf_gate.py",
+        old='    for key in ("counters", "clusters", "entries"):',
+        new='    for key in ("clusters", "entries"):',
+        tests=["tests/test_perf_gate.py"],
+    ),
+    Mutation(
+        id="perf/workload-switches-to-localtime",
+        why="负载改用 localtime。同一 seed 在不同���区生成不同字节的日志，"
+            "基线会以「平台差异」的名义变红 —— 而那是门禁自己的 bug。"
+            "这一条守的是「跨平台可比」这个前提本身",
+        target="scripts/perf_gate.py",
+        old='ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(base + i // 100))',
+        new='ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(base + i // 100))',
+        tests=["tests/test_perf_gate.py"],
+    ),
+    Mutation(
+        id="paga/ga-condition-b-dropped",
+        why="GA 少掉条件 (b)「该组必须包含这个 EventId 的全部出现」。"
+            "少了它，**聚类越碎分越高** —— 而聚得碎恰恰是聚类做坏了的形态。"
+            "这条是 LogParser 原始公式里最容易被抄漏的一行",
+        target="scripts/eval_logparser_pa_ga.py",
+        old="        if len(log_ids) != gt_total[only]:",
+        new="        if False:",
+        tests=["tests/test_logparser_pa_ga.py"],
+    ),
+    Mutation(
+        id="paga/pa-skips-shared-cleaning",
+        why="PA 两侧不再过同一个归一化函数（改成直接比原始模板串）。"
+            "归一化是让「同一条事件的不同写法」能被认出同一件事的那一步；"
+            "去掉它，PA 只在字面完全相同时才给分 —— 一个更严、"
+            "且**不可与任何论文数字比较**的口径",
+        target="scripts/eval_logparser_pa_ga.py",
+        old="        if clean_content(mine) == clean_content(template):",
+        new="        if mine == template:",
+        tests=["tests/test_logparser_pa_ga.py"],
+    ),
+    Mutation(
+        id="dep/self-check-tolerates-a-silent-scan",
+        why="阳性对照没报出漏洞时不再判定「门禁失能」。于是 pip-audit 哪天"
+            "静默什么都不扫，CI 照样全绿 —— 而**一个报「检查通过」但其实"
+            "什么都没扫的门禁，比没有门禁更糟**",
+        target="scripts/dep_audit_gate.py",
+        old="    if _control_name() not in ctl[\"vulns\"]:",
+        new="    if False and _control_name() not in ctl[\"vulns\"]:",
+        tests=["tests/test_dep_audit_gate.py"],
+    ),
+    Mutation(
+        id="dep/self-referential-dep-audited",
+        why="不再跳过 `log-ai-compressor[...]` 自引用。pip-audit 于是去解析"
+            "PyPI 上**上次发版**的那个包 —— 本次提交的依赖树被换成了一个"
+            "历史快照，而报告仍然看起来很正常",
+        target="scripts/dep_audit_gate.py",
+        old="            if name.replace(\"-\", \"_\").lower() == \"log_ai_compressor\":",
+        new="            if False:",
+        tests=["tests/test_dep_audit_gate.py"],
+    ),
+    # 下面三条记的是同一场事故的两面：把阳性对照混进本项目的扫描，
+    # **省下了一次网络往返**，代价是本项目的结论开始依赖对照臂的约束。
+    Mutation(
+        id="dep/control-pin-merged-into-project-scan",
+        why="阳性对照那条 `urllib3==1.25.8` 被塞进本项目的扫描（省一次网络"
+            "往返，看起来是纯优化）。**这一条是真的发生过**：混扫时报出一条"
+            "`requests PYSEC-2026-2275`，而单独扫本项目是干净的 —— 那条漏洞"
+            "由对照臂的 pin 造成了解析回退，与本项目无关。让本项目的结论"
+            "依赖于对照臂的约束，就是把探针装在了错误的地方",
+        target="scripts/dep_audit_gate.py",
+        old="    reqs: List[str] = list(project.get(\"dependencies\") or [])",
+        new="    reqs: List[str] = [POSITIVE_CONTROL_PIN] + list(project.get(\"dependencies\") or [])",
+        tests=["tests/test_dep_audit_gate.py"],
+    ),
+    Mutation(
+        id="dep/project-scan-drops-transitive-deps",
+        why="给本项目的扫描也加上 `--no-deps`（为了和对照臂对称）。传递依赖"
+            "于是整个逃出扫描范围 —— 而传递依赖恰恰是最容易出事、也最不会"
+            "被写进 `pyproject.toml` 的那一层。**对称在这里是错的**",
+        target="scripts/dep_audit_gate.py",
+        old="        return _parse(_run(req))\n\n\ndef audit_control",
+        new="        return _parse(_run(req, \"--no-deps\"))\n\n\ndef audit_control",
+        tests=["tests/test_dep_audit_gate.py"],
+    ),
+    Mutation(
+        id="dep/json-output-dropped",
+        why="`--format json` 被去掉（或换成文本输出）。`--format json` 是"
+            "「扫不动」与「干净」唯一的分界：pip-audit 两种情况都返回非零，"
+            "判据是**能不能解析出 JSON**。它一掉，判据就退化成看退出码，"
+            "而第一版正是那样把一次网络超时报成了「依赖有已知漏洞」—— 假红",
+        target="scripts/dep_audit_gate.py",
+        old="            \"--progress-spinner\", \"off\", \"--format\", \"json\", *extra]",
+        new="            \"--progress-spinner\", \"off\", *extra]",
+        tests=["tests/test_dep_audit_gate.py"],
+    ),
+    Mutation(
+        id="fetch/https-guard-bypassed",
+        why="https 白名单被短路。SAST 基线里那两条 B310 的理由写的正是"
+            "「`_require_https()` 挡着」—— 守卫一删，那条豁免立刻变成假话，"
+            "而基线本身仍然绿。这正是「判据落在被守对象的邻居上」的形状",
+        target="scripts/fetch_datasets.py",
+        old='    if scheme != "https":',
+        new="    if False:",
+        tests=["tests/test_fetch_datasets_scheme_guard.py"],
+    ),
+    Mutation(
+        id="ci/gate-step-replaced-with-echo",
+        why="把 `run: python scripts/sast_gate.py` 换成 `run: echo`。"
+            "仓库里仍然有那道门禁、仍然有它的测试、本地仍然跑得绿 —— "
+            "而 GitHub 上它一天都不会跑。**判据若只认步骤名不认 run 正文，"
+            "这条变异会存活**，正对着它想防的那件事（本项目已在 publish-mcp "
+            "上栽过一次）",
+        target=".github/workflows/ci.yml",
+        old="        run: python scripts/sast_gate.py",
+        new="        run: echo 'sast skipped'",
+        tests=["tests/test_ci_gate_wiring.py"],
+    ),
+    Mutation(
+        id="ci/gate-marked-continue-on-error",
+        why="给三道新门禁加 `continue-on-error`。门禁一旦可以失败后继续，"
+            "它就不再是门禁 —— 而 CI 的 job 级结论仍然是 success，"
+            "从外面完全看不出来",
+        target=".github/workflows/ci.yml",
+        old="        run: python scripts/perf_gate.py",
+        new="        run: python scripts/perf_gate.py\n"
+            "        continue-on-error: true",
+        tests=["tests/test_ci_gate_wiring.py"],
+    ),
+    Mutation(
+        id="paga/table-cell-drifts-from-csv",
+        why="PA/GA 表里的一格与 docs/logparser_pa_ga.csv 对不上。这是本项目"
+            "**第一次**把外部定义的指标写进文档，而 v2.9.9 的形状正是"
+            "「代码改了、数字变了、表原地不动、全部门禁绿着」。"
+            "那张表当时靠的是人的自觉",
+        target="docs/BENCHMARK.md",
+        old="| Apache | 51,978 | 29 | 33 | 99.10% | 99.31% |",
+        new="| Apache | 51,978 | 29 | 33 | 99.90% | 99.31% |",
+        tests=["tests/test_logparser_pa_ga_table.py"],
+    ),
+    Mutation(
+        id="paga/summary-verdict-flipped",
+        why="把汇总结论里的胜场数改错（真实值 GA 4 胜 6 负）。**这一条是"
+            "真的发生过**：本文第一版手算成 3 胜 7 负，漏了 Zookeeper"
+            "（99.48% vs 99.37%）。汇总口径比逐格数字更容易写错，"
+            "因为没有任何一格会因为它错而变红 —— 只有专门重算它的那条"
+            "判据抓得住",
+        target="docs/BENCHMARK.md",
+        old="GA 上 4 胜 6 负（Mac / OpenStack / Proxifier / Zookeeper 胜）",
+        new="GA 上 3 胜 7 负（Mac / OpenStack / Proxifier 胜）",
+        tests=["tests/test_logparser_pa_ga_table.py"],
+    ),
+    Mutation(
+        id="paga/changelog-verdict-flipped",
+        why="**同一个手算错漏在了 CHANGELOG 里**。docs/BENCHMARK.md 被逐格"
+            "对账抓出来改了，同一句话在 CHANGELOG 里却原封不动留到了提交前 —— "
+            "同一个 commit 里既改掉又留着。原因很简单：那句话在文档里出现了"
+            "**四遍**，而只有一遍下面有测试",
+        target="CHANGELOG.md",
+        old="逐数据集：PA 上 6 胜 4 负，GA 上 4 胜 6 负。",
+        new="逐数据集：PA 上 6 胜 4 负，GA 上 3 胜 7 负。",
+        tests=["tests/test_logparser_pa_ga_table.py"],
+    ),
 ]
 
 
 # ---------------------------------------------------------------------------
 # 执行
 # ---------------------------------------------------------------------------
+def git_exe() -> str:
+    """解析 git 的绝对路径，解析不到就明确报错。
+
+    SAST（bandit B607）报「用部分路径启动进程」。这里修而不豁免：
+    写死 `"git"` 在 git 不在 PATH 时抛的是 `FileNotFoundError`，
+    看不出是「git 缺失」还是「工作区不干净」—— 而这个脚本的整个卖点
+    就是工作区脏不脏，出错时说不清正是最不该含糊的地方。
+    """
+    exe = shutil.which("git")
+    if exe is None:
+        raise SystemExit("找不到 git —— 变异记分卡靠 git status 兜底还原工作区")
+    return exe
+
+
 def _run_tests(targets: List[str], full: bool) -> int:
     """跑判定用测试。rc == 0 意味着「这条变异活了下来」。"""
     args = [sys.executable, "-m", "pytest", "-q", "--no-header",
@@ -581,7 +856,7 @@ def scorecard(*, full: bool = False,
     """逐条施加变异，记录它是被抓住还是活下来。"""
     mutations = MUTATIONS if mutations is None else mutations
     git_before = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=str(ROOT),
+        [git_exe(), "status", "--porcelain"], cwd=str(ROOT),
         capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
 
     results = []
@@ -609,10 +884,15 @@ def scorecard(*, full: bool = False,
     finally:
         for p, data in originals.items():
             p.write_bytes(data)
-            assert p.read_bytes() == data, f"还原失败：{p} 已脏"
+            # 同样不用 assert：`-O` 会删掉它，于是「还原失败」这条兜底在
+            # 优化模式下直接消失，而兜底没了的后果是**把脏工作区留给用户**。
+            if p.read_bytes() != data:
+                raise SystemExit(
+                    f"还原失败：{p} 已脏 —— 工作区被本脚本留在修改态，"
+                    f"请用 git status 确认后手动还原")
 
     git_after = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=str(ROOT),
+        [git_exe(), "status", "--porcelain"], cwd=str(ROOT),
         capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     if git_after != git_before:
         raise SystemExit(

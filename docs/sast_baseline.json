@@ -1,0 +1,275 @@
+{
+  "_readme": "bandit 基线。生成方式：python scripts/sast_gate.py --print-baseline。",
+  "_rules": [
+    "每条必须有非空 reason —— 门禁强制。「我看过、决定不修」必须落成文字，否则这条豁免和没检查过没有区别。",
+    "代码里已经不报错的条目**必须删掉** —— 门禁也强制。没人再看的那条豁免既不是检查也不是豁免，它只是让基线看起来有历史。",
+    "同一 (test_id, path) 的 count 对不上也红 —— 新增一条同规则同文件的发现不会被悄悄并进旧理由。",
+    "能修的一律修，不进本文件。v2.11.5 首次建立时修掉了 6 处（B310×2 加 https 白名单、B607×3 改 shutil.which、B101×2 assert 改显式抛出、tests/ 里一个用不上的 import subprocess），剩下这些是真判断。"
+  ],
+  "scanned": [
+    "log_ai_compressor",
+    "scripts",
+    "tests"
+  ],
+  "exclude_tests_B101": "pytest 的断言就是这门语言的表达方式，逐条豁免既没意义也写不完（本次扫描实测排除量见下方输出，不是写死的数字）。只排除 tests/ 下的 B101：log_ai_compressor/ 与 scripts/ 里的裸 assert 仍然是真问题（-O 会整条删掉）。",
+  "entries": [
+    {
+      "test_id": "B104",
+      "path": "tests/test_launcher.py",
+      "count": 1,
+      "reason": "这条测的就是「启动器不会绑到所有网卡」这条断言本身。把它排除掉等于让被测行为不再被检查。B104 报的是测试夹具里的 0.0.0.0，而生产代码那一侧由 tests/test_web_host_guard.py 单独守着。"
+    },
+    {
+      "test_id": "B104",
+      "path": "tests/test_web_host_guard.py",
+      "count": 1,
+      "reason": "同上：这条断言的就是「拒绝绑定所有网卡」，测试里必须真的给出 0.0.0.0 才能证明拒绝发生了。这是产品的安全边界测试，不是漏洞。"
+    },
+    {
+      "test_id": "B105",
+      "path": "log_ai_compressor/constants.py",
+      "count": 1,
+      "reason": "误报：命中的是日志级别别名表里的一行 `\"PASS\": \"INFO\"`（Apache 的 PASS 级别映射到 INFO）。变量名里有 pass，值是级别名，全表无任何凭据。"
+    },
+    {
+      "test_id": "B105",
+      "path": "scripts/prove.py",
+      "count": 1,
+      "reason": "误报：`_TOKEN_TABLE_MARK = \"原始 tokens（旧口径）\"`。bandit 因为变量名含 token 就当成硬编码口令，实际是一个用来在文档里定位表格的中文标记串。"
+    },
+    {
+      "test_id": "B105",
+      "path": "tests/test_adversarial_scorecard_gate.py",
+      "count": 4,
+      "reason": "误报：命中的是评分卡字典的 `\"pass\": True/False` 字段名（对抗评测的每一条规则有 pass/detail 两个字段），值是布尔字面量。不是口令。"
+    },
+    {
+      "test_id": "B110",
+      "path": "log_ai_compressor/web/server.py",
+      "count": 1,
+      "reason": "有意为之：`webbrowser.open(url)` 在守护线程里，CI 与无桌面环境必然抛异常。打不开浏览器不该让已经启动的服务退出，所以这里吞掉。这是发布代码里唯一一处吞异常，写下理由以免下一个人「顺手修一下」。"
+    },
+    {
+      "test_id": "B110",
+      "path": "scripts/benchmark_loghub.py",
+      "count": 1,
+      "reason": "有意为之：对照组 Drain3 的 `add_log_message` 遇到某一行抛异常时不能让整个基准跑不完 —— 那样就一个数字都拿不到。吞掉的代价是「对照臂少算了那些行」，这一点由同口径下的 PA/GA 对照臂（scripts/eval_logparser_pa_ga.py）显式报出，不靠这里悄悄处理。"
+    },
+    {
+      "test_id": "B110",
+      "path": "scripts/eval_budget.py",
+      "count": 1,
+      "reason": "同 benchmark_loghub.py：对照组 Drain3 单行异常不应中断整个预算评测。"
+    },
+    {
+      "test_id": "B110",
+      "path": "scripts/find_unused.py",
+      "count": 1,
+      "reason": "有意为之：这是「找未被引用的文件」的辅助脚本，读文件时遇到编码/权限问题跳过即可。它只做只读的文本扫描，不写任何东西。"
+    },
+    {
+      "test_id": "B112",
+      "path": "scripts/eval_logparser_pa_ga.py",
+      "count": 1,
+      "reason": "有意为之：对照臂 Drain3 的 `add_log_message` 对某些行会抛异常，跳过该行继续 —— 口径与 benchmark_loghub.py / eval_budget.py 里那两处完全一致（同一份输入、同一条处理规则），换句话说这里若改成抛异常，两边对照就不公平了。"
+    },
+    {
+      "test_id": "B310",
+      "path": "scripts/fetch_datasets.py",
+      "count": 2,
+      "reason": "已修过一半，留这一条是因为 bandit 认的是 `urlopen` 调用本身而不是校验逻辑。实际防护是同文件里的 `_require_https()`：两个 urlopen 之前都过它，非 https 直接 ValueError。URL 全部由 `LOGS_2_0` 常量表拼出，今天全是 https。守卫本身由 tests/test_fetch_datasets_scheme_guard.py 守着 —— 那条测试把 file:// 喂进去并要求它抛异常，所以这里不是一句注释式的豁免。"
+    },
+    {
+      "test_id": "B311",
+      "path": "scripts/benchmark.py",
+      "count": 1,
+      "reason": "误报用途：`random.Random(42)` 是**带种子**的可复现合成日志生成器，整个基准的可复现性依赖这个种子。与安全、加密、令牌生成无关。"
+    },
+    {
+      "test_id": "B311",
+      "path": "scripts/perf_gate.py",
+      "count": 1,
+      "reason": "误报用途：`random.Random(20241118)` 带固定种子生成性能基线的负载。计数器要跨平台逐项相等，工作负载就不能有任何随机性 —— 恰恰相反，这里正是**因为**要可复现才用随机。"
+    },
+    {
+      "test_id": "B311",
+      "path": "tests/test_cluster_order_independence.py",
+      "count": 2,
+      "reason": "误报用途：这条测的正是「打乱条目顺序后聚类结果不变」，随机打乱正是被测行为本身，且用固定种子。与安全无关。"
+    },
+    {
+      "test_id": "B311",
+      "path": "tests/test_invariants.py",
+      "count": 1,
+      "reason": "误报用途：生成形状各异的日志夹具（乱序、混合级别、部分无戳）用的固定种子随机。与安全无关。"
+    },
+    {
+      "test_id": "B404",
+      "path": "scripts/build_repro.py",
+      "count": 1,
+      "reason": "复核过：本文件只调用 `git log`（取提交时间）与 `python -m build`，参数全是本文件里的常量，没有任何一个来自日志内容或外部输入。已把写死的 `\"git\"` 换成 `git_exe()`（shutil.which + 明确报错），这条留着是因为 import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "scripts/dep_audit_gate.py",
+      "count": 1,
+      "reason": "复核过：只调用 `python -m pip_audit`，参数是本脚本从 pyproject.toml 解析出的依赖名 + 临时文件路径，全部由本仓库自身内容决定。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "scripts/mutation_scorecard.py",
+      "count": 1,
+      "reason": "复核过：只调用 `git status --porcelain` 与 `sys.executable -m pytest`，参数是本脚本里的常量。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "scripts/sast_gate.py",
+      "count": 1,
+      "reason": "复核过：只调用 `python -m bandit`，目标是本仓库自己的三个目录。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_ci_step_execution.py",
+      "count": 1,
+      "reason": "复核过：这条测试的职责就是在受控环境里真的执行 CI 里的 python step，必须起子进程。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_exit_codes.py",
+      "count": 1,
+      "reason": "复核过：这条测的正是 CLI 的退出码，必须起子进程跑真实命令。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_gitignore_report_artifacts.py",
+      "count": 1,
+      "reason": "复核过：只用 `git check-ignore` 问 gitignore 的判定结果，不改工作区。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_invariants.py",
+      "count": 1,
+      "reason": "复核过：这条验证的是「不调用外部模型 API」的运行时约定（跑一遍完整分析并监视 socket），起子进程是被测行为的一部分。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_packaging.py",
+      "count": 1,
+      "reason": "复核过：验证打包后的 wheel 里有什么，必须起子进程在隔离环境里安装检查。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_registry_manifest.py",
+      "count": 1,
+      "reason": "复核过：验证 server.json 与 pyproject 的版本一致，需要读包元数据。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_subprocess_encoding_contract.py",
+      "count": 1,
+      "reason": "复核过：这条测试的主题就是子进程的输出编码契约，起子进程是它要测的东西本身。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_uncovered_paths.py",
+      "count": 1,
+      "reason": "复核过：跑真实分析流程以覆盖降级分支。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_verdict_surfaces.py",
+      "count": 1,
+      "reason": "复核过：跑真实导出以检查三档置信在各个面上的呈现。import 本身无法消除。"
+    },
+    {
+      "test_id": "B603",
+      "path": "scripts/build_repro.py",
+      "count": 2,
+      "reason": "复核过：两处都是列表传参 + shell=False + check=True，命令是 git / sys.executable -m build，参数为常量。bandit 报的是「请复核」，复核结论是：不接收任何外部输入作为命令行。"
+    },
+    {
+      "test_id": "B603",
+      "path": "scripts/dep_audit_gate.py",
+      "count": 1,
+      "reason": "复核过：列表传参、shell=False，命令固定为 `python -m pip_audit`，参数是仓库自己的依赖声明。"
+    },
+    {
+      "test_id": "B603",
+      "path": "scripts/mutation_scorecard.py",
+      "count": 3,
+      "reason": "复核过：三处都是列表传参 + shell=False，命令是 git status 与 `sys.executable -m pytest`。测试目标来自本文件里登记的变异表，不来自日志内容。"
+    },
+    {
+      "test_id": "B603",
+      "path": "scripts/sast_gate.py",
+      "count": 1,
+      "reason": "复核过：列表传参、shell=False，命令固定为 `python -m bandit`，目标是仓库自己的三个目录。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_ci_step_execution.py",
+      "count": 5,
+      "reason": "复核过：五处都是列表传参 + shell=False，跑的是 CI 里那几段固定的 python 代码与 pytest。执行 CI step 是这条测试的职责。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_exit_codes.py",
+      "count": 1,
+      "reason": "复核过：列表传参 + shell=False，跑的是本项目的 CLI 入口。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_gitignore_report_artifacts.py",
+      "count": 4,
+      "reason": "复核过：四处都是 `git check-ignore -q <字面量路径>`，列表传参、shell=False，不改工作区。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_invariants.py",
+      "count": 1,
+      "reason": "复核过：列表传参 + shell=False，跑的是本项目的 CLI。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_packaging.py",
+      "count": 1,
+      "reason": "复核过：列表传参 + shell=False，跑的是 pip / python。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_registry_manifest.py",
+      "count": 1,
+      "reason": "复核过：列表传参 + shell=False，跑的是 python -m。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_subprocess_encoding_contract.py",
+      "count": 3,
+      "reason": "复核过：三处都是列表传参 + shell=False，跑的是已安装的 `log-ai-compressor` 控制台脚本。子进程编码契约就是这条测试的被测对象。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_uncovered_paths.py",
+      "count": 2,
+      "reason": "复核过：列表传参 + shell=False，跑的是 `python -m log_ai_compressor`。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_verdict_surfaces.py",
+      "count": 1,
+      "reason": "复核过：列表传参 + shell=False，跑的是 `python -m log_ai_compressor`。"
+    },
+    {
+      "test_id": "B607",
+      "path": "tests/test_gitignore_report_artifacts.py",
+      "count": 4,
+      "reason": "复核过：四处都是 `git check-ignore`，命令名写死。测试环境里 git 是构建前提（整个仓库就是 git 仓库），用完整路径反而会在 Windows runner 上换一个问题。这四处的产物不进入任何对外路径。"
+    },
+    {
+      "test_id": "B607",
+      "path": "tests/test_subprocess_encoding_contract.py",
+      "count": 1,
+      "reason": "复核过：跑的是本项目的控制台脚本 `log-ai-compressor`（由 `python -m pip install -e .` 装进 Scripts/），它就是被测对象 —— 换成绝对路径反而测不到「用户 PATH 里那个入口」。"
+    }
+  ]
+}

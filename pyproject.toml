@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "log-ai-compressor"
-version = "2.11.4"
+version = "2.11.5"
 description = "本机日志取证层：每条结论带行号出处与原文 sha256，可脱离本工具自校验；拿不出因果链就说证据不足并列出还缺什么。零出网。附 Loghub 2.0 可复现基准（对照 Drain3 / tail / grep）。"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -65,7 +65,12 @@ dev = ["pytest>=7.0", "pytest-cov>=4.0", "pytest-timeout>=2.1", "ruff>=0.4",
         # 基准对照工具。装不装都不影响主包 —— 硬依赖仍然只有 PyYAML；
         # 缺任一个时 benchmark_loghub.py 会跳过该对照臂而不是崩。
         "drain3>=0.9.11",
-        "logslop>=0.1.2"]
+        "logslop>=0.1.2",
+        # 第八、九道门禁（SAST / 依赖漏洞扫描）用的两个工具。
+        # 声明在这里而不是散在 CI 里：scripts/dep_audit_gate.py 只认
+        # pyproject 这一个来源，CI 装没装决定了这道门禁是真跑还是恒 skip。
+        "bandit>=1.7",
+        "pip-audit>=2.7"]
 
 [project.scripts]
 log-ai-compressor = "log_ai_compressor.cli:main"

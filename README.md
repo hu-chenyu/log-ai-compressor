@@ -146,6 +146,40 @@ LogsLop（AMD 2026-07，去重工具，与证据保留**目标相反**）、tail
 > v2.9.5「指标在数用户没收到的东西」、v2.9.8「指标涨了但产品崩了」三次撤回的经过，
 > 全在 [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。被质疑时先看那里。
 
+### 换一把不是自己设计的尺子：Loghub 标准解析协议 PA / GA
+
+上面那张表的指标全是**本项目自己定义**的。「簇样例覆盖了多少种 Loghub 事件」
+不是任何公认指标的名字，换个定义数字就变 —— 所以它回答不了
+「你的聚类放到同行里是什么水平」。
+
+v2.11.5 第一次用**外部定义**的指标量自己的聚类：**PA / GA**（LogParser，
+ICSE-SEIP'19 提出，Drain / Drain3 / LILAC / LLMParser / LibreLog 全部在用），
+口径锚在两份互相独立的实现上（`logpai/logparser` 与 `zeyang919/LibreLog`），
+并带同机同口径的 Drain3 对照臂：
+
+| 口径 | 本项目 | Drain3 0.9.11 |
+| --- | ---: | ---: |
+| PA（解析准确率） | **61.71%** | 58.06% |
+| GA（归组准确率） | 58.18% | **71.58%** |
+
+**PA 略胜、GA 明显落后**（逐数据集 PA 6 胜 4 负、GA 4 胜 6 负）——
+两个口径方向相反，两个都列。GA 落后说明的是同一件事：
+`_find_similar` 按字符相似度 0.85 判合并，`boot (command N)` 与
+`risBoot (command N)` 会被并成一簇，在 GA 上直接体现为少一个完整事件组。
+
+这一节还暴露了一个**此前没有任何本项目指标发现过的解析层缺陷**：
+喂原始日志时 PA 平均 23.24%，喂 Loghub 的 `Content` 列（剥掉时间戳/主机/
+级别后的正文，也是 Drain 官方要求喂的输入）时是 61.71% —— 差 38 个百分点，
+其中 5 个数据集在原始日志口径下 PA **恰好是 0.00%**。原因是本项目的解析器
+不剥这些数据集的 syslog 头。本版**不修**：修它要先决定「哪些头部格式该剥」，
+而对着评测集改规则是 AGENTS.md §2.3 明令禁止的。把缺口量化写出来，
+比改一个正则然后宣称修好了更有用。
+
+三张表（含逐数据集明细与对照组）的每一格都由
+`tests/test_logparser_pa_ga_table.py` 对着 `docs/logparser_pa_ga.csv` 逐格核对。
+完整方法学、协议适配的三处偏离、以及「这一节不能证明什么」，
+全在 [`docs/BENCHMARK.md`](docs/BENCHMARK.md) 的「结果四」。
+
 ---
 
 ## 🚦 工程指标
@@ -153,10 +187,21 @@ LogsLop（AMD 2026-07，去重工具，与证据保留**目标相反**）、tail
 | 指标 | 实测值 |
 | --- | --- |
 | 生产代码 | 7,951 行（32 个模块），硬依赖只有 PyYAML |
-| 测试 | **1,449 用例**，覆盖率 **96%**（漏行 158 / 3,995 语句），`ruff` 全绿 |
-| CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**七道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **变异存活率记分卡**（第七道只跑参考矩阵一条） |
+| 测试 | **1,557 用例**，覆盖率 **96%**（漏行 158 / 3,995 语句），`ruff` 全绿 |
+| CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**十道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **变异存活率记分卡**（只跑参考矩阵一条）/ **SAST** / **依赖漏洞扫描** / **性能回归** |
 | 自证脚本 | 现已断言 **11 条**主张，含「README 工程指标与架构树必须与仓库一致」「README 写的条数不许漂」「**每一处基准表逐格对账实测基线（含胜负场次与合计行）**」 |
 | 构建 | 可复现 —— 同源码两次构建字节相同，本地/PyPI/GitHub 三方 sha256 对账 |
+| 依赖 | **运行时硬依赖只有 PyYAML 一个**，全部 16 条声明依赖（含 web/mcp/ai 三个 extra 与开发工具）经 pip-audit 扫描无已知漏洞；Dependabot 每周一提 PR |
+
+> **上面这十道门禁里的门禁清单本身也有门禁在守**：
+> `tests/test_ci_gate_wiring.py` 双向核对 —— README 写下的每一道都必须
+> 在 `ci.yml` 里有一个真正执行它的步骤（认的是 `run:` 正文，不是步骤名），
+> 而 `ci.yml` 里的每一道也必须出现在这张表里。
+> 这条判据来自一次真实翻车：仓库里有脚本、有测试、本地跑绿，
+> 但没接进 workflow —— 而那种状态从外面**完全看不出来**。
+> 三道新门禁各自「先证明自己会红」的做法，写在
+> [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) 与
+> [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 > **覆盖率的分母比上面那行代码量小**：`pyproject.toml` 的
 > `[tool.coverage.run] omit` 排除了 `cli.py`（薄适配层，637 行，
@@ -283,7 +328,7 @@ Windows 可双击 `start.bat` 自动定位 Python、装依赖、启动并打开�
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 模块树、分层依赖、核心算法 |
 | [`docs/CLI.md`](docs/CLI.md) | 完整命令行用法 + 自定义解析规则 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 开发、测试、门禁说明 |
-| [`AGENTS.md`](AGENTS.md) | **给 AI agent 的工作契约**：分层与唯一门面、七道门禁各自守什么、这个仓库特有的坑 |
+| [`AGENTS.md`](AGENTS.md) | **给 AI agent 的工作契约**：分层与唯一门面、十道门禁各自守什么、这个仓库特有的坑 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 人类贡献流程：分支、提交约定、基准纪律、发版与三方 sha256 对账 |
 | `SKILL.md` / `INSTRUCTIONS` | 接入 Claude Code / Codex / Mavis 等 Agent |
 

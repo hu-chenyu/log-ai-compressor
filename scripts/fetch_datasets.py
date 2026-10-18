@@ -50,6 +50,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -95,7 +96,27 @@ def url_for(record: str, name: str) -> str:
     return f"https://zenodo.org/api/records/{record}/files/{name}/content"
 
 
+def _require_https(url: str) -> None:
+    """只放行 https。
+
+    SAST（bandit B310）报的就是 `urlopen` 不校验 scheme。表里的 URL 是
+    常量拼出来的、今天全是 https，所以这一条**当时不是漏洞**；但把它
+    留给「下一个人随手加一行 `file://` 就静默变成任意文件读」是不行的，
+    所以在这里显式挡一道，而不是写一条 nosec 了事。
+
+    这条是从「豁免」改成「修」的一个例子：能修的就修，修不了的才进基线。
+    """
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme != "https":
+        raise ValueError(
+            "拒绝非 https 的 URL（%r）：本脚本只从 Zenodo 取数据集，"
+            "放行 file:// 等 scheme 等于把任意文件读取的口子留在门禁里"
+            % (url,)
+        )
+
+
 def total_size(url: str) -> int:
+    _require_https(url)
     req = urllib.request.Request(url, headers={"User-Agent": UA,
                                                "Range": "bytes=0-0"})
     with urllib.request.urlopen(req, timeout=60) as r:

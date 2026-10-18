@@ -515,6 +515,14 @@ _GATE_STEPS = {
     "Reproducible build check (same source -> same bytes)",
     "Unit & integration tests with coverage",
     "Mutation scorecard (do the tests still have teeth?)",
+    # v2.11.5 新增的三道行业标配门禁。
+    # 它们挂在**全部三条矩阵**上而不是像变异记分卡那样只跑参考矩阵：
+    # 变异记分卡量的是测试质量（与 OS / Python 无关），而这三道守的是
+    # 「这个仓库此刻的安全与性能姿态」，那恰恰是最可能在某一条矩阵上
+    # 被悄悄带进来的东西。
+    "SAST (bandit baseline reconciliation)",
+    "Dependency vulnerability scan (pip-audit)",
+    "Performance regression (deterministic work counters)",
 }
 
 #: 不是门禁的：装环境 / 装依赖 / 产物构建 / 传产物。
@@ -549,7 +557,8 @@ class TestGateCountCannotDrift:
 
     def test_the_documented_count_matches_the_workflow(self):
         actual = len(_GATE_STEPS)
-        cn = {2: "两", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七"}
+        cn = {2: "两", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七",
+              8: "八", 9: "九", 10: "十"}
         word = cn.get(actual, str(actual))
         docs = {
             "README.md": f"{word}道门禁",

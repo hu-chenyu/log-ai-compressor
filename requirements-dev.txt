@@ -14,3 +14,8 @@ ruff>=0.4
 # 交付物完整性门禁要真的跑，就必须在跑测试前先构建产物。
 # 没有它，tests/test_sdist_contents.py 的产物层在 CI 上恒 skip。
 build>=1.0
+# 第八、九道门禁（SAST / 依赖漏洞扫描）用的两个工具。
+# 装在这里而不是「CI 里现 pip install」：装在 dev 依赖里，本地跑门禁
+# 与 CI 跑门禁用的是同一批版本，不会出现「本地绿、CI 红」的版本差。
+bandit>=1.7
+pip-audit>=2.7
