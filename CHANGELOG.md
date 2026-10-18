@@ -119,9 +119,10 @@ SAST 基线只装**真该留下**的东西。能修的一律修：
   `_Proc` 只需要 `_parse` 读的两个属性。**一条用不上的 import 不该靠豁免
   留在基线里** —— 删掉之后那条豁免成了过期条目，已一并移除。
 
-### 📝 本版踩到并修掉的两处自身问题（照实记录）
+### 📝 本版踩到并修掉的自身问题（照实记录）
 
-两条都属于本项目记过多次的同一族形状：**判据指错了对象**。
+本节六条都属于本项目记过多次的同一族形状：**判据指错了对象**，或者
+**判据只覆盖了一半的对象**。
 
 1. **性能门禁的仪表装在了没被执行的路径上。** 第一版把计数器装在
    `clustering.similarity()` 上，实测计数**恒为 0** —— 而 `_find_similar`
@@ -133,8 +134,68 @@ SAST 基线只装**真该留下**的东西。能修的一律修：
    `continue-on-error`，而本仓库的 CI 步骤带着大段解释**为什么不用**
    `continue-on-error` 的注释 —— 判据把自己判红了。现在先剥注释、
    按步骤边界切分，再判。
+3. **SAST 抓到一条 count 写错的豁免**（实测 1 条、基线写 2 条）。没有改
+   数字了事 —— 根子是那个测试**压根不需要** `import subprocess`；删掉之后
+   那条豁免成了过期条目，一并移除。
+4. **门禁输出里的排除条数是写死的**「全量套件 2,307 条」，早已漂到两千
+   四百多。改成运行时实测并把实测值打在输出里（本次两千四百多 —— 这个数
+   在这一版里随测试增删动过好几次：2,487 → 2,490 → 2,496，**每一次都是
+   门禁自己量出来的**。写死它的那个版本，它只会安静地变成一句假话）。理由见 `scripts/sast_gate.py` 的 `scan()` 注释：**门禁
+   输出里的一个常量，会被当成实测值读。**
+5. **胜场手算错（3 胜 7 负）在 CHANGELOG 里漏改。** BENCHMARK 被逐格
+   对账抓出来改了，同一句在 CHANGELOG 原封不动留到了提交前 —— 同一个
+   commit 里既改掉又留着。那句话在文档里出现四遍，而只有一遍下面有测试。
+6. **记分卡实测抓到一条存活变异。** BENCHMARK 里另有一句**正确的**历史
+   注文，于是「正确值必须出现」的存在性断言在正文被改错后照样绿。
+   **正确的值必须出现 ≠ 错误的值没有出现**，改成后者。
+7. **`dep/self-check-tolerates-a-silent-scan` 的锚点指着重写前的旧结构** ——
+   代码改完锚点就失效了，一条记着「已经发生过」的变异连自己都拦不住。
 
-### 🧪 变异记分卡 45 → 68 条，击杀率仍为 100%
+### 🌐 两条只有 CI 上才暴露的问题
+
+本机全绿、推上去才红的两条，都记在这里。
+
+**8. windows-3.12 在 SAST 这步红了，报的是编码错误**
+
+```
+File "scripts/sast_gate.py", line 183, in check
+    print("扫描面：%s" % " ".join(TARGETS))
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-3
+```
+
+而 ubuntu-3.11 与 ubuntu-3.12 **两条全绿**。那次红与「代码里有没有洞」
+毫无关系 —— Windows 控制台默认 cp1252 装不下中文。
+
+**把三道门禁挂全部三条矩阵的价值就在这里**：如果只挂在 ubuntu 上，这条
+会一路绿到有人手动跑 windows 为止。而症状极具误导性：门禁本身全绿，
+step 红了，看起来像功能坏了。
+
+修法照抄 `scripts/adversarial_eval.py` 早就有的那段 stdout/stderr 兜底
+（同一个坑 2024 年就踩过一次并修好了，这四个新脚本只是忘了套），
+并由 `tests/test_windows_console_encoding.py` 钉住：一件验**行为**
+（`PYTHONIOENCODING=cp1252` 下真跑一遍不许崩），一件验**位置**
+（reconfigure 必须在第一个 `print` 之前 —— 只查「文件里出现过」的话，
+挪到末尾一样绿，而那样在 Windows 上照样崩）。
+
+**9. Dependabot 的 pip run 红了，因为它读了一个「不会被执行」的文件**
+
+```
+dependency_file_not_evaluatable:
+  Invalid requirement: 'pip install log-ai-compressor'
+  (from line 13 of dependabot_tmp_dir/requirements-optional.txt)
+```
+
+`requirements-optional.txt` 开头写着「本文件不会被任何流程执行」——
+这句话当时是**不准确的**：没有任何流程 *执行* 它，但确实有流程 *解析* 它。
+Dependabot 的 pip 生态按 `requirements*.txt` **通配扫全部文件**，不区分
+pip 会不会执行。
+
+原来的守卫只管「pip 会执行的那两个文件」，而漏掉的正是这一个。修法不是
+改名也不是加忽略规则（那样只是换一个文件犯同样的错），而是把每条安装
+命令加 `# ` 前缀：内容一个字没少，仍然能复制去跑，但文件同时成了合法的
+requirements 文件。**「给人看」与「给机器解析」不该靠文件名赌。**
+
+### 🧪 变异记分卡 45 → 70 条，击杀率仍为 100%
 
 前 16 条覆盖这批门禁的失效方式：豁免没理由、豁免过期、新发现被
 吸收、排除规则写宽、计数器装错位置、计数器不再比对、负载改用 `localtime`、
@@ -142,24 +203,26 @@ GA 少掉条件 (b)、PA 两侧不再共用归一化、阳性对照失效、自�
 https 守卫被绕过、CI 步骤被换成 `echo`、门禁被标 `continue-on-error`，
 以及 PA/GA 两张表的逐格与汇总结论对账。
 
-收尾时又加了 7 条，其中**六条都是这一版真踩到的**：
+收尾时又加了 9 条，其中**九条都是这一版真踩到的**：
 
 | 变异 | 对应的那次事故 |
 | --- | --- |
 | `dep/control-pin-merged-into-project-scan` | 为省一次网络往返把阳性对照合回本项目扫描，混扫报出一条假的 `requests PYSEC-2026-2275` |
 | `dep/project-scan-drops-transitive-deps` | 给本项目也加 `--no-deps` 求「对称」，传递依赖整个逃出扫描范围 |
 | `dep/json-output-dropped` | `--format json` 一掉，「扫不动」与「干净」就再也分不开 |
-| `paga/changelog-verdict-flipped` | 胜场手算成「3 胜 7 负」这个错在 BENCHMARK 改了，同一句在 CHANGELOG 漏改 —— 同一个 commit 里既改掉又留着 |
+| `paga/changelog-verdict-flipped` | 胜场手算成「3 胜 7 负」这个错在 BENCHMARK 改了，同一句在 CHANGELOG 漏改 |
 | `sast/documented-count-drifts-from-baseline` | 照着 `len(entries)` 把文档里的 43 条豁免改成 44，而那 44 里有一条是**过期条目** |
-| `sast/exclude-count-hardcoded-again` | 排除理由里写死「全量套件 2,307 条」—— 写死的当天是对的，之后每加一批测试它就悄悄变成一句假话，而它出现在**门禁输出**里、看起来像实测值 |
-| `sast/reported-exclusion-count-stopped-following-the-scan` | 输出里的排除条数改成常量：数字仍「看起来是实测的」，但已与这一次运行无关 —— 比不报更糟，因为它让人以为有人量过 |
+| `sast/exclude-count-hardcoded-again` | 排除理由里写死「全量套件 2,307 条」—— 写死的当天是对的，之后每加一批测试它就悄悄变成一句假话，而它出现在**门禁输出**里 |
+| `sast/reported-exclusion-count-stopped-following-the-scan` | 输出里的排除条数改成常量：数字仍「看起来是实测的」，但已与这一次运行无关 |
+| `ci/windows-console-encoding-crash` | 去掉 stdout 的 UTF-8 兜底 —— windows-3.12 红在 `UnicodeEncodeError` 上，而两条 ubuntu 全绿 |
+| `deps/dependabot-chokes-on-cheatsheet` | 把安装命令取消注释 —— Dependabot 整条 run 报 `dependency_file_not_evaluatable` |
 
 另修一处**变异本身失能**：`dep/self-check-tolerates-a-silent-scan` 的锚点
 指着重写前的旧结构，代码改完锚点就失效了 —— 一条记着「已经发生过」的变异
 连自己都拦不住了。
 
 那条写死的条数最后不是改数字了事，而是**改成运行时实测**并把实测值打在
-输出里（本次 2,487 条）。理由见 `scripts/sast_gate.py` 的 `scan()` 注释：
+输出里。理由见 `scripts/sast_gate.py` 的 `scan()` 注释：
 门禁输出里的一个常量，会被当成实测值读。
 
 「CI 步骤被换成 `echo`」那条对着 `publish-mcp` 上栽过的那次 ——

@@ -64,6 +64,18 @@ import tomllib
 from pathlib import Path
 from typing import List, Optional, Sequence
 
+# Windows 控制台默认 cp1252/cp936，打印中文会抛 UnicodeEncodeError ——
+# 而且症状极具误导性：门禁本身全绿，却因为「打印表格时编码失败」让整个
+# step 变红，看起来像功能坏了。**这一条是真的发生过**：v2.11.5 首次把
+# 三道新门禁接进 CI，windows-3.12 就在 SAST 这步红了，而 ubuntu 两条
+# 全绿 —— 门禁必须只在**判定**失败时失败，不能因为控制台编码。
+# 模式与 scripts/adversarial_eval.py 一致，不是新发明。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")   # py3.7+
+    except (AttributeError, ValueError, OSError):                # pragma: no cover
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 

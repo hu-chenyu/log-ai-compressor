@@ -239,26 +239,65 @@ class TestIdempotence:
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 CI_GATE_SCRIPTS = ("scripts/adversarial_eval.py", "scripts/prove.py")
 
+#: v2.11.5 新增的三道门禁 + PA/GA 评测。**与上面那批分开，是因为它们接参数**：
+#: 无参运行会跑完整工作 —— SAST 扫全仓约 20 秒、依赖门禁要联网好几分钟、
+#: PA/GA 要跑满 10 个数据集（约 50 分钟），塞进单测里不可接受。
+#: 所以用 `--help`：argparse 会打印中文描述然后退出 0，
+#: 而「把中文写进 cp1252 的 stdout」正是这里要验的那件事本身。
+ARG_GATE_SCRIPTS = (
+    "scripts/sast_gate.py",
+    "scripts/perf_gate.py",
+    "scripts/dep_audit_gate.py",
+    "scripts/eval_logparser_pa_ga.py",
+)
+
+ALL_GATE_SCRIPTS = CI_GATE_SCRIPTS + ARG_GATE_SCRIPTS
+
 
 class TestGateScriptsEncodingSafe:
     """CI 门禁脚本打印中文，必须在非 UTF-8 控制台下也能跑完。
 
-    实测事故：Windows runner 控制台是 cp1252，`adversarial_eval.py`
-    评分**全绿**却在 print() 中文表格时抛 UnicodeEncodeError，整个 step
-    变红 —— 症状是「CI 红了」，真相是「只是打印不出来」。
+    实测事故（两次，同一个形状）：
+    1. Windows runner 控制台是 cp1252，`adversarial_eval.py`
+       评分**全绿**却在 print() 中文表格时抛 UnicodeEncodeError，整个 step
+       变红 —— 症状是「CI 红了」，真相是「只是打印不出来」。
+    2. **2026-10-19 又踩了一次**：三道新门禁首次接进 CI，windows-3.12 在
+       SAST 这步红了，报同一个 UnicodeEncodeError，而 ubuntu 两条全绿。
+       修法就是照抄第 1 次的兜底 —— 仓库里早就有正确做法，四个新脚本
+       只是忘了套。这条测试存在的意义就是「忘了套」会当场变红。
 
     门禁红必须意味着**主张不成立**，不能是控制台编码。否则门禁会训练
     所有人忽略红色，这比没有门禁更糟。
     """
 
-    @pytest.mark.parametrize("script", CI_GATE_SCRIPTS)
+    @staticmethod
+    def _args_for(script: str):
+        return ["--help"] if script in ARG_GATE_SCRIPTS else []
+
+    @pytest.mark.parametrize("script", ALL_GATE_SCRIPTS)
     def test_source_reconfigures_stdout(self, script):
         """源码层面的快速检查（拼写错也能抓到）。"""
         src = (_ROOT / script).read_text(encoding="utf-8")
         assert 'reconfigure(encoding="utf-8"' in src, (
             f"{script} 必须把 stdout/stderr 切到 UTF-8")
 
-    @pytest.mark.parametrize("script", CI_GATE_SCRIPTS)
+    @pytest.mark.parametrize("script", ALL_GATE_SCRIPTS)
+    def test_reconfigure_happens_before_the_first_print(self, script):
+        """判据看的是**位置**，不是「文件里出现过 reconfigure」。
+
+        只查「出现过」的话，把那段挪到文件末尾一样绿 —— 而那样在 Windows
+        上照样崩。这是本项目记过多次的形状：判据认了名字，没认行为。
+        """
+        src = (_ROOT / script).read_text(encoding="utf-8")
+        reconfig = src.find('reconfigure(encoding="utf-8"')
+        first_print = src.find("print(")
+        assert reconfig != -1, f"{script} 没有那段兜底"
+        assert first_print != -1, f"{script} 一个 print 都没有，判据本身失效"
+        assert reconfig < first_print, (
+            f"{script} 的 reconfigure 出现在第一个 print 之后"
+            f"（偏移 {reconfig} vs {first_print}）—— 前面那几次打印照样会崩")
+
+    @pytest.mark.parametrize("script", ALL_GATE_SCRIPTS)
     def test_runs_under_cp1252_stdout(self, script):
         """真的用 cp1252 跑一遍。
 
@@ -269,11 +308,31 @@ class TestGateScriptsEncodingSafe:
         env["PYTHONIOENCODING"] = "cp1252"
         env.pop("PYTHONUTF8", None)
         proc = subprocess.run(
-            [sys.executable, str(_ROOT / script)],
+            [sys.executable, str(_ROOT / script), *self._args_for(script)],
             capture_output=True, env=env, timeout=300)
         assert proc.returncode == 0, (
             f"{script} 在 cp1252 控制台下退出码 {proc.returncode}: "
             f"{proc.stderr[-400:].decode('utf-8', 'replace')}")
+
+    @pytest.mark.parametrize("script", ALL_GATE_SCRIPTS)
+    def test_both_streams_are_reconfigured(self, script):
+        """stdout 和 stderr 都要改：崩在 stderr 上的报错同样让 step 变红。"""
+        src = (_ROOT / script).read_text(encoding="utf-8")
+        assert "(sys.stdout, sys.stderr)" in src, (
+            f"{script} 只改了部分流 —— stderr 上的报错同样会让 CI 变红")
+
+    def test_the_same_fix_already_exists_in_this_repo(self):
+        """守的不是「再写一遍」，是「别发明第三种写法」。
+
+        `scripts/adversarial_eval.py` 是这件事的**参考实现**（2024 年就踩过
+        一次并修好）。如果哪天有人把某个脚本改成新写法，至少这里指出
+        仓库里已有标准答案。
+        """
+        ref = (_ROOT / "scripts" / "adversarial_eval.py").read_text(
+            encoding="utf-8")
+        assert 'reconfigure(encoding="utf-8"' in ref, (
+            "参考实现 scripts/adversarial_eval.py 里没有这段兜底了 —— "
+            "先确认它是被有意删掉的，再来改别的脚本")
 
 
 # ---------------------------------------------------------------------------

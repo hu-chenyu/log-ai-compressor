@@ -8,24 +8,39 @@
 # `pip install -r requirements.txt` 会把 `pip`、`install`、`xxx[web]`
 # 当成包名，报 Invalid requirement 并让整条 CI 失败。
 # tests/test_packaging.py::TestRequirementsFiles 专门守这条。
+#
+# 第三条（v2.11.5 修）：**Dependabot 也是这样一个流程**。
+# 2026-10-19 接上 dependabot.yml 之后，它的 pip 生态按 `requirements*.txt`
+# 通配扫到了本文件，直接报
+#   dependency_file_not_evaluatable:
+#   Invalid requirement: 'pip install log-ai-compressor'
+#   (from line 13 of dependabot_tmp_dir/requirements-optional.txt)
+# —— 整个 Dependabot run 变红，连 github-actions 那条一起受影响。
+# 前面那句注释「本文件不会被任何流程执行」当时是**不准确的**：
+# 没有任何流程 *执行* 它，但确实有流程 *解析* 它。
+#
+# 所以下面每条安装命令都加了 `# ` 前缀：内容一个字没少，仍然可以直接
+# 复制去跑（去掉 `# `），但它同时是合法的 requirements 文件 ——
+# pip 忽略注释，Dependabot 也不再报错。**「给人看」与「给机器解析」
+# 不该靠文件名赌。**
 
 # 核心引擎（只有 PyYAML 一个硬依赖）
-pip install log-ai-compressor
+# pip install log-ai-compressor
 
 # 本地 Web 界面（双击 start.bat 走这条）
-pip install "log-ai-compressor[web]"
+# pip install "log-ai-compressor[web]"
 
 # MCP Server：让 Claude Code / Codex / mavis 等 Agent 调用本机日志
-pip install "log-ai-compressor[mcp]"
+# pip install "log-ai-compressor[mcp]"
 
 # AI 解读（OpenAI 兼容端点 / 本地 Ollama 都走它）
-pip install "log-ai-compressor[ai]"
+# pip install "log-ai-compressor[ai]"
 
 # 全都要
-pip install "log-ai-compressor[all]"
+# pip install "log-ai-compressor[all]"
 
 # 源码开发
-pip install -e ".[all,dev]"
+# pip install -e ".[all,dev]"
 
 # ---- 说明 ----
 # AI 解读是**可选**功能，不装 httpx 也能用：

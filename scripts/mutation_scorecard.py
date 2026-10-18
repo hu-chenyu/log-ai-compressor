@@ -594,6 +594,36 @@ MUTATIONS: List[Mutation] = [
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
+        id="ci/windows-console-encoding-crash",
+        why="去掉 stdout/stderr 的 UTF-8 兜底。**这一条是真的发生过**："
+            "2026-10-19 第一次把三道新门禁接进 CI，windows-3.12 在 SAST 这步"
+            "红了，报 `UnicodeEncodeError: 'charmap' codec can't encode "
+            "characters`，而 ubuntu 两条全绿。**那次红与代码里有没有洞毫无"
+            "关系**，只是 Windows 控制台默认 cp1252 装不下中文。症状极具"
+            "误导性：门禁全绿、step 红了，看起来像功能坏了",
+        target="scripts/sast_gate.py",
+        old='for _stream in (sys.stdout, sys.stderr):\n'
+            '    try:\n'
+            '        _stream.reconfigure(encoding="utf-8", errors="replace")   # py3.7+\n'
+            '    except (AttributeError, ValueError, OSError):                # pragma: no cover\n'
+            '        pass',
+        new="pass  # 兜底被删掉了",
+        tests=["tests/test_invariants.py"],
+    ),
+    Mutation(
+        id="deps/dependabot-chokes-on-cheatsheet",
+        why="把 requirements-optional.txt 里的安装命令取消注释。同一次提交里"
+            "的另一个真实事故：Dependabot 的 pip 生态按 `requirements*.txt` "
+            "通配扫**全部**文件（不区分 pip 会不会执行），于是报 "
+            "`dependency_file_not_evaluatable: Invalid requirement: "
+            "'pip install log-ai-compressor'`，整条 Dependabot run 变红。"
+            "原判据只管「pip 会执行的那两个文件」，而漏掉的正是这一个",
+        target="requirements-optional.txt",
+        old="# pip install log-ai-compressor\n",
+        new="pip install log-ai-compressor\n",
+        tests=["tests/test_packaging.py"],
+    ),
+    Mutation(
         id="sast/unknown-finding-tolerated",
         why="新发现不再让门禁红。于是「代码里新冒出来的洞」被静默吸收 —— "
             "而这正是 SAST 存在的唯一理由",
