@@ -338,6 +338,52 @@ MUTATIONS: List[Mutation] = [
         new="              c_valid = n_valid",
         tests=["tests/test_ci_step_execution.py"],
     ),
+    # ---- Registry 发布工作流（v2.11.2 批7） ----------------------------
+    Mutation(
+        id="registry/oidc-permission-downgraded",
+        why="OIDC 权限被降级成 read —— login github-oidc 拿不到令牌，"
+            "发布在最后一步才炸，而那时凭据流程已经跑了一半",
+        target=".github/workflows/publish-mcp.yml",
+        old="  id-token: write",
+        new="  id-token: read",
+        tests=["tests/test_publish_mcp_workflow.py"],
+    ),
+    Mutation(
+        id="registry/device-flow-login",
+        why="改用 login github：命名空间由「谁登录」决定，条目会发到"
+            "本机账号的命名空间去，而清单写的是仓库 owner —— 403 且难查",
+        target=".github/workflows/publish-mcp.yml",
+        old="run: ./mcp-publisher login github-oidc",
+        new="run: ./mcp-publisher login github",
+        tests=["tests/test_publish_mcp_workflow.py"],
+    ),
+    Mutation(
+        id="registry/checksum-comparison-inverted",
+        why="校验和比较被取反 —— 下载来的二进制照跑不误，"
+            "「先校验再执行」变成一句注释",
+        target=".github/workflows/publish-mcp.yml",
+        old='"$expected" != "$actual"',
+        new='"$expected" = "$actual"',
+        tests=["tests/test_publish_mcp_workflow.py"],
+    ),
+    Mutation(
+        id="registry/validate-step-emptied",
+        why="validate 步骤名留着、run 换成 echo —— 非法清单于是先碰到"
+            "发布凭据再被校验，顺序守卫形同虚设",
+        target=".github/workflows/publish-mcp.yml",
+        old="run: ./mcp-publisher validate",
+        new="run: echo 'validate skipped'",
+        tests=["tests/test_publish_mcp_workflow.py"],
+    ),
+    Mutation(
+        id="registry/dead-endpoint-verify",
+        why="自检改用 GET /v0/servers/<id> —— 该端点实测返回 404，"
+            "于是「登记生效」永远验不出来，而命令本身返回 0",
+        target=".github/workflows/publish-mcp.yml",
+        old="registry.modelcontextprotocol.io/v0/servers'",
+        new="registry.modelcontextprotocol.io/v0/servers/$name'",
+        tests=["tests/test_publish_mcp_workflow.py"],
+    ),
 ]
 
 

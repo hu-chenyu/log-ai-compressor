@@ -126,7 +126,7 @@
 
 **现在由什么挡着**：CI 第七道门禁 `scripts/mutation_scorecard.py`。
 它把每一处「曾经让门禁失明的改动」固化成变异，逐条施加回去，看负责它的那组
-测试会不会红。**当前 28 条变异**，本地实跑击杀率 100%。
+测试会不会红。**当前 33 条变异**，本地实跑击杀率 100%。
 
 ---
 
@@ -238,7 +238,7 @@
 
 ```bash
 python scripts/prove.py              # 11 条主张逐条重算
-python scripts/mutation_scorecard.py # 28 条变异：门禁本身有没有牙齿
+python scripts/mutation_scorecard.py # 33 条变异：门禁本身有没有牙齿
 python scripts/adversarial_eval.py   # 该弃权时会不会闭嘴
 ```
 
