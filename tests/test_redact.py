@@ -2,6 +2,8 @@
 """敏感信息脱敏单元测试（优化缺陷R86）：出站打码规则与误伤防护。"""
 from __future__ import annotations
 
+import pytest
+
 from log_ai_compressor.core.redact import redact_text
 
 
@@ -67,11 +69,22 @@ class TestCustomRules:
                                         ""])
         assert out == "host [自定义] 连接 [自定义] 失败"
 
-    def test_invalid_custom_rule_ignored(self):
-        """非法正则静默跳过（界面层已计数提示），内置规则仍生效。"""
-        text = "mail a@b.com from PMS-1"
-        out = redact_text(text, custom_rules=["[unclosed"])
-        assert out == "mail [邮箱] from PMS-1"
+    def test_invalid_custom_rule_is_rejected(self):
+        """非法正则**当场报错**。
+
+        **这条测试原来守的是缺陷行为**：它断言 `redact_text` 会静默跳过一条
+        写错的自定义规则，docstring 还写着「界面层已计数提示」—— 那句话和
+        `core/redact.py` 里被删掉的那句是同一个谎：Web 前端恒传
+        `custom_rules: []`，界面层压根没有自定义规则的入口，也就从没提示过
+        任何东西。照它那样跑，一个本该遮住的工单号会**原样出现在报告里**，
+        而用户以为已经脱敏了。
+
+        v2.11.2 起契约翻转：宁可拒绝导出，也不悄悄跳过。完整的错误信息
+        断言在 `tests/test_unverifiable_and_redaction.py`，这里只钉住 core
+        层直调的行为。
+        """
+        with pytest.raises(ValueError):
+            redact_text("mail a@b.com from PMS-1", custom_rules=["[unclosed"])
 
     def test_none_custom_rules_compatible(self):
         """不传自定义规则时行为与旧版一致。"""

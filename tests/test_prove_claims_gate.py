@@ -187,6 +187,64 @@ class TestReadmeLineRatioIsGated:
         assert c["holds"] is True, c["detail"]
 
 
+class TestPastedProveOutputIsActuallyChecked:
+    """`docs/EVALUATION.md` 进了 `_METRIC_DOCS`，正则也得真抓得到它。
+
+    批 4d 把它加进名单时写的是「与其把粘贴的输出重写掉，不如让它一起被对账：
+    比值一变，这份快照就该跟着更新」。可是 `_RATIO_RE` 要求数字**紧跟**
+    「行数比」，那段写的却是「测试/主代码行数比**实测** 1.57」—— 一个都
+    匹配不上。于是：**文档进了名单、门禁却扫了 0 处，照样报通过。**
+
+    这是本项目反复记录的那个形状的又一次：门禁报的是真话（README/FAQ 那几处
+    确实校了），只是它顺手声称「也在校 EVALUATION.md」这件事从未成真。
+    **一个报「检查通过」但其实什么都没扫的门禁，比没有门禁更糟** ——
+    没有门禁你知道那里没检查。
+    """
+
+    @staticmethod
+    def _pin(monkeypatch) -> None:
+        """临时目录里没有源码与 pyproject.toml，三个读仓库的函数都要钉成真值。"""
+        monkeypatch.setattr(prove, "_code_metrics", lambda: dict(_REAL_METRICS))
+        monkeypatch.setattr(prove, "_count_ratio", lambda: _REAL_RATIO)
+        monkeypatch.setattr(prove, "_coverage_denominator",
+                            lambda: _REAL_DENOM)
+
+    def test_the_pasted_ratio_is_actually_reachable(self):
+        ev = (_ROOT / "docs" / "EVALUATION.md").read_text(encoding="utf-8")
+        assert "docs/EVALUATION.md" in prove._METRIC_DOCS
+        assert prove._RATIO_RE.findall(ev), (
+            "EVALUATION.md 里一行行数比都抓不到 —— 正则与粘贴出来的格式对不上。"
+            "它在 _METRIC_DOCS 里，却从来没被这条门禁校过。")
+
+    def test_a_wrong_pasted_ratio_turns_the_gate_red(self, tmp_path,
+                                                     monkeypatch):
+        """判据要脆：不是「名单里有它」，而是「它写错了门禁真的会红」。"""
+        real = (_ROOT / "docs" / "EVALUATION.md").read_text(encoding="utf-8")
+        self._pin(monkeypatch)
+        (tmp_path / "README.md").write_text(_REAL_README, encoding="utf-8")
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        bad = re.sub(r"(行数比实测\s*)\d+\.\d+", r"\g<1>9.99", real, count=1)
+        assert bad != real, "EVALUATION.md 里找不到可替换的行数比 —— 粘贴段变了？"
+        (tmp_path / "docs" / "EVALUATION.md").write_text(bad,
+                                                          encoding="utf-8")
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+
+        c = prove.claim_readme_metrics()
+        assert c["holds"] is False, "粘贴输出里的比值是错的，门禁却放过了"
+        assert "EVALUATION.md" in c["detail"], c["detail"]
+
+    def test_a_correct_pasted_ratio_keeps_it_green(self, tmp_path,
+                                                   monkeypatch):
+        """反向对照：别把它调成「见名字就红」。"""
+        self._pin(monkeypatch)
+        real = (_ROOT / "docs" / "EVALUATION.md").read_text(encoding="utf-8")
+        (tmp_path / "README.md").write_text(_REAL_README, encoding="utf-8")
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "EVALUATION.md").write_text(real, encoding="utf-8")
+        monkeypatch.setattr(prove, "ROOT", tmp_path)
+        assert prove.claim_readme_metrics()["holds"] is True
+
+
 class TestCoverageDenominatorIsGated:
     """README 里「96% 是在 N 行上算的」这个分母必须与仓库一致。
 

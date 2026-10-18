@@ -24,6 +24,7 @@ import ast
 import builtins
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -86,15 +87,38 @@ def _run(body: str, os_name: str, workdir: pathlib.Path, *,
     )
 
 
+def _readme_detail(path: pathlib.Path) -> tuple[int, int]:
+    """从 README 取「漏行 N / M 语句」的 (语句数, 漏行数)。"""
+    m = re.search(r"漏行\s*([\d,]+)\s*/\s*([\d,]+)\s*语句",
+                  path.read_text(encoding="utf-8"))
+    assert m, f"{path.name} 里找不到「漏行 N / M 语句」—— CI 那段无从对账"
+    return (int(m.group(2).replace(",", "")),
+            int(m.group(1).replace(",", "")))
+
+
 def _fixture(tmp: pathlib.Path, *, readme: pathlib.Path | None,
-             cov_line_rate: str | None) -> pathlib.Path:
+             cov_line_rate: str | None,
+             detail: tuple[int, int] | None = None) -> pathlib.Path:
+    """造一份只含 README.md 与 coverage.xml 的工作目录。
+
+    `detail` = (语句数, 漏行数)，写进 coverage.xml 的
+    lines-valid / lines-covered。**不传就从 README 解析** —— 那样
+    「本该通过」的 fixture 永远与 README 一致，不会因为新加的对账而假红。
+
+    但**测「README 写错必须红」时必须显式传真实值**：让 fixture 跟着
+    被改坏的 README 走，就成了对账拿自己和自己比 —— 它从一开始就是绿的。
+    **一个一开始就绿的「负向」测试，比没有它更糟**，因为它让覆盖看起来
+    已经有了。
+    """
     work = tmp / "work"
     work.mkdir(parents=True, exist_ok=True)
     shutil.copy(readme, work / "README.md")
     if cov_line_rate is not None:
+        valid, missing = detail if detail else _readme_detail(work / "README.md")
         (work / "coverage.xml").write_text(
             '<?xml version="1.0" ?>\n<coverage version="7.15.4" '
-            f'timestamp="1" lines-valid="3883" lines-covered="3727" '
+            f'timestamp="1" lines-valid="{valid}" '
+            f'lines-covered="{valid - missing}" '
             f'line-rate="{cov_line_rate}" branch-rate="0">\n</coverage>\n',
             encoding="utf-8")
     return work
@@ -289,6 +313,73 @@ def test_ubuntu_enforces_readme_number(tmp_path):
     r = _run(body, "ubuntu-latest", bad)
     assert r.returncode == 1, f"README 写错就必须红，却 rc={r.returncode}"
     assert "README 写覆盖率 95%" in r.stdout
+
+
+def test_ubuntu_enforces_the_missing_lines_detail(tmp_path):
+    """README 的「漏行 N / M 语句」必须与 ubuntu-3.12 实测相等。
+
+    这两个数此前**没有任何门禁校过**：CI 那段只读 `line-rate`、比的是
+    百分比，而 README 那一行同时印着这两个明细。
+
+    「grep 不到所以没人校」这个推法本身不够硬 —— 门禁常常跨文件比对，
+    源码里只会出现公式、不会出现结果。所以这里给的是正向证据：
+    **把它们改坏，对账段必须红**。
+
+    `detail` 传的是**真实** README 的值，也就是 coverage.xml 表示「实测值」；
+    只改 README 一侧。第一版让 fixture 跟着被改坏的 README 走，于是对账
+    拿自己和自己比，这条测试**从一开始就是绿的** —— 一个一开始就绿的
+    「负向」测试比没有它更糟，它让覆盖看起来已经有了。
+    """
+    body = _check_body()
+    real = ROOT / "README.md"
+    detail = _readme_detail(real)
+    text = real.read_text(encoding="utf-8")
+    bad = re.sub(r"漏行\s*[\d,]+\s*/\s*[\d,]+\s*语句", "漏行 1 / 2 语句",
+                 text, count=1)
+    assert bad != text, "README 里找不到「漏行 N / M 语句」—— CI 那段无从对账"
+    bad_readme = tmp_path / "bad-detail.md"
+    bad_readme.write_text(bad, encoding="utf-8")
+    work = _fixture(tmp_path / "detail", readme=bad_readme,
+                    cov_line_rate="0.9598", detail=detail)
+    r = _run(body, "ubuntu-latest", work)
+    assert r.returncode == 1, f"明细写错却 rc={r.returncode}：{r.stdout}"
+    assert "README 写漏行 1 / 2 语句" in r.stdout, r.stdout
+
+
+def test_the_detail_gate_is_reference_matrix_only(tmp_path):
+    """明细与百分比同口径：非参考矩阵照报不误，但不当成红。"""
+    body = _check_body()
+    real = ROOT / "README.md"
+    detail = _readme_detail(real)
+    text = real.read_text(encoding="utf-8")
+    bad = re.sub(r"漏行\s*[\d,]+\s*/\s*[\d,]+\s*语句", "漏行 1 / 2 语句",
+                 text, count=1)
+    bad_readme = tmp_path / "bad-detail2.md"
+    bad_readme.write_text(bad, encoding="utf-8")
+    work = _fixture(tmp_path / "detail2", readme=bad_readme,
+                    cov_line_rate="0.9598", detail=detail)
+    r = _run(body, "windows-latest", work, python_version="3.12")
+    assert r.returncode == 0, f"非参考矩阵不该判红：\n{r.stdout}{r.stderr}"
+    assert "实测覆盖率 96%" in r.stdout, "数字必须照样报出来，否则等于没测"
+
+
+def test_the_real_readme_detail_matches_a_real_coverage_run(tmp_path):
+    """**真 coverage 吐出来的** XML 必须带 lines-valid / lines-covered。
+
+    新加的那段明细对账直接依赖这两个属性。若 coverage.py 哪天不写它们了，
+    CI 上就会变成「每次都红」或「读不到就退出」—— 两种都是坏结果，而
+    只有当场拿真的 coverage 产物验一次才能提前发现。
+
+    合成 fixture 测不到这一点：它是我自己写的，写什么它就有什么。
+    """
+    work = tmp_path / "realxml"
+    work.mkdir()
+    _real_coverage_xml(work)
+    xml = (work / "coverage.xml").read_text(encoding="utf-8")
+    for attr in ("lines-valid", "lines-covered"):
+        m = re.search(rf'{attr}="(\d+)"', xml)
+        assert m, f"真 coverage.xml 里没有 {attr} —— CI 那段会永远读不到"
+        assert int(m.group(1)) > 0, f"{attr} 为 0"
 
 
 @pytest.mark.parametrize("os_name,py_ver", [

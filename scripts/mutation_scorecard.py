@@ -20,9 +20,13 @@
 **不跑全量**。所以「存活」= *那组本该抓住它的测试没抓住*，而不是
 「整个仓库没有任何东西能抓住它」。
 
-这个口径是有意的：全量 17 条要 25 分钟，CI 上不可接受；而声明式选择把
+这个口径是有意的：全量跑要二十几分钟，CI 上不可接受；而声明式选择把
 「谁负责抓住这条」写在了数据里，比事后猜测更可靠。想跑全量用 `--full`
-（本地用，约 25 分钟）。
+（本地用）。
+
+**每加一批门禁，就把这批的变异也加进来** —— 否则记分卡守的是历史批次，
+新写的那些测试在 CI 上仍然只是「跑着」，没人验证它们有没有牙齿。
+这个漏法本身就是本仓库记过多次的形状，所以批 5 把它补上了。
 
 安全约定（这不是玩具脚本，它会改仓库里的文件）
 --------------------------------------------
@@ -226,6 +230,112 @@ MUTATIONS: List[Mutation] = [
         old='          is_ref = ("${{ matrix.os }}" == "ubuntu-latest"\n'
             '                    and "${{ matrix.python }}" == "3.12")',
         new="          is_ref = False",
+        tests=["tests/test_ci_step_execution.py"],
+    ),
+    # ---- 读不到 ≠ 被改过（v2.11.2 批5） -------------------------------
+    Mutation(
+        id="unreadable/three-states-collapse",
+        why="「读不到」被并回「行数不够」—— 文件正被另一个进程独占时"
+            "会被报成「日志确实被改过，请勿采信」，退出码 1",
+        target="log_ai_compressor/core/evidence.py",
+        old="        return _READ_UNREADABLE, None\n    if len(out) != ",
+        new="        return _READ_OUT_OF_RANGE, None\n    if len(out) != ",
+        tests=["tests/test_unverifiable_and_redaction.py"],
+    ),
+    Mutation(
+        id="unreadable/counted-as-mismatch",
+        why="UNREADABLE 记进 mismatched → verdict 翻回 TAMPERED",
+        target="log_ai_compressor/core/evidence.py",
+        old='            report.missing_source += 1\n'
+            '            report.details.append({"evidence_id": ref.evidence_id,\n'
+            '                                   "status": "UNREADABLE",',
+        new='            report.mismatched += 1\n'
+            '            report.details.append({"evidence_id": ref.evidence_id,\n'
+            '                                   "status": "UNREADABLE",',
+        tests=["tests/test_unverifiable_and_redaction.py"],
+    ),
+    Mutation(
+        id="unreadable/hidden-from-stderr",
+        why="CLI 的逐条明细过滤元组里没有 UNREADABLE —— 屏幕上只剩一个"
+            "UNVERIFIABLE，用户既看不到哪几条、也看不到是哪个文件",
+        target="log_ai_compressor/cli.py",
+        old='"NO_SOURCE", "UNREADABLE"):',
+        new='"NO_SOURCE"):',
+        tests=["tests/test_unverifiable_and_redaction.py"],
+    ),
+    # ---- 非法打码规则不许静默丢弃（v2.11.2 批5） ---------------------
+    Mutation(
+        id="redact/wrong-exception-type",
+        why="非法正则抛的错类型变了，接住它的调用方全部落空",
+        target="log_ai_compressor/core/redact.py",
+        old="            raise ValueError(\n",
+        new="            raise KeyError(\n",
+        tests=["tests/test_unverifiable_and_redaction.py", "tests/test_redact.py"],
+    ),
+    Mutation(
+        id="redact/rule-never-applies",
+        why="自定义打码规则整体不生效 —— 本该遮住的串原样出现在报告里",
+        target="log_ai_compressor/core/redact.py",
+        old="    for pattern in compile_custom_rules(custom_rules):",
+        new="    for pattern in []:",
+        tests=["tests/test_unverifiable_and_redaction.py", "tests/test_redact.py"],
+    ),
+    # ---- service 门面上那层翻译（v2.11.2 批5） ------------------------
+    Mutation(
+        id="service/facade-stops-masking",
+        why="门面不再打码：出站脱敏整个失效，而 Web 与 API 两条导出路都靠它",
+        target="log_ai_compressor/service.py",
+        old="        return _core_redact_text(text, custom_rules)",
+        new="        return text",
+        tests=["tests/test_unverifiable_and_redaction.py", "tests/test_web.py"],
+    ),
+    Mutation(
+        id="service/translation-dropped",
+        why="翻译失效：core 的 ValueError 直接穿透。Web 的 compare 导出"
+            "绕过 export_text 直接调门面，于是同一个非法正则，"
+            "普通导出 400、compare 导出 **500**",
+        target="log_ai_compressor/service.py",
+        old="        return _core_redact_text(text, custom_rules)\n"
+            "    except ValueError as exc:",
+        new="        return _core_redact_text(text, custom_rules)\n"
+            "    except KeyError as exc:",
+        tests=["tests/test_unverifiable_and_redaction.py", "tests/test_web.py"],
+    ),
+    # ---- 行数比门禁真的扫到 EVALUATION.md（v2.11.2 批5） --------------
+    Mutation(
+        id="ratio/regex-no-longer-matches-paste",
+        why="正则要求数字紧跟「行数比」，而 docs/EVALUATION.md 粘的是"
+            "「行数比**实测** 1.57」—— 文档在 _METRIC_DOCS 里，"
+            "门禁却扫了 0 处照样报 PASS",
+        target="scripts/prove.py",
+        old=r'_RATIO_RE = re.compile(r"行数比\s*(?:实测\s*)?[≈~]?\s*(\d+(?:\.\d+)?)")',
+        new=r'_RATIO_RE = re.compile(r"行数比\s*[≈~]?\s*(\d+(?:\.\d+)?)")',
+        tests=["tests/test_prove_claims_gate.py"],
+    ),
+    Mutation(
+        id="ratio/never-matches-anything",
+        why="整条判据退化成「名单里有就放过」",
+        target="scripts/prove.py",
+        old=r'_RATIO_RE = re.compile(r"行数比\s*(?:实测\s*)?[≈~]?\s*(\d+(?:\.\d+)?)")',
+        new=r'_RATIO_RE = re.compile(r"(?!)")',
+        tests=["tests/test_prove_claims_gate.py"],
+    ),
+    # ---- 覆盖率明细对账（v2.11.2 批5） --------------------------------
+    Mutation(
+        id="detail/condition-never-true",
+        why="「漏行 N / M 语句」的判据恒假 —— README 写什么都不管。"
+            "这两个数此前根本没有任何门禁校过",
+        target=".github/workflows/ci.yml",
+        old="              if (c_valid, c_missing) != (n_valid, n_valid - n_cov):",
+        new="              if False:",
+        tests=["tests/test_ci_step_execution.py"],
+    ),
+    Mutation(
+        id="detail/measured-value-impersonates-claimed",
+        why="拿实测值冒充 README 值 —— 两边永远相等",
+        target=".github/workflows/ci.yml",
+        old='              c_valid = int(detail.group(2).replace(",", ""))',
+        new="              c_valid = n_valid",
         tests=["tests/test_ci_step_execution.py"],
     ),
 ]

@@ -519,7 +519,7 @@ def cmd_verify(args) -> int:
         print(f"确定性指纹：{fingerprint}")
     for d in report["details"]:
         if d["status"] in ("MISMATCH", "OUT_OF_RANGE", "MISSING_SOURCE",
-                           "NO_SOURCE"):
+                           "NO_SOURCE", "UNREADABLE"):
             print(f"  ✗ {d['status']} {d.get('evidence_id')} {d.get('source')}"
                   f" 期望 {d.get('expected', '-')} 实际 {d.get('actual', '-')}",
                   file=sys.stderr)
