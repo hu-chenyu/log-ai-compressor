@@ -156,6 +156,43 @@ README 写漏行 159 / 3995 语句，ubuntu-3.12 实测 158 / 3995 —— 口径
 而本地是 0。查下来是既有的 Windows 专用用例（`test_unverifiable_and_redaction.py`
 的独占锁语义），**不是**本轮新增的任何守卫 —— 参考矩阵上本轮新增的守卫全部实跑。
 
+### 发布：三方 sha256 逐字节一致
+
+tag `v2.11.4` → `5ea8d2d`（annotated）。产物由 `scripts/build_repro.py` 构建
+（`SOURCE_DATE_EPOCH=1792331863`，即最后提交的作者时间），并用 `--verify`
+自证过：两个产物两次构建**逐字节一致**。
+
+> 顺带记一个差点犯的错：中途我曾用裸 `python -m build` 重建，而它**每次字节都
+> 不同**（连着跑三次拿到三个 sha256）。项目早就记录了这件事（setuptools 的 sdist
+> 不遵守 `SOURCE_DATE_EPOCH`，内层 tar 的 PAX 头里存着带小数的 mtime），
+> CI 第六道门禁用的也是 `build_repro.py` 而不是裸构建。**发布物必须走那条路径**，
+> 否则「可复现」这条承诺当场就是假的。
+
+```text
+log_ai_compressor-2.11.4.tar.gz            871,362 B  sha256 2a1262425a1ef705bc3302cf3e0c39a487355e75c10a6facf17920570d6ba983
+log_ai_compressor-2.11.4-py3-none-any.whl  228,693 B  sha256 661cb6c2e8db6fde645ac8369254fdeb6e20e00f62ae68889885780e5821dca4
+```
+
+三方来源与核对方式：
+
+| 来源 | 核对方式 | tar.gz | whl |
+| --- | --- | --- | --- |
+| 本地 `dist/` | 对文件字节算 sha256 | ✅ | ✅ |
+| PyPI | 官方 JSON `digests.sha256` | ✅ | ✅ |
+| GitHub Release | Release API 的资产 `digest`；tar.gz 另**实际下载后重算** | ✅ | ✅ |
+
+GitHub Release `v2.11.4`（`Latest`，`draft=false`、`prerelease=false`，
+`published_at 2026-10-18T14:23:47Z`），两个附件用**原始文件名**。
+
+**MCP 官方 Registry 已登记 2.11.4**（2026-10-18 实查，读满响应全长 12,618 字符）：
+`count=3`，2.11.2 / 2.11.3 / 2.11.4 **三个版本并存**，`isLatest` 指向
+`2.11.4`，`publishedAt` 为 `2026-10-18T14:07:06Z`。这一版 tag 推送**直接触发**
+`publish-mcp.yml` 成功（v2.11.3 那次推 tag 后第一次实跑是红的，需要手工重跑）。
+
+> 再记一次那个坑：**只读响应的前 4000 字符会得出相反结论**。`servers` 数组第一条
+> 是 2.11.2（`isLatest: false`），而「找出新登记的那个」这个任务要求的恰恰是最后
+> 一条。必须同时看 `truncated` 与 `totalLength`，读到末尾再下结论。
+
 ---
 
 ## [2.11.3] - 2026-10-18
