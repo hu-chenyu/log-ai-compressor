@@ -3,7 +3,7 @@
   "name": "io.github.hu-chenyu/log-ai-compressor",
   "title": "log-ai-compressor",
   "description": "Local log forensics: compress logs into citable evidence with root-cause confidence tiers.",
-  "version": "2.11.1",
+  "version": "2.11.2",
   "repository": {
     "url": "https://github.com/hu-chenyu/log-ai-compressor",
     "source": "github"
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "log-ai-compressor",
-      "version": "2.11.1",
+      "version": "2.11.2",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
@@ -64,7 +64,7 @@
         },
         {
           "name": "verify_evidence",
-          "description": "Re-read the source log and re-verify every evidence reference in a report: file, line range, sha256 digest. Returns VERIFIED / TAMPERED. This is the tool's trust anchor - the agent does not need to believe the analysis, it can re-run this step itself."
+          "description": "Re-read the source log and re-verify every evidence reference in a report: file, line range, sha256 digest. Returns one of four verdicts - VERIFIED (every reference matches), TAMPERED (content really changed), UNVERIFIABLE (cannot check right now, e.g. the log is momentarily locked by another process - NOT an accusation of tampering), NO_EVIDENCE. This is the tool's trust anchor - the agent does not need to believe the analysis, it can re-run this step itself."
         },
         {
           "name": "check_environment",
