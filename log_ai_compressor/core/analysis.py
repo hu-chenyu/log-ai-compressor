@@ -528,7 +528,17 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
     3. 强关键词：加权分 ≥ 阈值 → 根因；
     4. 入度>0 或含连锁关键词 → 疑似连锁衍生（修上游，别修它）。
 
-    **CONFIRMED 的唯一来源是 a（条目内 Caused by 链）。**
+    **CONFIRMED 的唯一来源是 a（条目内 Caused by 链）**，且还必须过
+    `_mark_causal_evidence` 的出处校验 —— 链成立但原文引用取不到（条目超出
+    摄入窗口）会降级成 LIKELY。
+
+    这条约束 v2.11.4 起是**代码保证**，不是注释承诺：末尾兜底曾写成
+    `CONF_CONFIRMED if c.is_root_cause else ...`，意味着「被标成根因」本身
+    就足以拿到 CONFIRMED。管线内不可达，可本函数也接受外部直接构造的簇，
+    那条路径就成了一条没人验证过的不变量。现在兜底只填 INSUFFICIENT，
+    由 `tests/test_analysis.py::TestConfirmedProvenanceIsCodeEnforced`
+    钉住，并有对应的变异条目。
+
     历史版本把 b（时间相邻）也当成 CONFIRMED，理由写着「因果方向由解析器
     确定」—— 但时间相邻恰恰是**统计猜测**。实测后果：一条
     `INFO request started id=1` 会被判成 CONFIRMED 根因，正是这个功能
@@ -684,10 +694,24 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
 
     # 兜底：任何未被判定过的簇，一律标 INSUFFICIENT（而不是留空）。
     # 空字符串会让下游误以为"没结论"和"证据不足"是两回事。
+    #
+    # v2.11.4：这里原先是 `CONF_CONFIRMED if c.is_root_cause else ...`，
+    # 也就是「被标成根因」可以自己变成 CONFIRMED。管线内每条置
+    # `is_root_cause=True` 的路径（579-580 / 642-646 / 659-662 / 668-671）
+    # 都同时写了档位，所以那个分支在生产路径上不可达 —— 但本函数的注释
+    # 明确写着它也接受**直接构造**的簇（见上面 569-573），于是外部调用方
+    # 只要预设 is_root_cause、且不带任何因果链，就能拿到本工具唯一敢说
+    # 「就是它」的那一档。
+    #
+    # 这不是假设出来的风险，是外部评审读代码读出来的：docstring 里那句
+    # 「CONFIRMED 的唯一来源是 a」当时是一条**需要通读全部赋值路径才能
+    # 确认**的注释，而不是代码保证 —— 门禁守得住行为，守不住注释与代码
+    # 的差距（AUDIT.md 形态四）。现在兜底只填 INSUFFICIENT，CONFIRMED
+    # 只由上面 a) 那条路径发出，且还要过 `_mark_causal_evidence` 的出处
+    # 校验；那句注释第一次成为代码事实。
     for c in ordered:
         if not c.root_cause_confidence:
-            c.root_cause_confidence = (
-                CONF_CONFIRMED if c.is_root_cause else CONF_INSUFFICIENT)
+            c.root_cause_confidence = CONF_INSUFFICIENT
 
     return out_edges, by_id
 

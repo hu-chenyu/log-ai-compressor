@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from log_ai_compressor.core.analysis import (
     CONF_CONFIRMED,
+    _mark_root_causes,
     analyze_clusters,
     cooccurring_clusters,
     significant_in_window,
@@ -698,3 +699,70 @@ class TestRootCauseDeterminism:
             reasons.add(
                 next(c for c in cs if c.cluster_id == 3).root_cause_reason)
         assert len(reasons) == 1, f"理由文本不稳定：{reasons}"
+
+
+# ---------------------------------------------------------------------------
+# 注释强于代码：CONFIRMED 的来源必须由代码保证，不能只写在注释里
+# ---------------------------------------------------------------------------
+class TestConfirmedProvenanceIsCodeEnforced:
+    """CONFIRMED 只有一条来源，且这条约束必须由**代码**成立。
+
+    事故：`analysis.py` 的 `_mark_root_causes` docstring 写着
+    「CONFIRMED 的唯一来源是 a（条目内 Caused by 链）」，但函数末尾有一条
+    兜底 `CONF_CONFIRMED if c.is_root_cause else CONF_INSUFFICIENT` ——
+    凡是 `is_root_cause=True` 而档位还空着的簇，**没有因果链也能拿到
+    CONFIRMED**。
+
+    为什么当时没红：管线内每一条置 `is_root_cause=True` 的路径都同时写了
+    档位（579-580 / 642-646 / 659-662 / 668-671），所以兜底在生产路径上
+    不可达。可这条函数自己的注释（569-573）写着「簇不是由 pipeline 建出来的
+    —— 直接构造 ErrorCluster 的调用方/测试会走到这里」——**它明确支持外部
+    构造的簇**。于是一条「仅靠通读全部赋值路径才能确认」的约束，
+    成了公开函数上没人验证过的不变量。
+
+    这正是 AUDIT.md 形态四「边界论证本身没被验证」的又一例：
+    门禁守得住行为，守不住注释与代码的差距。
+    """
+
+    @staticmethod
+    def _bare_cluster_with_flag_preset(cid=1):
+        """一个只有 is_root_cause 被预设、没有任何因果证据的簇。
+
+        `cause_counts` 空、`sample` 无 Caused by —— 这正是外部调用方
+        手工造簇时最容易得到的形状。
+        """
+        c = make_cluster(cid, "connection pool exhausted", with_evidence=False)
+        c.is_root_cause = True
+        c.root_cause_confidence = ""
+        return c
+
+    def test_preset_flag_alone_never_yields_confirmed(self):
+        """判据是「有没有因果链」，不是「现在的行为是什么」。"""
+        c = self._bare_cluster_with_flag_preset()
+        _mark_root_causes([c])
+        assert c.root_cause_confidence != CONF_CONFIRMED, (
+            "只预设 is_root_cause、没有任何因果链的簇拿到了 CONFIRMED —— "
+            "「CONFIRMED 只来自 Caused by 链」这条承诺没有被代码保证"
+        )
+
+    def test_causal_chain_still_reaches_confirmed(self):
+        """正向对照：真有 Caused-by 链、且出处可回读时仍必须判 CONFIRMED。
+
+        没有这一条，上面那条可能因为「怎么改都拿不到 CONFIRMED」而恒绿 ——
+        那是一条测不出任何东西的判据。
+
+        注意 `with_evidence` 必须为真：CONFIRMED 除了因果链，还要求出处可
+        逐行回读（v2.11.1 起的降级规则）。这让不变体**比注释更强** ——
+        注释只说「唯一来源是因果链」，而代码要求因果链 + 出处两者齐备。
+        """
+        c = make_cluster(
+            2, "request failed", with_evidence=True,
+            stack=["java.lang.RuntimeException: boom",
+                   "Caused by: java.lang.NullPointerException: inner"])
+        c.is_root_cause = False
+        c.root_cause_confidence = ""
+        _mark_root_causes([c])
+        assert c.root_cause_confidence == CONF_CONFIRMED, (
+            "有完整 Caused-by 链且出处可回读却没判 CONFIRMED —— 不变体收得"
+            "太紧，把唯一合法的 CONFIRMED 路径也掐断了"
+        )

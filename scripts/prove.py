@@ -387,6 +387,7 @@ _BENCH_OWN = (("交付", "delivery"), ("同预算", "budget32k"), ("全量", "fu
 # **token 压缩比**表，语义与保留率毫无关系，见 _bench_columns。
 _BENCH_ARMS = (("Drain3", "drain3"), ("LogsLop", "logslop"))
 _BENCH_COLUMNS = _BENCH_OWN + _BENCH_ARMS
+_BENCH_COLUMN_KEYS = frozenset(key for _token, key in _BENCH_COLUMNS)
 _BENCH_SKIP_CELLS = ("交付上限", "达成度")   # 公式列，不是实测值
 
 # 胜负场次单独校：它是 README 第一屏就被引用的那句话（「同预算档 8 胜 1 平
@@ -610,6 +611,12 @@ def _bench_columns(header: str) -> dict:
     反过来也不能放宽成「出现 Drain3 就算」：BENCHMARK.md 里有两张以 Drain3
     为主角的 **token 压缩比**表，吃进来只会报出一堆根本不存在的漂移，
     而真漂移会被淹没。判据要卡在「本项目口径」这一侧。
+
+    v2.11.4 再补一条**下限**：光「像」还不够，得至少有一列真的映射得到基线
+    字段。三档相似度那张表（`| 数据集 | 标注事件 | strict 0.95 | … |`）
+    过了上面两条，却一列基线字段都对不上 —— 表里全是**档位**，基线只存
+    standard 那一档。认进来之后它会报一堆「基线里没有这一列」的问题，
+    真漂移又一次被淹没在这类噪音里（同一个病，第二次）。
     """
     cells = [c.strip().replace("**", "").strip()
              for c in header.strip().strip("|").split("|")]
@@ -628,6 +635,8 @@ def _bench_columns(header: str) -> dict:
             if token in cell:
                 out.setdefault(key, idx)
                 break
+    if not _BENCH_COLUMN_KEYS & out.keys():
+        return {}
     return out
 
 
@@ -771,7 +780,8 @@ def _bench_doc_problems(doc_name: str, doc_text: str, datasets: dict,
     tables = _bench_tables(doc_text) if check_tables else []
     if check_tables and not tables:
         problems.append(
-            f"{doc_name} 里找不到基准表（表头需含「标注事件」或两个以上本项目口径列）")
+            f"{doc_name} 里找不到基准表（表头需含「标注事件」或两个以上本项目口径列，"
+            "且至少一列真的映射得到基线字段）")
     for idx, (cols, body, header) in enumerate(tables, 1):
         # **列名被改一个字，整列就静默脱管。**
         #
