@@ -194,7 +194,7 @@ log-ai-compressor mcp --install claude-code
 
 仓库根目录的 [`server.json`](server.json) 就是官方 Registry 的清单格式，
 登记名 `io.github.hu-chenyu/log-ai-compressor` **已于 2026-10-18 提交**，
-指向 PyPI 上的 `log-ai-compressor` 2.11.2（stdio，`uvx` 拉起）。
+指向 PyPI 上的 `log-ai-compressor` 2.11.3（stdio，`uvx` 拉起）。
 
 自己复核，不必只信这段话：
 
@@ -202,13 +202,15 @@ log-ai-compressor mcp --install claude-code
 curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.hu-chenyu/log-ai-compressor"
 ```
 
-2026-10-18 实查：全名查返回 `count=1`，条目 version 为 `2.11.2`；同一接口拿已知
-存在的 `filesystem` 做阳性对照返回 30 条 —— 所以那个 1 是「查到了」，
-不是「这个接口只会回 0」。
+2026-10-18 实查：全名查返回 `count=2` —— 同一个登记名下挂着 2.11.2 与 2.11.3
+**两个版本**，`isLatest` 指向 `2.11.3`。所以复核时必须**全名 + 版本**一起看：
+只看名字或只看 `count` 都会对着旧版本报「已收录」。同一接口拿已知存在的
+`everything` 做阳性对照返回真实条目（`com.everythingmeetsai/archive`）——
+所以那个 2 是「查到了」，不是「这个接口只会回 0」。
 
-这一段改过两次，两次都是照实写：第一版写着「已收录」而当时实测是 0 条，
-第二版写成「清单已备好、尚未提交」。查证日期和阳性对照都留在上面，
-好让下一个人不必只能相信作者。
+这一段改过三次，三次都是照实写：第一版写着「已收录」而当时实测是 0 条，
+第二版写成「清单已备好、尚未提交」，第三版才是真登记。查证日期、版本与阳性对照
+都留在上面，好让下一个人不必只能相信作者。
 
 登记由 [`publish-mcp.yml`](https://github.com/hu-chenyu/log-ai-compressor/blob/main/.github/workflows/publish-mcp.yml)
 在 GitHub Actions 里用 OIDC 提交（推 tag 或手工触发都会跑，不需要存放任何密钥）。
