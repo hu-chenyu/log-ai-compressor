@@ -462,7 +462,10 @@ def scorecard(reports: List[Dict[str, object]]) -> Dict[str, object]:
         "abstain_cases": len(abstain_cases),
         "correct_abstain_rate": (round(100.0 * correct_abstain / len(abstain_cases), 1)
                                  if abstain_cases else 0.0),
-        "ok": passed == total and not overreach,
+        # `total > 0` 不是装饰：没有它，`scorecard([])` 走的是
+        # `0 == 0 and not []` —— **一个场景都没跑却报 ok**。
+        # 一张没跑到任何检查的卡，和没有卡在同一个方向上说谎。
+        "ok": total > 0 and passed == total and not overreach,
     }
 
 

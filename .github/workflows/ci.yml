@@ -157,6 +157,14 @@ jobs:
           # 所以口径写死：README 那个数 = **ubuntu-3.12 的实测值**，
           # 对账只在参考矩阵上做；其余矩阵照打不误地报出数字，不参与判定。
           # 地板（90%）仍然三矩阵全卡 —— 真正的回归不会因此漏掉。
+          #
+          # 「参考矩阵」要**两维都比**。原先只比 os，于是 ubuntu-3.11 也
+          # 参与了判定，而 README 里写的口径是 3.12 —— 代码与 AGENTS.md §4
+          # 写的口径不一致。今天两者数值恰好相同所以没红，但那不是设计，
+          # 是运气：哪天 3.11 的行覆盖不同，3.11 就会带着一句
+          # 「README 的口径就是 ubuntu-3.12」的红，那是误导而不是门禁。
+          is_ref = ("${{ matrix.os }}" == "ubuntu-latest"
+                    and "${{ matrix.python }}" == "3.12")
           cov = Path("coverage.xml")
           try:
               pct = round(float(re.search(
@@ -164,13 +172,13 @@ jobs:
                   cov.read_text(encoding="utf-8")).group(1)) * 100)
           except (OSError, AttributeError, ValueError):
               print("解析 coverage.xml 失败：文件不存在或格式不对")
-              if "${{ matrix.os }}" == "ubuntu-latest":
+              if is_ref:
                   sys.exit(1)
               print("非参考矩阵，跳过判定")
               pct = -1
           if pct >= 0:
               print(f"[${{ matrix.os }} ${{ matrix.python }}] 实测覆盖率 {pct}%")
-          if pct >= 0 and "${{ matrix.os }}" == "ubuntu-latest":
+          if pct >= 0 and is_ref:
               readme = Path("README.md").read_text(encoding="utf-8")
               claimed = re.search(r"覆盖率\s*\*\*(\d+)%\*\*", readme)
               if not claimed:

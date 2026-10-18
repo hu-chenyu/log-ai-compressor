@@ -29,11 +29,13 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 _CI = ROOT / ".github" / "workflows" / "ci.yml"
 _STEP_PREFIX = "Unit &"
+_DET_STEP_PREFIX = "Determinism check"
 
 
 def _step_source() -> str:
@@ -66,9 +68,10 @@ def _check_body() -> str:
 
 
 def _run(body: str, os_name: str, workdir: pathlib.Path, *,
-         console_encoding: str = "utf-8") -> subprocess.CompletedProcess:
+         console_encoding: str = "utf-8",
+         python_version: str = "3.12") -> subprocess.CompletedProcess:
     code = (body.replace("${{ matrix.os }}", os_name)
-                .replace("${{ matrix.python }}", "3.12"))
+                .replace("${{ matrix.python }}", python_version))
     prog = "import re, sys\nfrom pathlib import Path\n" + code
     # env 必须显式给：本 harness 跑的是 python 子进程且按 utf-8 解码，
     # 不钉 PYTHONIOENCODING 就会静默继承开发机控制台代码页 —— 这正是
@@ -97,20 +100,178 @@ def _fixture(tmp: pathlib.Path, *, readme: pathlib.Path | None,
     return work
 
 
-def test_real_coverage_file_parses(tmp_path):
-    """本机真跑出来的 coverage.xml 必须能被那段正则解析，且得到 96。
+def _determinism_step_source() -> str:
+    """抽出 CI 第 3 道门禁（确定性指纹）那段的**逐字原文**。
 
-    这是对「正则与真实文件结构匹配」的验证 —— 合成文件测不到这一点。
+    和 `_step_source` 同一个思路：测的是 CI 里真正会跑的那份，不是副本。
     """
-    real = ROOT / "coverage.xml"
-    if not real.exists():
-        import pytest
-        pytest.skip("本机没跑过 --cov-report=xml，本条不校")
-    r = _run(_check_body(), "ubuntu-latest", ROOT)
-    out = (r.stdout + r.stderr)
+    doc = yaml.safe_load(_CI.read_text(encoding="utf-8"))
+    steps = doc["jobs"]["test"]["steps"]
+    hit = [s for s in steps
+           if str(s.get("name", "")).startswith(_DET_STEP_PREFIX)]
+    assert hit, "ci.yml 里找不到确定性那一步，先更新本 harness"
+    return hit[0]["run"]
+
+
+def _run_determinism(prologue: str, workdir: pathlib.Path,
+                     ) -> subprocess.CompletedProcess:
+    """按 CI 的方式跑那段：`shell: python`，整段喂给 `python -c`。
+
+    `prologue` 排在前面，用来在真跑之前替换掉 `result_to_dict` ——
+    这是唯一能让「三次跑出不同指纹」在本地发生的办法，而**那正是要看
+    门禁会不会红的那一侧**。
+    """
+    prog = textwrap.dedent(prologue) + "\n\n" + _determinism_step_source()
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    return subprocess.run(
+        [sys.executable, "-c", prog], cwd=str(workdir),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env,
+    )
+
+
+#: 注入到**子进程**里的补丁。CI 那段自己会 `subprocess.call([sys.executable,
+#: "-c", code])` 起一个新进程 —— 第一版 harness 在父进程里替换
+#: `result_to_dict`，子进程根本看不到，三次跑出来照样是同一个指纹，
+#: 于是「三次不同指纹必须红」这条断言测的是一个**没被改坏的**程序。
+#: （这是本仓库记过多次的同一个形状：观测到的成功值描述的是另一个对象。）
+_SITECUSTOMIZE = '''\
+import os
+import sys
+
+_MODE = os.environ.get("LAC_MUTATE_FP")
+if _MODE:
+    sys.path.insert(0, {root!r})
+    from log_ai_compressor import service as S
+
+    _orig = S.result_to_dict
+
+    if _MODE == "diverge":
+        _n = [0]
+
+        def _patched(res, *args, **kwargs):
+            d = _orig(res, *args, **kwargs)
+            _n[0] += 1
+            d["determinism_fingerprint"] = "fp-" + str(_n[0])
+            return d
+    else:
+        def _patched(res, *args, **kwargs):
+            d = _orig(res, *args, **kwargs)
+            d["determinism_fingerprint"] = "fp-fixed"
+            return d
+
+    S.result_to_dict = _patched
+'''
+
+
+def _run_determinism(mode: str | None, scratch: pathlib.Path,
+                     ) -> subprocess.CompletedProcess:
+    """按 CI 的方式跑那段：`shell: python`，整段喂给 `python -c`。
+
+    cwd 固定为仓库根（CI 就是在那儿跑的，所以那段里的 `'.'` 指仓库）；
+    注入用的 sitecustomize 放在 `scratch` 里 —— 写进仓库会留下杂物目录。
+
+    `mode` 为 None 时不注入任何补丁（跑现行代码）；"diverge" 让三次调用
+    返回三个不同指纹；"agree" 让它们返回同一个。
+    """
+    site_dir = scratch / "_sitecustomize"
+    site_dir.mkdir(exist_ok=True)
+    (site_dir / "sitecustomize.py").write_text(
+        _SITECUSTOMIZE.format(root=str(ROOT)), encoding="utf-8")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8",
+               PYTHONPATH=str(site_dir))
+    env.pop("LAC_MUTATE_FP", None)
+    if mode:
+        env["LAC_MUTATE_FP"] = mode
+    return subprocess.run(
+        [sys.executable, "-c", _determinism_step_source()],
+        cwd=str(ROOT), capture_output=True, text=True,
+        encoding="utf-8", errors="replace", env=env,
+    )
+
+
+class TestDeterminismGateHasTeeth:
+    """确定性那段此前**一条测试都没有**，`== 1` 被改成 `>= 1` 时全量测试照绿。
+
+    门禁写着「同一份日志连跑三次，指纹必须逐字节相同」，而把这条判据
+    放松成「至少有一个指纹」之后，没有任何东西会叫 —— 一个自称守确定性
+    的门禁，恰恰在最该叫的那一侧是哑的。
+    """
+
+    def test_the_real_tree_passes(self, tmp_path):
+        """不加任何干预：现行代码跑三次必须得到同一个指纹。
+
+        这条同时验的是 harness 抽出来的确实是 CI 会跑的那段。
+        """
+        r = _run_determinism(None, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "fingerprints = 1" in r.stdout, r.stdout
+
+    def test_it_goes_red_when_fingerprints_differ(self, tmp_path):
+        r = _run_determinism("diverge", tmp_path)
+        assert r.returncode == 1, (
+            "三次跑出不同指纹却仍然放行 —— 确定性门禁是装饰的：\n"
+            + r.stdout + r.stderr)
+        assert "fingerprints = 3" in r.stdout, r.stdout
+        assert "确定性校验失败" in r.stdout, r.stdout
+
+    def test_it_stays_green_when_fingerprints_agree(self, tmp_path):
+        """反例对照：不该红的别乱红（收紧判据的代价就在这一条上）。"""
+        r = _run_determinism("agree", tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "fingerprints = 1" in r.stdout, r.stdout
+
+    def test_the_source_asserts_exactly_one(self):
+        """静态兜底：判据必须真的是 `== 1`。
+
+        行为那条已经能抓住 `>= 1`；这条再钉一层，是为了让**只看 diff 的人**
+        也能一眼看到这条判据没被放松。
+        """
+        src = _determinism_step_source()
+        assert "len(fps) == 1" in src, (
+            "确定性判据不再是「恰好一个指纹」了：\n"
+            + "\n".join(ln for ln in src.splitlines() if "fps" in ln))
+
+
+def _real_coverage_xml(work: pathlib.Path) -> None:
+    """用本机**真的 coverage** 吐一份 coverage.xml 到 work。
+
+    为什么不用「上一次跑剩的那个」：coverage.xml 是 pytest **会话结束时**
+    才写出来的，而 CI 是干净 checkout —— 所以依赖 `ROOT/coverage.xml` 是否
+    存在的那条测试，在 CI 三条矩阵上**全部 skip**，只有本地脏工作区才会真跑。
+
+    这与 v2.11.1 那次「`git check-ignore` 目录规则的探针在本地和 CI 语义
+    不同」是同一个形状：**本地那次绿什么也没证明。**
+    skip 出来的绿和真跑一遍的绿在 CI 界面上没有任何区别。
+    """
+    probe = work / "probe.py"
+    probe.write_text("def f(x):\n    return x + 1\n\n\nf(1)\n", encoding="utf-8")
+    env = dict(os.environ, COVERAGE_FILE=str(work / ".coverage"))
+    subprocess.run([sys.executable, "-m", "coverage", "run", str(probe)],
+                   check=True, capture_output=True, cwd=str(work), env=env)
+    subprocess.run([sys.executable, "-m", "coverage", "xml",
+                    "-o", str(work / "coverage.xml")],
+                   check=True, capture_output=True, cwd=str(work), env=env)
+
+
+def test_check_body_parses_a_really_generated_coverage_xml(tmp_path):
+    """正则要吃得下**真 coverage 吐出来的** XML —— 手写的合成文件测不到。
+
+    这条在任何机器上都会跑，包括 CI 的三条矩阵。
+    """
+    work = tmp_path / "real"
+    work.mkdir()
+    shutil.copy(ROOT / "README.md", work / "README.md")
+    _real_coverage_xml(work)
+    r = _run(_check_body(), "ubuntu-latest", work)
+    out = r.stdout + r.stderr
     assert "NameError" not in out, f"对账段引用了未定义的名字：\n{out}"
-    assert r.returncode == 0, f"用真实 coverage.xml 应当通过：\n{out}"
-    assert "实测覆盖率 96%" in out, out
+    assert "解析 coverage.xml 失败" not in out, f"正则吃不下真实 coverage 输出：\n{out}"
+    # 这份 probe 全部命中，所以 line-rate=1.0 → 100%，与 README 的 96% 不等，
+    # 那段必须因此红 —— 这才证明「它真的比了」，而不是只把数字打印出来。
+    assert "实测覆盖率 100%" in r.stdout, r.stdout
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "README 写覆盖率 96%" in r.stdout, r.stdout
 
 
 def test_ubuntu_enforces_readme_number(tmp_path):
@@ -130,11 +291,22 @@ def test_ubuntu_enforces_readme_number(tmp_path):
     assert "README 写覆盖率 95%" in r.stdout
 
 
-def test_non_reference_matrix_reports_but_does_not_judge(tmp_path):
+@pytest.mark.parametrize("os_name,py_ver", [
+    ("windows-latest", "3.12"),
+    ("ubuntu-latest", "3.11"),
+    ("ubuntu-latest", "3.11"),   # 同一格重复一次也不该改变结论
+])
+def test_non_reference_matrix_reports_but_does_not_judge(
+        tmp_path, os_name, py_ver):
     """非参考矩阵：数字照样报出来，但不参与判定。
 
     这是 v2.9.1 那次教训的直接对策 —— 覆盖率是**平台相关**的量，
     拿它去卡三个平台等于卡了一个不存在的约束。
+
+    「参考矩阵」的定义是 **ubuntu + 3.12 两维同时成立**（AGENTS.md §4：
+    「覆盖率对账只在 ubuntu-3.12 上做」）。原先 ci.yml 只比了 os，于是
+    ubuntu-3.11 也参与判定 —— 今天两边数值恰好相同所以没红，但那不是设计。
+    这条把 3.11 单独钉出来：**只比 os 的那版会在这里红**。
     """
     body = _check_body()
     real = ROOT / "README.md"
@@ -142,10 +314,30 @@ def test_non_reference_matrix_reports_but_does_not_judge(tmp_path):
     bad_readme.write_text(
         real.read_text(encoding="utf-8").replace("**96%**", "**97%**"),
         encoding="utf-8")
-    work = _fixture(tmp_path / "c", readme=bad_readme, cov_line_rate="0.9598")
-    r = _run(body, "windows-latest", work)
-    assert r.returncode == 0, f"非参考矩阵不该判红：\n{r.stdout}{r.stderr}"
+    work = _fixture(tmp_path / f"{os_name}-{py_ver}", readme=bad_readme,
+                    cov_line_rate="0.9598")
+    r = _run(body, os_name, work, python_version=py_ver)
+    assert r.returncode == 0, (
+        f"[{os_name} {py_ver}] 非参考矩阵不该判红：\n{r.stdout}{r.stderr}")
     assert "实测覆盖率 96%" in r.stdout, "数字必须照样报出来，否则等于没测"
+
+
+def test_reference_matrix_still_judges(tmp_path):
+    """判据改严的**另一个方向**也要钉住：参考矩阵必须仍然会红。
+
+    只测「非参考矩阵不红」是不够的 —— 那条与「哪里都不红」是同一条断言。
+    """
+    body = _check_body()
+    real = ROOT / "README.md"
+    bad_readme = tmp_path / "bad.md"
+    bad_readme.write_text(
+        real.read_text(encoding="utf-8").replace("**96%**", "**97%**"),
+        encoding="utf-8")
+    work = _fixture(tmp_path / "ref", readme=bad_readme, cov_line_rate="0.9598")
+    r = _run(body, "ubuntu-latest", work, python_version="3.12")
+    assert r.returncode == 1, (
+        f"ubuntu-3.12 是参考矩阵，README 写错就必须红，却 rc={r.returncode}")
+    assert "README 写覆盖率 97%" in r.stdout
 
 
 def test_missing_coverage_file_fails_only_on_reference_matrix(tmp_path):
