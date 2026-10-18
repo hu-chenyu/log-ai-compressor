@@ -384,6 +384,17 @@ MUTATIONS: List[Mutation] = [
         new="registry.modelcontextprotocol.io/v0/servers/$name'",
         tests=["tests/test_publish_mcp_workflow.py"],
     ),
+    # ---- sdist 交付完整性（v2.11.3 批8） ------------------------------
+    Mutation(
+        id="sdist/audit-doc-not-packaged",
+        why="AUDIT.md 不进 sdist —— 从 GitHub clone 的人一切正常，"
+            "只有 pip download 的人跑 pytest 会撞上两条 FileNotFoundError。"
+            "「难查」正是它一直没被发现的原因",
+        target="MANIFEST.in",
+        old="include AUDIT.md",
+        new="# include AUDIT.md",
+        tests=["tests/test_sdist_contents.py"],
+    ),
 ]
 
 
