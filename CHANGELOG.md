@@ -179,7 +179,7 @@ log_ai_compressor-2.11.4-py3-none-any.whl  228,693 B  sha256 661cb6c2e8db6fde645
 | --- | --- | --- | --- |
 | 本地 `dist/` | 对文件字节算 sha256 | ✅ | ✅ |
 | PyPI | 官方 JSON `digests.sha256` | ✅ | ✅ |
-| GitHub Release | Release API 的资产 `digest`；tar.gz 另**实际下载后重算** | ✅ | ✅ |
+| GitHub Release | Release API 的资产 `digest`，并**两个产物都实际下载后重算** | ✅ | ✅ |
 
 GitHub Release `v2.11.4`（`Latest`，`draft=false`、`prerelease=false`，
 `published_at 2026-10-18T14:23:47Z`），两个附件用**原始文件名**。
