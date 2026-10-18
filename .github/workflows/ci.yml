@@ -197,3 +197,18 @@ jobs:
           name: coverage-${{ matrix.os }}-${{ matrix.python }}
           path: coverage.xml
           if-no-files-found: ignore
+
+      - name: Mutation scorecard (do the tests still have teeth?)
+        # 第七道门禁，也是唯一一道**关于测试本身**的门禁。
+        #
+        # 前面六道守的是「产品对不对」。这一道守的是「我们对不对的判断，
+        # 是不是真的有人在管」——它把每一处**曾经让门禁失明**的改动固化成
+        # 变异，逐条施加回去，看负责它的那组测试会不会红。
+        #
+        # 它回答的是测试领域里最核心、也最容易被糊弄过去的问题：
+        # **「你凭什么说这些测试有意义？」**
+        #
+        # 只跑参考矩阵一条：变异测试量的是测试质量，与 OS / Python 版本无关，
+        # 三矩阵跑三遍纯属浪费（与「构建可复现」那步同理）。
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: python scripts/mutation_scorecard.py
