@@ -136,27 +136,58 @@ python scripts/benchmark_loghub.py --no-logslop --no-drain3 --budgets 32000
 固定顺序，每一步都有它的理由：
 
 ```bash
-# 1. 版本号 + CHANGELOG + 提交，推分支
-# 2. 发 tag，推 tag —— 等 CI 绿
+# 1. 版本号 + CHANGELOG + 提交，推分支，等 CI 绿
+# 2. 构建，并立刻记下哈希
+python scripts/build_repro.py --verify   # 不用 python -m build（那个每次字节都不同）
+sha256sum dist/*
+
+# 3. 先传 PyPI —— 必须在推 tag 之前
+python -m twine upload dist/*
+
+# 4. 再打 tag、推 tag —— 这一步会触发 Registry 发布
 git tag -a vX.Y.Z -m "..."
 git push origin vX.Y.Z
 
-# 3. CI 绿之后才构建，并立刻记下哈希
-python -m build --sdist --wheel
-sha256sum dist/*
-
-# 4. 上传 GitHub Release 附件 + PyPI（文件名里带同一对哈希）
-# 5. 用公开 API 逐条核实，不看页面渲染
+# 5. 最后建 GitHub Release，挂同一对产物
+# 6. 用公开 API 逐条核实，不看页面渲染
 ```
 
-- **先 tag、后构建。** 反过来的话，任何上传环节被卡住都会留下
-  「tag 已推但产物没记下哈希」的中间态。
+- **先 PyPI、后 tag。** 推 tag 会触发 `.github/workflows/publish-mcp.yml`，
+  而 Registry **会校验清单里那个版本在 PyPI 上确实存在**。顺序反了，
+  工作流的每一次重试都拿到同一个 400：
+
+  ```text
+  PyPI package 'log-ai-compressor' exists, but version '2.12.1' was not
+  found (status: 404). A newly published release can take a moment to
+  appear on PyPI. Wait and retry, or publish version '2.12.1' before
+  registering it
+  ```
+
+  **错因藏在 `errors[0].message` 里，不在步骤名上** —— 步骤只叫 `Publish`，
+  而那一步既可能因为上游缺失而红，也可能因为别的原因而红。
+  v2.12.1 实测连红 3 次、退出码 1，而 Registry 上 `isLatest` 停在旧版本。
+  工作流自带的「重试前先回查目标版本在不在册」防的是**重复提交**，
+  防不住**上游根本还不存在** —— 这两件事要分开看。
+
+- **不要为了重跑 workflow 去删 tag。**
+  `git push origin --delete vX.Y.Z` 会把该 tag 上的 **GitHub Release 对象
+  一起删掉**，而重推同一个 tag **不会**把它带回来。tag 可逆 ≠ 操作可逆：
+  本地持有同一个 annotated tag 对象，只能证明**重建得回来**，不能证明
+  **外部状态没被改**。v2.12.1 实测：tag 逐位还原了（`6879b6f… → 6879b6f…`），
+  而发布页变成 404，只能整个重建（标题 + 7,124 字符正文 + 两个附件重传）。
+  要重跑用 `workflow_dispatch`（该工作流已开）或 Actions 页的
+  Re-run failed jobs，这两条都不碰 tag。
+
 - **三方 sha256 必须逐字节相同**：本地构建产物 == GitHub Release 附件 digest
   == PyPI 的 `digests` 字段。用
   `GET /repos/{owner}/{repo}/releases/tags/{tag}` 拿附件的 `digest`，
   不靠页面底部 Assets 区块是否渲染出来（那是懒加载 fragment，
   在很多客户端里长期转圈，**看不到不等于没上传**）。
-- 发布后改已推送内容 = 换版本号重发，不要原地修。
+- 发布后改已推送内容 = 换版本号重发，不要原地修。已发到 PyPI 的产物
+  不可覆盖，所以更正只能**再发一版**（v2.12.0 → v2.12.1 就是这么来的）。
+- 这份清单本身也是一条**对外流程主张**，同样受 §2.1 约束：它的顺序
+  是被一次真实事故改出来的（v2.12.1 的 Registry 三连 400），不是推演出来的。
+  再改它之前先问「这次事故的日志说了什么」，而不是「哪一步看着更顺」。
 
 ## 9. 撤回
 
