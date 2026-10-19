@@ -8,6 +8,96 @@
 
 ---
 
+## [2.12.4] - 未发布
+
+### 🔴 撤回 v2.12.2 的一句说法：「能同时解决上面两层的动作只有一个」
+
+[2.12.2] 那一节写着：
+
+> **能同时解决上面两层的动作只有一个**：删掉那 3 个已合并的 PR
+> （GraphQL `deletePullRequest`，需要 repo 权限的 token）→ refs 消失 →
+> 那 335 笔历史失去最后一个引用 → GC 收掉。
+
+**这一条不成立。** 公开的 GraphQL schema 里**没有** `deletePullRequest`
+这个 mutation：官方 schema 文档的 `pulls` 类目里，从 `CreatePullRequestInput`
+直接跳到 `deletePullRequestReview` / `deletePullRequestReviewComment`，
+中间没有任何删除 PR 的字段。REST 侧也没有
+`DELETE /repos/{owner}/{repo}/pulls/{pull_number}` —— 那条路径只有
+GET / POST / PATCH。
+
+按 §2.4，v2.12.2 那段记录**原样留着**（它确实是当时写下的判断），
+更正写在这里。
+
+#### 实测：四条自助路径全部走不通
+
+| 路径 | 做法 | 结果 |
+| --- | --- | --- |
+| 删 PR（REST） | `DELETE /repos/{o}/{r}/pulls/{n}` | **端点不存在** |
+| 删 PR（GraphQL） | `deletePullRequest` | **公开 schema 里没有这个 mutation** |
+| 删 PR（网页） | 已合并 PR 的「⋯」菜单 | **没有删除入口** |
+| 挪 PR 的 head 分支 | 把分支指向新历史 | **pull ref 不跟随**（下详） |
+
+最后一条是本次最花时间的一条，结论是**推不动**：
+
+* `refs/pull/N/head` 是 GitHub 为 PR 托管的**冻结引用**。PR 关闭之后，
+  它的 head 分支再怎么改，这条 ref 都不动。
+* 三种改法实测，全都不动它：
+  1. `PATCH /git/refs/heads/<branch>`（改分支）—— API 返回 200，分支确实
+     变了，`refs/pull/N/head` 一动不动；
+  2. **真实 `git push --force`**（走 receive-pack 那条路，和改 API 不是同一条
+     管道）—— push 成功，`refs/pull/N/head` 依然不动；
+  3. 先把 PR 重新打开再改分支 —— **已合并的 PR 不可重开**：REST 422
+     「The pull request cannot be reopened」，GraphQL 报
+     「Could not open the pull request.」。
+
+另有一条实测结论，写在这里省得下一个人再踩：**GitHub 的
+`POST /git/refs`（建分支）只接受 default 分支首父链上的提交**。同一个
+API，目标 SHA 换成「被合并分支上的提交」就回 404 —— 报错写的是
+"Not Found"，读起来像「仓库里没有这个 commit」，而 `GET /git/commits/<sha>`
+明明返回 200。
+
+#### 现在的真实状态（全部实测）
+
+| | |
+| --- | --- |
+| 服务端 ref | 70 条：`HEAD` 1 / `refs/heads/main` 1 / `refs/pull/*` 3 / `refs/tags` 65（33 个 tag，32 个带 peeled） |
+| `refs/pull/{1,2,3}/head` | **仍吊着 330 笔旧提交**（每条 ref 覆盖 333 笔） |
+| 旧链范围 | 2026-08-30（`87c3a05`）→ 2026-10-19，**330 笔全部含命中** |
+| 旧链命中量 | 文件内容 **1,637 行**；提交信息 **5 处** |
+| 旧 main 链（`8ff837b` / `148d5fe`） | **无任何 ref 引用** —— 实测：main + 33 个 tag + 3 条 PR ref 下都不可达，是真死链，GC 会收 |
+| 旧 SHA 直读 | `GET /repos/{o}/{r}/commits/<旧 SHA>` 仍返回 200 —— 这是官方文档里点名的 "cached views"，只有 GC 能消 |
+| fork | **0 个**；同一用户名下另两个仓库读不到旧 SHA（422） |
+| Software Heritage | 未归档（`Origin with url ... not found`） |
+| workflow run / Release 正文 | 140 个 run 的名字、27 个 Release 的正文：**0 命中**，且正文里没有引用任何旧 SHA |
+
+那 1,637 行与 5 处的按词分布，词表在 `tests/test_no_job_wording.py` 里
+（按码点存放，仓库里不留字面量）。
+
+#### 剩下能关掉它的动作，只剩两个
+
+1. **GitHub Support 工单** —— 官方文档《Removing sensitive data from a
+   repository》写明：只有 Support 能「dereference or delete 受影响的 PR」
+   +「在服务器上跑 GC」+「清掉 cached views」。工单需提供：仓库名、
+   受影响 PR 数（**3**）、第一处改动提交（**`87c3a05`**）。
+   **但官方同一页也写明：Support 只处理 "sensitive data"（凭据类）** ——
+   本仓库这批内容是个人相关的措辞、不是凭据，**很可能被拒**。
+2. **删库重建** —— 唯一保证清零的办法。代价已量化：**1 个 star、1 个
+   watcher、27 个 Release 的发布日期会全部变成今天、140 个 CI run 消失、
+   仓库创建日期重置**。内容侧可 100% 还原：历史与 33 个 tag 原样推回，
+   附件字节与 PyPI 上的完全一致（抽查 8/8 一致），27 个 Release 的正文与
+   发布日期已离线备份。
+
+在两者之间做选择之前，**这一层保持公开可达**。
+
+#### 门禁状态
+
+1,638 用例全过 / ruff 全过 / `prove.py` 11 条主张全部成立 /
+SAST 基线里剩下 46 条真该留下的豁免 / 依赖扫描无已知漏洞 /
+性能计数与基线相等 / **变异记分卡 85 条，击杀率 100%** /
+可复现构建两次字节相同。
+
+---
+
 ## [2.12.3] - 2026-10-19
 
 ### 修掉 v2.12.2 里的一个自相矛盾：SAST 基线与它自己的代码对不上
