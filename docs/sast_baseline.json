@@ -159,6 +159,12 @@
     },
     {
       "test_id": "B404",
+      "path": "tests/test_no_job_wording.py",
+      "count": 1,
+      "reason": "复核过：这条门禁的主题就是「全历史里不出现那批措辞」—— 它必须真的去读 git 仓库（工作区文件、提交信息、历史版本内容），起子进程是它要测的东西本身。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
       "path": "tests/test_packaging.py",
       "count": 1,
       "reason": "复核过：验证打包后的 wheel 里有什么，必须起子进程在隔离环境里安装检查。import 本身无法消除。"
@@ -234,6 +240,12 @@
       "path": "tests/test_invariants.py",
       "count": 1,
       "reason": "复核过：列表传参 + shell=False，跑的是本项目的 CLI。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_no_job_wording.py",
+      "count": 1,
+      "reason": "复核过：列表传参 + shell=False，跑的是 git（绝对路径由 shutil.which 解析），参数是本文件里的常量与 rev-list 的输出。读的是本仓库自己的历史，不涉及任何外部输入。"
     },
     {
       "test_id": "B603",

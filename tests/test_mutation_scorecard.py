@@ -216,6 +216,33 @@ def test_it_refuses_an_ambiguous_anchor_instead_of_passing():
         f"拒绝的理由必须讲清「锚点出现了几次」，实际：{msg!r}")
 
 
+def test_the_restore_survives_one_transient_write_failure(tmp_path, monkeypatch):
+    """还原必须经得起**一次**瞬时的写失败。
+
+    本机实测两次：刚写过的文件立刻再打开写入会失败
+    （`OSError: [Errno 22] Invalid argument`，路径完全正常、事后又能写）。
+    而一次失败就把**变异态留在工作区** —— 那正是这个脚本最不能留下的东西。
+
+    这条走真实机制：真的让写失败一次，看它是不是重试并最终还原。
+    """
+    target = tmp_path / "x.py"
+    target.write_bytes(b"original\n")
+    real = pathlib.Path.write_bytes
+    calls = {"n": 0}
+
+    def flaky(self, data):
+        if self == target:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError(22, "Invalid argument")
+        return real(self, data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", flaky)
+    MS._restore(target, b"restored\n")
+    assert target.read_bytes() == b"restored\n", "重试之后必须真的还原了"
+    assert calls["n"] == 2, "第一次失败后必须重试，而不是直接放弃"
+
+
 def test_a_stale_anchor_blames_the_worktree_when_the_file_is_dirty():
     """锚点找不到时，要分清「代码变了」与「工作区本来就被改脏了」。
 
@@ -223,19 +250,23 @@ def test_a_stale_anchor_blames_the_worktree_when_the_file_is_dirty():
     「锚点找不到了」，报的是「**代码已经变了**」—— 而代码没变，是工作区
     脏了。照着那个诊断去查代码会白查：该查的是 `git status`。
 
-    这条走**真实机制**：真的在仓库里造一个「工作区不干净的文件」，
-    再看它判不判得出来。monkeypatch 掉那个判断的话，就测不到
+    走**真实机制**：真的在仓库里造一个「工作区不干净的文件」，
+    看它判不判得出来。monkeypatch 掉那个判断的话，就测不到
     「判断本身恒为 False」这种退化 —— 而那正是本项目最贵的一课。
     """
     rel = "docs/_worktree_dirty_probe.tmp"
     probe = _ROOT / rel
     try:
         probe.write_text("探针\n", encoding="utf-8")
-        assert MS._worktree_dirty(rel) is True, (
+        # 纯函数那一半：porcelain 的「未跟踪」行长这样
+        assert MS._is_dirty("?? %s\n" % rel, rel) is True, (
             "工作区里明明有一个未跟踪的文件，却判成干净的 —— "
             "这个判断恒为 False 的话，下面那条提示永远不会出现")
-        assert MS._worktree_dirty("docs/这个路径不存在.md") is False, (
+        assert MS._is_dirty("?? docs/另一个文件.tmp\n", rel) is False, (
             "不存在的路径被判成脏 —— 判断的方向反了")
+        assert MS._is_dirty("", rel) is False, "空状态被判成脏"
+
+        # 端到端那一半：真的让 scorecard 撞上「工作区脏 + 锚点不存在」
         bad = MS.Mutation(id="probe/stale-dirty", why="锚点不存在",
                           target=rel, old="这段文字不在这个文件里",
                           new="x",

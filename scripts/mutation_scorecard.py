@@ -566,8 +566,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 44 条才是真该留下的。",
-        new="剩下 45 条才是真该留下的。",
+        old="剩下 46 条才是真该留下的。",
+        new="剩下 47 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
@@ -1061,28 +1061,37 @@ def _run_tests(targets: List[str], full: bool) -> int:
     return proc.returncode
 
 
-def _worktree_dirty(rel: str) -> bool:
+def _is_dirty(status_text: str, rel: str) -> bool:
     """目标文件在工作区里是否已经被改过（相对 HEAD，含未跟踪）。
 
     用来把两种「锚点找不到」分开：**代码变了** 与 **工作区本来就被改脏了**。
     后者不是稀罕事 —— 上一轮运行崩了没还原，文件就留在变异态；再跑一次
     看到「锚点找不到了」，如果只说「代码已经变了」，下一个人会去查代码，
     而该查的是 `git status`。
+
+    **不另起一次子进程**：scorecard() 开头本来就要跑 `git status --porcelain`
+    来做「跑完工作区没变」的兜底检查，那份输出直接复用。少一次子进程调用，
+    SAST 基线也不用因此多长一条豁免。
     """
-    proc = subprocess.run([git_exe(), "status", "--porcelain", "--", rel],
-                          cwd=str(ROOT), capture_output=True, text=True,
-                          encoding="utf-8", errors="replace")
-    return bool(proc.stdout.strip())
+    for line in status_text.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:          # 重命名：porcelain 给的是「旧 -> 新」
+            path = path.split(" -> ", 1)[1]
+        if path.strip('"') == rel:
+            return True
+    return False
 
 
-def _precondition(m: Mutation) -> None:
+def _precondition(m: Mutation, status_text: str = "") -> None:
     p = m.path()
     if not p.is_file():
         raise SystemExit(f"[{m.id}] 目标文件不存在：{m.target}")
     hits = p.read_text(encoding="utf-8").count(m.old)
     if hits == 0:
         dirty = ""
-        if _worktree_dirty(m.target):
+        if _is_dirty(status_text, m.target):
             dirty = ("\n  **先看工作区**：目标文件在 `git status` 里已经被改过 —— "
                      "锚点找不到很可能是因为这个，而不是代码变了。\n"
                      f"  先 `git diff -- {m.target}` 看看你（或上一次运行）改了什么。")
@@ -1111,6 +1120,25 @@ def _precondition(m: Mutation) -> None:
         raise SystemExit(f"[{m.id}] 没声明判定它的测试 —— 那这条记的是谁的账？")
 
 
+def _restore(p: Path, data: bytes, attempts: int = 4) -> None:
+    """把目标文件还原回原样。
+
+    **为什么要有重试**：本机实测两次「刚写过的文件立刻再打开写入」失败
+    （`OSError: [Errno 22] Invalid argument`，路径完全正常、事后又能写）——
+    一次失败就把**变异态留在工作区**，而这正是这个脚本最不能留下的东西。
+    所以这里宁可多试几次，也不把「一次瞬时失败」变成「用户的仓库脏了」。
+    """
+    last: OSError | None = None
+    for i in range(attempts):
+        try:
+            p.write_bytes(data)
+            return
+        except OSError as exc:
+            last = exc
+            time.sleep(0.15 * (i + 1))
+    raise last if last else OSError("还原失败：没有产生任何异常？")
+
+
 def scorecard(*, full: bool = False,
               mutations: List[Mutation] | None = None) -> dict:
     """逐条施加变异，记录它是被抓住还是活下来。"""
@@ -1123,7 +1151,7 @@ def scorecard(*, full: bool = False,
     originals: dict[Path, bytes] = {}
     try:
         for m in mutations:
-            _precondition(m)
+            _precondition(m, git_before)
             p = m.path()
             if p not in originals:
                 originals[p] = p.read_bytes()          # 事先存下，不是事后读回
@@ -1135,7 +1163,7 @@ def scorecard(*, full: bool = False,
             dt = time.monotonic() - t0
 
             # 立刻还原，不把脏状态带到下一条
-            p.write_bytes(originals[p])
+            _restore(p, originals[p])
             results.append({
                 "id": m.id, "why": m.why, "target": m.target,
                 "tests": m.tests if not full else ["(全量)"],
@@ -1143,7 +1171,14 @@ def scorecard(*, full: bool = False,
             })
     finally:
         for p, data in originals.items():
-            p.write_bytes(data)
+            try:
+                _restore(p, data)
+            except OSError as exc:
+                rel = p.relative_to(ROOT) if p.is_relative_to(ROOT) else p
+                raise SystemExit(
+                    f"还原失败：{p} 已脏 —— 工作区被本脚本留在修改态。\n"
+                    f"  {exc}\n"
+                    f"  请用 `git checkout -- {rel}` 手动还原后再跑。") from exc
             # 同样不用 assert：`-O` 会删掉它，于是「还原失败」这条兜底在
             # 优化模式下直接消失，而兜底没了的后果是**把脏工作区留给用户**。
             if p.read_bytes() != data:

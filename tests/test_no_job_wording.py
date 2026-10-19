@@ -29,10 +29,18 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: git 的**绝对路径**。bandit 的 B607 报「用部分路径启动进程」——
+#: scripts/mutation_scorecard.py 里的 git_exe() 早就这么处理了（它还多写了
+#: 一段注释说明为什么**修而不豁免**）。这里照抄那条做法：写死 "git" 在
+#: git 不在 PATH 时抛出来的是 FileNotFoundError，看不出是「git 缺失」还是
+#: 「工作区不干净」，而这道门禁的整个卖点就是后者。
+_GIT = shutil.which("git")
 
 #: 禁用词表 —— 码点形式（原因见模块 docstring）。顺序即上报顺序。
 _FORBIDDEN_CODES = (
@@ -111,8 +119,10 @@ def _env() -> dict:
 
 
 def _git(*args: str) -> str:
+    if _GIT is None:
+        raise AssertionError("找不到 git —— 这道门禁要读全历史，它跑不了")
     proc = subprocess.run(
-        ["git", "-C", str(ROOT), *args],
+        [_GIT, "-C", str(ROOT), *args],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=_env())
     # grep 没有命中时退出码是 1 —— 那不是错误
