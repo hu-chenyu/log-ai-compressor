@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Guard - the listing must describe the version being released
         # 三份版本号必须一致：tag、server.json、pyproject。
