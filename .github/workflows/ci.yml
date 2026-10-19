@@ -29,6 +29,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          # 必须取完整历史：tests/test_no_job_wording.py 要扫「全部历史版本
+          # 的文件内容」与「全部提交信息」。默认的浅克隆只带 1 个 commit，
+          # 那道门禁就会退化成只看当前那一个版本 —— 而它**看起来在跑**。
+          # 这正是「扫了 0 个文件却报通过」那个形态的翻版。
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v7

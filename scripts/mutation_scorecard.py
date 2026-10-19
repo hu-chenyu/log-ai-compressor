@@ -1000,6 +1000,36 @@ MUTATIONS: List[Mutation] = [
         new="| 0.85（对照档） | 31.02 | 32.08 | 171 |",
         tests=["tests/test_ga_gap_table.py"],
     ),
+    # ---- 措辞门禁（2026-10 批） ----------------------------------------
+    Mutation(
+        id="wording/job-word-written-into-doc",
+        why="在文档里写下一个与个人就业语境相关的词。看起来只是一句普通的"
+            "说明 —— 而**当时没有任何门禁会红**：CI 跑的是测试与数字对账，"
+            "没有一条检查措辞。于是 2026-10 那次全历史重写的成果，"
+            "下一次有人动笔就又写回来了。这正是 AUDIT.md 形态八那条："
+            "「表里的数全对，而表外那句断言没人看守」",
+        target="docs/FAQ.md",
+        old="每一条都按「问题 → 实测依据 → 本项目做不到什么 → 怎么自己验」写。",
+        # 那个词用码点拼出来 —— 这份文件本身也在扫描范围内，
+        # 写成字面量就会让仓库里多出一处禁用词，而门禁会先把自己判红。
+        new=("每一条都按「问题 → 实测依据 → 本项目做不到什么 → 怎么自己验」写。\n"
+             "> 顺带一提，"
+             + "".join(chr(c) for c in (0x9762, 0x8BD5))
+             + "的时候也要注意这一条。"),
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/forbidden-list-emptied",
+        why="把禁用词表清空 —— 门禁于是恒真：三个扫描面全都「通过」，"
+            "而它**一个词都没查**。这条守的是门禁自己的牙齿："
+            "「报数为 0 的计数器等于没装」是本项目最贵的一课"
+            "（性能门禁的第一版就装在一条根本没被调用的路径上，"
+            "计数恒为 0，于是每一条都绿，而它守的路径一次都没被走到）",
+        target="tests/test_no_job_wording.py",
+        old="FORBIDDEN = tuple(_decode(c) for c in _FORBIDDEN_CODES)",
+        new="FORBIDDEN = ()",
+        tests=["tests/test_no_job_wording.py"],
+    ),
 ]
 
 
@@ -1031,17 +1061,36 @@ def _run_tests(targets: List[str], full: bool) -> int:
     return proc.returncode
 
 
+def _worktree_dirty(rel: str) -> bool:
+    """目标文件在工作区里是否已经被改过（相对 HEAD，含未跟踪）。
+
+    用来把两种「锚点找不到」分开：**代码变了** 与 **工作区本来就被改脏了**。
+    后者不是稀罕事 —— 上一轮运行崩了没还原，文件就留在变异态；再跑一次
+    看到「锚点找不到了」，如果只说「代码已经变了」，下一个人会去查代码，
+    而该查的是 `git status`。
+    """
+    proc = subprocess.run([git_exe(), "status", "--porcelain", "--", rel],
+                          cwd=str(ROOT), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    return bool(proc.stdout.strip())
+
+
 def _precondition(m: Mutation) -> None:
     p = m.path()
     if not p.is_file():
         raise SystemExit(f"[{m.id}] 目标文件不存在：{m.target}")
     hits = p.read_text(encoding="utf-8").count(m.old)
     if hits == 0:
+        dirty = ""
+        if _worktree_dirty(m.target):
+            dirty = ("\n  **先看工作区**：目标文件在 `git status` 里已经被改过 —— "
+                     "锚点找不到很可能是因为这个，而不是代码变了。\n"
+                     f"  先 `git diff -- {m.target}` 看看你（或上一次运行）改了什么。")
         raise SystemExit(
             f"[{m.id}] 锚点在 {m.target} 里找不到了 —— 代码已经变了，"
             f"这条变异要么已无意义、要么需要重写。\n"
             f"  找不到：{m.old[:80]!r}\n"
-            f"  **不要**为了让脚本跑通就把锚点改松。")
+            f"  **不要**为了让脚本跑通就把锚点改松。{dirty}")
     if hits > 1:
         # 施加时是 `text.replace(m.old, m.new, 1)` —— 只改**第一处**。
         # 锚点不唯一时，变异很可能落在一个判据根本不看的地方，于是报出

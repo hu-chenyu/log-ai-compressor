@@ -214,3 +214,37 @@ def test_it_refuses_an_ambiguous_anchor_instead_of_passing():
     msg = str(e.value)
     assert "次" in msg and "唯一" in msg, (
         f"拒绝的理由必须讲清「锚点出现了几次」，实际：{msg!r}")
+
+
+def test_a_stale_anchor_blames_the_worktree_when_the_file_is_dirty():
+    """锚点找不到时，要分清「代码变了」与「工作区本来就被改脏了」。
+
+    实测踩到过：一次运行崩了，把目标文件留在了变异态；下一次运行看到
+    「锚点找不到了」，报的是「**代码已经变了**」—— 而代码没变，是工作区
+    脏了。照着那个诊断去查代码会白查：该查的是 `git status`。
+
+    这条走**真实机制**：真的在仓库里造一个「工作区不干净的文件」，
+    再看它判不判得出来。monkeypatch 掉那个判断的话，就测不到
+    「判断本身恒为 False」这种退化 —— 而那正是本项目最贵的一课。
+    """
+    rel = "docs/_worktree_dirty_probe.tmp"
+    probe = _ROOT / rel
+    try:
+        probe.write_text("探针\n", encoding="utf-8")
+        assert MS._worktree_dirty(rel) is True, (
+            "工作区里明明有一个未跟踪的文件，却判成干净的 —— "
+            "这个判断恒为 False 的话，下面那条提示永远不会出现")
+        assert MS._worktree_dirty("docs/这个路径不存在.md") is False, (
+            "不存在的路径被判成脏 —— 判断的方向反了")
+        bad = MS.Mutation(id="probe/stale-dirty", why="锚点不存在",
+                          target=rel, old="这段文字不在这个文件里",
+                          new="x",
+                          tests=["tests/test_adversarial_scorecard_gate.py"])
+        with pytest.raises(SystemExit) as e:
+            MS.scorecard(mutations=[bad])
+        msg = str(e.value)
+        assert "工作区" in msg, (
+            f"拒绝的理由必须指出「工作区被改脏」这个可能，实际：{msg!r}")
+    finally:
+        if probe.exists():
+            probe.unlink()
