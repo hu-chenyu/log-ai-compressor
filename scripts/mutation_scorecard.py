@@ -930,6 +930,76 @@ MUTATIONS: List[Mutation] = [
         new="        self._emit(\"progress\", **(info or {}))",
         tests=["tests/test_web.py"],
     ),
+    # ---- 阈值断言超出采样范围（v2.12.0 发布前抓到的真错误） ------------
+    # 这五条对应同一个事故：**正文里那句「OpenSSH 与 Hadoop 在 0.70 时分别
+    # 掉到 60.20 与 49.36」把 Linux 的 60.20 写进了 OpenSSH 那一格**，
+    # 而 OpenSSH **压根没被扫过**（五档曲线只扫了 4 个数据集）。
+    # 补测之后真值是 34.68，**方向还是反的**（比 0.85 的 32.08 高 2.60pp）。
+    #
+    # 为什么前面四条表体守卫一条都没红：它们读的是**表 F 的表体**
+    # （形状 / 加粗 / 均值 / PA 不敏感），而错的是**正文里的一句断言**。
+    # 这与 `bench/tier-*` 那两条「从 CSV 重算」是不同的一维：
+    # 那两条守「格里的数」，这五条守「**说这句话的那个数据集到底测没测过**」。
+    Mutation(
+        id="sweep/claim-about-unswept-dataset",
+        why="正文里出现一条**点名了从未被扫过的数据集**的阈值断言"
+            "（这里拿 Proxifier 代 OpenSSH —— 后者现在已被补测覆盖，"
+            "前者确定不在任何一张受控表里）。这是本项目**第二次**栽在"
+            "同一个形状上：第一次是「只跑了 0.85/0.90/0.95 就宣称 0.85 在"
+            "曲线顶点」，这一次是「只扫了 4 个数据集就给第 5 个报了数」。"
+            "错因都是**结论的适用范围比采样范围宽**，而两次都全绿",
+        target="docs/BENCHMARK.md",
+        old="也就是说 OpenSSH 换成 0.70 **只涨 2.60pp**",
+        new="Proxifier 换成 0.70 掉到 **60.20**，也就是说 Proxifier 只涨 2.60pp",
+        tests=["tests/test_ga_gap_table.py"],
+    ),
+    Mutation(
+        id="sweep/supplement-control-value-broken",
+        why="补测表的**阳性对照**那一格被改坏（0.85 不再复现已发布快照里的 "
+            "32.08）。补测只有一档（0.70）时，一次跑歪的测量也能给出"
+            "**结构完全正常**的数字 —— 而 0.85 那一档的全部意义就是"
+            "「同一份代码在已知答案上必须答对」。阳性对照被改坏却没人红，"
+            "等于补测本身不可信，而它照样排在文档里",
+        target="docs/BENCHMARK.md",
+        old="| 0.85 | 31.02 | 32.08 | 171 |",
+        new="| 0.85 | 31.02 | 34.68 | 171 |",
+        tests=["tests/test_ga_gap_table.py"],
+    ),
+    Mutation(
+        id="sweep/supplement-direction-flipped",
+        why="把补测的 0.70 那一格改成已经**追过 Drain3**。原文那句「OpenSSH "
+            "换成 0.70 也追不上」是被写错过一次的方向性结论（原文说"
+            "「都比 0.85 差」，而真值 34.68 比 32.08 **高** 2.60pp）。"
+            "只守数值不够：数字对了而**方向反了**，读者照样会照着错的结论读下去",
+        target="docs/BENCHMARK.md",
+        old="| 0.70 | 31.02 | **34.68** | 34 |",
+        new="| 0.70 | 31.02 | **75.00** | 34 |",
+        tests=["tests/test_ga_gap_table.py"],
+    ),
+    Mutation(
+        id="sweep/supplement-caption-removed",
+        why="补测表的标题行不再点名数据集。这一条守的是**解析器自己的退化**："
+            "数据集名是写在标题行上的（表 G 一行只描述一个数据集），"
+            "标题一改，被扫过的集合就少一个成员，于是 OpenSSH 被误判成"
+            "「没被扫过」。方向看着相反（红在一个**本来没问题**的地方），"
+            "但那正是必要的：宁可红在误报上，也不许静默丢掉一个成员",
+        target="docs/BENCHMARK.md",
+        old="**表 G · OpenSSH 的阈值补测（表 F 没有扫它，故单列）**",
+        new="**附录 · 两档补测**",
+        tests=["tests/test_ga_gap_table.py"],
+    ),
+    Mutation(
+        id="sweep/supplement-row-label-annotated",
+        why="补测表的**行标签**从纯阈值变成带括号注脚。第一版判据直接"
+            "`body[\"0.85\"]`，于是这一改抛的是 `KeyError` —— **那看起来像"
+            "脚本崩了，不像一句判决**，读者会去改测试而不是改文档。"
+            "所以判据现在先判「行标签必须是纯阈值」再取值：同一个缺陷"
+            "要红成一句能照着修的话",
+        target="docs/BENCHMARK.md",
+        old="| 0.85 | 31.02 | 32.08 | 171 |",
+        new="| 0.85（对照档） | 31.02 | 32.08 | 171 |",
+        tests=["tests/test_ga_gap_table.py"],
+    ),
 ]
 
 

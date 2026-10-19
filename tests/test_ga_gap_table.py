@@ -489,3 +489,169 @@ def test_pa_is_insensitive_to_the_threshold():
     assert worst <= 0.05, (
         "[%s] 的 PA 在阈值间跨度 %.2fpp —— 「PA 对阈值完全不敏感」"
         "这句话已经不成立了" % (worst_ds, worst))
+
+
+# ---------------------------------------------------------------------------
+# 5. 阈值断言不许超出采样范围
+# ---------------------------------------------------------------------------
+# **这一组是补 v2.12.0 发布前抓到的一个真错误时加的。**
+#
+# 原先的四条守卫**全部只管表 F 的表体**：形状、加粗落在自己那行的顶点、
+# 均值行等于四行重算、PA 不敏感。表体里没有错，于是门禁全绿 ——
+# 而正文里那句「OpenSSH 与 Hadoop 在 0.70 时分别掉到 60.20 与 49.36」
+# 把 **Linux 的 60.20 写进了 OpenSSH 那一格**，且 OpenSSH **从未被扫过**
+# （五档曲线只扫了 Apache / Hadoop / HealthApp / Linux）。
+# 补测之后真值是 34.68，方向还是反的。
+#
+# 错因与 `test_not_every_dataset_peaks_at_085` 那次是**同一个形状**：
+# **只测了一部分输入空间，却给没测的那部分下了结论。**
+# 那条守的是「表里的顶点分布」，这条守的是「**正文里被断言的数据集
+# 确实出现在某张受控表里**」—— 后者正是前者看不见的那一维。
+
+_SUPP_ANCHOR = "表 G ·"
+
+
+def _csv_datasets() -> list[str]:
+    data = _load_csv()
+    return sorted({ds for (_m, ds) in data})
+
+
+def _load_pa_ga() -> dict:
+    """`docs/logparser_pa_ga.csv` -> {(method, dataset, source): row}。
+
+    这是 PA / GA / 簇数的**已发布快照**（由 `eval_logparser_pa_ga.py --csv` 生成），
+    与失分分解表是两份不同的文件 —— 后者没有 PA 列。
+    """
+    path = ROOT / "docs" / "logparser_pa_ga.csv"
+    assert path.is_file(), "找不到 %s —— 阳性对照没有可比的快照" % path
+    with path.open(encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows, "%s 没有数据行 —— 对照源空了" % path.name
+    assert {"PA", "GA", "clusters"} <= set(rows[0]), (
+        "%s 的列变了：%s" % (path.name, sorted(rows[0])))
+    return {(r["method"], r["dataset"], r["source"]): r for r in rows}
+
+
+def _swept_datasets() -> set[str]:
+    """真正跑过阈值的集合 = 表 F 的行 ∪ 补测表自己声明的数据集。
+
+    补测表（表 G）是**单列**的：它一行只有一个数据集、两个阈值，
+    所以数据集名写在标题行上，由标题行声明它被测过。
+    """
+    swept = set(_sweep_rows())
+    for line in BENCH.read_text(encoding="utf-8").splitlines():
+        # 用 `in` 而不是 `startswith`：标题行是加粗的（行首有 `**`），
+        # 而用 `startswith` 会**安静地扫到 0 行** —— 于是补测数据集被当成
+        # 「没被扫过」，判据红在一个它其实不该管的地方。
+        if _SUPP_ANCHOR in line:
+            found = {d for d in _csv_datasets() if d in line}
+            assert len(found) == 1, (
+                "补测表的标题行必须点名**恰好一个**数据集（它一行只描述一个"
+                "数据集），实际认出 %s —— %r" % (sorted(found), line))
+            swept |= found
+    return swept
+
+
+def test_threshold_claims_only_mention_swept_datasets():
+    """凡是写出「在 0.NN 时」的数据集断言，它必须真的被扫过。
+
+    判据读的是**正文里被点名的数据集**与**受控表里的行**，不是那句结论
+    本身 —— 否则把结论改短、改长、换措辞都能绕过它。
+
+    只扫表格行**之外**的正文：表 F 自己的表头里就有五个阈值字面量，
+    而那一段正文才是出错的地方。
+    """
+    swept = _swept_datasets()
+    assert len(swept) >= 4, (
+        "认出的「被扫过的数据集」只有 %d 个：%s —— 解析坏了，"
+        "这条判据会在空集上绿" % (len(swept), sorted(swept)))
+
+    offenders = []
+    for line in BENCH.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith(("|", "#", ">", "```")):
+            continue
+        if not any(t in s for t in _SWEEP_THRESHOLDS):
+            continue
+        for ds in _csv_datasets():
+            if ds in s and ds not in swept:
+                offenders.append((ds, s[:70]))
+    assert not offenders, (
+        "正文里有 %d 处「阈值断言」点名了**从未被扫过**的数据集：%s\n"
+        "要么补测（python scripts/sweep_threshold_pa_ga.py --datasets <名> "
+        "--thresholds 0.70,0.85），要么把这句话删掉 —— "
+        "**不许照抄别的数据集的格子填数**。" % (len(offenders), offenders))
+
+
+def _supplement_body() -> dict:
+    """补测表 -> {"0.70": 行, "0.85": 行}，并**判清行标签的形状**。
+
+    行标签必须是**纯阈值字面量**。第一版没管这件事，于是标签一旦写成
+    `0.85（阳性对照，须复现表 D 的 32.08）`，判据就抛 `KeyError` ——
+    那看起来像脚本崩了，不像一句判决，于是读者会去改测试而不是改文档。
+    """
+    rows = _table_after(_SUPP_ANCHOR, first_header="阈值")
+    body = {r[0].strip(): r for r in rows[2:] if r and r[0].strip()}
+    assert body, "补测表没有数据行"
+    stray = [k for k in body if k not in _SWEEP_THRESHOLDS]
+    assert not stray, (
+        "补测表的行标签必须是**纯阈值**（%s 之一），实际有 %s —— 注脚请写到"
+        "标题行或表下的散文里，别塞进行标签：行标签是键，带注脚的键取不到，"
+        "判据只会抛 KeyError" % ("/".join(_SWEEP_THRESHOLDS), stray))
+    for want in ("0.70", "0.85"):
+        assert want in body, "补测表缺 %s 那一行：%s" % (want, sorted(body))
+    return body
+
+
+def test_the_supplement_control_reproduces_table_d():
+    """补测表必须带**阳性对照**：它 0.85 那一行要复现已发布快照里的同一个值。
+
+    补测是本项目 §2.1 的要求（「任何对外数字必须来自可复现的脚本输出」）。
+    只报 0.70 那一档的话，一次跑歪的测量也能给出**结构完全正常**的数字；
+    同一份代码在 0.85 上必须复现已发布的那个值，
+    否则补测本身就不可信 —— 这条把它钉住。
+    """
+    ds = next(iter(_swept_datasets() - set(_sweep_rows())), None)
+    assert ds, "没有认出任何补测数据集"
+    body = _supplement_body()
+
+    # 对照源是 `docs/logparser_pa_ga.csv`（PA / GA / 簇数都在那里）。
+    # **不能**用 `ga_gap_decomposition.csv` —— 它是失分分解表，压根没有 PA 列，
+    # 而「解析不到那一列」会抛 KeyError，看起来像对账失败。
+    pa_ga = _load_pa_ga()
+    want = pa_ga[("ours", ds, "content")]
+    row = body["0.85"]
+    for j, field in ((1, "PA"), (2, "GA")):
+        got = _cell_number(row[j].replace("**", ""))
+        real = float(want[field].rstrip("%"))
+        assert got == pytest.approx(real, abs=0.005), (
+            "补测的 %s 0.85 %s = %s，已发布快照里是 %.2f —— 阳性对照不成立，"
+            "说明这次补测与已发布数字不是同一套口径，整张补测表都不能用"
+            % (ds, field, row[j], real))
+    assert _cell_number(row[3].replace("**", "")) == int(want["clusters"]), (
+        "补测的 %s 0.85 簇数写 %s，已发布快照里是 %s —— 同上"
+        % (ds, row[3], want["clusters"]))
+
+
+def test_the_supplement_does_not_help_openssh():
+    """文里那句「OpenSSH 换成 0.70 也追不上」必须真的成立。
+
+    这是**被写错过一次的那句话**：原文说 OpenSSH 在 0.70 掉到 60.20，
+    而 60.20 是 Linux 的值。补测之后 34.68 仍然远低于 Drain3 的 70.67 ——
+    结论没变，**数是错的**。所以这条不只守数值，还守着这句话的方向：
+    「0.70 追不上」要求 0.70 的 GA **更接近** Drain3 而不是更远。
+    """
+    ds = "OpenSSH"
+    swept = _swept_datasets()
+    assert ds in swept, "OpenSSH 不在被扫过的集合里：%s" % sorted(swept)
+    body = _supplement_body()
+    at70 = _cell_number(body["0.70"][2].replace("**", ""))
+    at85 = _cell_number(body["0.85"][2].replace("**", ""))
+    drain3 = float(_load_csv()[("drain3", ds)]["GA"].rstrip("%"))
+
+    assert at70 - at85 < 5.0, (
+        "OpenSSH 在 0.70（%.2f）与 0.85（%.2f）之间差 %.2fpp —— "
+        "「换成 0.70 也追不上」这句话需要重写" % (at70, at85, at70 - at85))
+    assert at70 < drain3, (
+        "OpenSSH 在 0.70 的 GA %.2f 已经不低于 Drain3 的 %.2f —— "
+        "这句话也不成立了" % (at70, drain3))
