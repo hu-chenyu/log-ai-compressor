@@ -186,6 +186,42 @@ class TestAnalyzeJob:
         assert client.post(f"/api/jobs/{r.json()['job_id']}/cancel"
                            ).json()["cancelled"] is True
 
+    def test_progress_stops_after_cancel(self):
+        """取消之后 `_progress_cb` 必须**不再发事件**。
+
+        **这一条以前是被 `test_cancel` 顺带覆盖的，而那是一个竞态。**
+        `test_cancel` 拿 52 行的样本日志起一个任务再立刻取消；任务通常在
+        cancel 请求到达之前就跑完了，于是 `cancel_event.is_set()` 从未为真，
+        `jobs.py` 里那行 `return` 时而覆盖时而不覆盖。
+
+        代价不是「覆盖率低一点」，而是 **README 里写死的「漏行 N / M 语句」
+        会 ±1 抖动，而 CI 拿它当红线**。实测：同一份代码在 Windows 上
+        稳定覆盖那一行、在 Linux 上不稳定；加了一批测试改变了机器负载，
+        Linux 那个数就从 158 变成 159，CI 立刻红 —— 而**测试一条都没挂**。
+
+        这里直接构造 `Job` 并把 `cancel_event` 置位，覆盖就是确定的，
+        与平台、与机器负载、与任务跑多快都无关。
+        """
+        from log_ai_compressor.web.jobs import Job
+
+        job = Job(mode="text", payload={})
+        job.cancel_event.set()
+        job._progress_cb({"lines": 4096, "phase": "parsing"})
+        assert job.queue.empty(), "取消之后还在发进度事件"
+
+    def test_progress_is_emitted_before_cancel(self):
+        """上一条的**对照**：没取消时进度事件必须照发。
+
+        只有「取消后不发」而没有「不取消照发」，那把 `_progress_cb`
+        整个改成空函数也能让上一条变绿 —— 而它同时会打掉前端进度条。
+        """
+        from log_ai_compressor.web.jobs import Job
+
+        job = Job(mode="text", payload={})
+        job._progress_cb({"lines": 4096, "phase": "parsing"})
+        assert not job.queue.empty(), "没取消时进度事件被吞了"
+        assert job.queue.get_nowait()["lines"] == 4096
+
     def test_unknown_job_404(self, client):
         assert client.get("/api/jobs/deadbeef").status_code == 404
 
