@@ -142,7 +142,10 @@ python scripts/build_repro.py --verify   # 不用 python -m build（那个每次
 sha256sum dist/*
 
 # 3. 先传 PyPI —— 必须在推 tag 之前
-python -m twine upload dist/*
+#    **按完整文件名钉死这两个，不要 `dist/*`**
+python -m twine upload \
+  dist/log_ai_compressor-${VERSION}-py3-none-any.whl \
+  dist/log_ai_compressor-${VERSION}.tar.gz
 
 # 4. 再打 tag、推 tag —— 这一步会触发 Registry 发布
 git tag -a vX.Y.Z -m "..."
@@ -151,6 +154,13 @@ git push origin vX.Y.Z
 # 5. 最后建 GitHub Release，挂同一对产物
 # 6. 用公开 API 逐条核实，不看页面渲染
 ```
+
+- **上传的文件名要写全，不要 `dist/*`。** `dist/` 是累积的 —— 本仓库实测
+  一次发布后那里躺着 2.11.1 到 2.12.1 共 12 个文件。`twine upload dist/*`
+  会把历史版本一起传，而 PyPI 对**已存在的版本**直接报错，整条命令失败；
+  更糟的是它失败在**第二个**文件上，于是**新版也可能没传上去**，而输出
+  停在「上传了 1 个」附近 —— 看起来像成功过。同理，任何脚本从 `dist/`
+  里挑产物都要**按完整文件名钉死对象**，不要 `glob(...)[0]`。
 
 - **先 PyPI、后 tag。** 推 tag 会触发 `.github/workflows/publish-mcp.yml`，
   而 Registry **会校验清单里那个版本在 PyPI 上确实存在**。顺序反了，
