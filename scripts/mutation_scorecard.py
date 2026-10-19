@@ -913,6 +913,23 @@ MUTATIONS: List[Mutation] = [
             '        pass  # 变异：作用域退回整份文件\n',
         tests=["tests/test_sast_gate.py"],
     ),
+    # ---- 取消之后的进度事件（v2.11.6 批4） -------------------------
+    Mutation(
+        id="web-jobs/progress-emitted-after-cancel",
+        why="`_progress_cb` 不再看取消标记。取消之后前端还在收进度事件 —— "
+            "而这一行**过去只被一个竞态顺带覆盖**：test_cancel 拿 52 行的"
+            "样本日志起任务再立刻取消，任务通常在 cancel 到达前就跑完了，"
+            "于是 `cancel_event.is_set()` 从未为真。后果不是「覆盖率低一点」，"
+            "而是 **README 里写死的「漏行 N / M 语句」会 ±1 抖动，"
+            "而 CI 拿它当红线**。实测：加了一批测试改变机器负载后，"
+            "ubuntu-3.12 的 158 变成 159，CI 立刻红 —— 而测试一条都没挂。"
+            "现在有两条确定性的测试（取消后不发 / 未取消照发）钉住它",
+        target="log_ai_compressor/web/jobs.py",
+        old="        if self.cancel_event.is_set():\n            return\n"
+            "        self._emit(\"progress\", **(info or {}))",
+        new="        self._emit(\"progress\", **(info or {}))",
+        tests=["tests/test_web.py"],
+    ),
 ]
 
 
