@@ -247,7 +247,7 @@ jobs:
         run: python scripts/perf_gate.py
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.os }}-${{ matrix.python }}
           path: coverage.xml
