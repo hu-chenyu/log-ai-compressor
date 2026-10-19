@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 20         # 核心层测试只要十几秒，卡住说明出了问题
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
