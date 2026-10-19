@@ -90,7 +90,7 @@ API，目标 SHA 换成「被合并分支上的提交」就回 404 —— 报错
    附件字节与 PyPI 上的完全一致（抽查 8/8 一致），27 个 Release 的正文与
    发布日期已离线备份。
 
-#### 仓库已重建：旧仓库已删除
+#### 仓库已重建：旧仓库已转私有
 
 第一条那条路实测走不通：Support 的工单提交端点回 **422**，正文写着
 "To use the GitHub support portal, you must enable cookies for github.com,
@@ -114,19 +114,28 @@ help.github.com, and support.github.com in your browser." ——
 | 推送顺序 | **先推 33 个 tag、再推 main** —— tag 推的时候仓库还是空的，没有 `.github/workflows`，所以一个工作流都没被触发（否则 `publish-mcp.yml` 会对 33 个 tag 各跑一次） |
 
 **唯一留下的痕迹**：GitHub 的 Release API 不允许回填 `published_at`，
-所以那 27 个 Release 页面上的**发布日期统一成了重建日**。
+所以那 27 个 Release 页面上的**发布日期统一成了重建当天**
+（API 返回的值是 `2026-10-19` UTC）。
 
 * **权威时间线在 PyPI，没有被动过**：31 个版本的上传时间仍是
   2026-10-06 → 2026-10-19（7 个日期），可用 PyPI API 逐个核对；
   本文件的版本日期与之一致。
+* **MCP Registry 的条目也仍然有效**：它按**仓库 URL + PyPI 包名**引用
+  （没有 commit SHA、没有附件 URL），重建后这两项都没变。
 * **tag 的日期没有变**（tag 对象是原样推回去的）。
-* 旧仓库在 GitHub 侧保留 **90 天可恢复窗口**；27 个 Release 的正文、
-  发布日期与 54 个附件字节另有离线备份。
-* MCP Registry 的条目按**仓库 URL + PyPI 包名**引用（没有 commit SHA、
-  没有附件 URL），因此重建后仍然有效。
+* 旧仓库（已改名 `log-ai-compressor-legacy`）**已转私有** —— 它的内容
+  （那 330 笔旧提交、三个 PR 页面、旧 SHA）**对公开不可达**：
+  匿名访问返回 404。**它没有删**：删仓库需要 `delete_repo` scope 的
+  token（classic PAT 缺这个 scope 会回 403 "Must have admin rights"），
+  而 GraphQL 里**也没有** `deleteRepository` 这个 mutation（自省实测：
+  34 个 delete/remove 类 mutation 里没有它）。留着它还有另一个用处 ——
+  **反悔时的退路**：它的 27 个 Release、54 个附件与 90 天可恢复窗口都在。
+* 27 个 Release 的正文、发布日期与 54 个附件字节另有离线备份。
 
 重建之后，重写前那 330 笔提交不再有任何公开入口：三个已合并 PR 的页面
-连同它们的 diff 一起消失，旧 SHA 直读也回到 404。
+连同它们的 diff 一起消失（`GET /pulls/1` → 404、
+`GET /git/refs/pull/1/head` → 404），旧 SHA 直读也读不出来
+（`GET /commits/<旧 SHA>` → 422：该提交在新仓库里不存在）。
 
 #### 门禁状态
 
