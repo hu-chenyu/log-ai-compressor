@@ -566,8 +566,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 43 条才是真该留下的。",
-        new="剩下 44 条才是真该留下的。",
+        old="剩下 44 条才是真该留下的。",
+        new="剩下 45 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
@@ -818,6 +818,100 @@ MUTATIONS: List[Mutation] = [
         old="逐数据集：PA 上 6 胜 4 负，GA 上 4 胜 6 负。",
         new="逐数据集：PA 上 6 胜 4 负，GA 上 3 胜 7 负。",
         tests=["tests/test_logparser_pa_ga_table.py"],
+    ),
+    # ---- GA 失分分解（v2.11.6 批1） ---------------------------------
+    Mutation(
+        id="ga-gap/bucket-silently-dropped",
+        why="分解表的三摊里吞掉一摊（未解析）。**没有任何一行会红** —— "
+            "百分比照印，只是加起来不到 100%，而 97% 和 100% 在表格里"
+            "长得几乎一样。这张表会被当成「GA 为什么低」的答案写进文档，"
+            "所以漏掉的那一摊必须由恒等式守住，而不是靠人加一下",
+        target="scripts/diagnose_ga_gap.py",
+        old="    unparsed = total_lines - len(pred_group)",
+        new="    unparsed = 0   # 把未解析那摊吞掉了",
+        tests=["tests/test_diagnose_ga_gap.py"],
+    ),
+    Mutation(
+        id="ga-gap/condition-b-boundary-moved",
+        why="条件 (b) 的边界从「不等于全集」改成「大于全集」。分解表与 "
+            "**被发布那个 GA** 不再是同一个量，而两边都照常输出正常数字 —— "
+            "只有那条逐位对等的断言抓得住。这正是本项目记过多次的形状："
+            "判据指错了对象，却看起来完全正常",
+        target="scripts/diagnose_ga_gap.py",
+        old="        if len(log_ids) != gt_total[only]:\n"
+            "            over_split += len(log_ids)\n"
+            "            continue",
+        new="        if len(log_ids) > gt_total[only]:\n"
+            "            over_split += len(log_ids)\n"
+            "            continue",
+        tests=["tests/test_diagnose_ga_gap.py"],
+    ),
+    Mutation(
+        id="sweep/reaches-in-and-changes-the-default",
+        why="阈值扫描脚本改成直接改 `CLUSTER_SIMILARITY_THRESHOLD` 再建"
+            "不带参数的聚类器 —— 这是 AGENTS.md §2.3 明令禁止的那件事"
+            "（对着评测集调参），而脚本读起来仍然完全正常：它照旧打印"
+            "一张漂亮的表。产品默认值被顺手改掉，没有任何一行会红，"
+            "下一个看那张表的人还会以为那个默认本来就存在",
+        target="scripts/sweep_threshold_pa_ga.py",
+        old="    clusterer = ErrorClusterer(similarity_threshold=threshold)",
+        new="    import log_ai_compressor.core.clustering as _C\n"
+            "    _C.CLUSTER_SIMILARITY_THRESHOLD = threshold\n"
+            "    clusterer = ErrorClusterer()",
+        tests=["tests/test_diagnose_ga_gap.py"],
+    ),
+    # ---- GA 失分分解的文档表（v2.11.6 批2） --------------------------
+    Mutation(
+        id="ga-gap/table-cell-drifts-from-csv",
+        why="「结果四·五」表 D 里的一格与 docs/ga_gap_decomposition.csv "
+            "对不上。这与 v2.9.9 那次事故**完全同形**：改了聚类、基准数字"
+            "变了、表格原地不动、全部门禁绿着。而这张表是本项目对"
+            "「能不能全胜」这个问题的**唯一**回答 —— 它错了，问题就"
+            "变成了一个看起来有答案的错误答案",
+        target="docs/BENCHMARK.md",
+        old="| Apache | 99.31% | 100.00% | 0.0% | — | 100.0% | — | 360 |",
+        new="| Apache | 99.91% | 100.00% | 0.0% | — | 100.0% | — | 360 |",
+        tests=["tests/test_ga_gap_table.py"],
+    ),
+    Mutation(
+        id="ga-gap/zero-loss-printed-as-zero-percent",
+        why="把「零失分」写成 `0.0%`。Apache 的 Drain3 是 GA 100.00%，"
+            "分母为 0，`_pct()` 返回 0.0 —— 而表格里那两格现在写的是"
+            "破折号。写成 0.0% 会被读成「失分全在另一桶」，"
+            "**而真相是根本没有失分**。这类格最容易被后来的人"
+            "「补齐」成数字，而表格看起来完全正常",
+        target="docs/BENCHMARK.md",
+        old="| Apache | 99.31% | 100.00% | 0.0% | — | 100.0% | — | 360 |",
+        new="| Apache | 99.31% | 100.00% | 0.0% | 0.0% | 100.0% | 0.0% | 360 |",
+        tests=["tests/test_ga_gap_table.py"],
+    ),
+    Mutation(
+        id="ga-gap/bucket-share-denominator-swapped",
+        why="两桶占比的分母从**失分行数**换成**标注行数**。同一批分子，"
+            "占比从 51.4% 掉到 20.0% 量级 —— 而三个百分比加起来"
+            "从 100% 变成不到 40%，**没有任何一条判据会自己发现**"
+            "「加起来不到 100」这件事，读者也不会去加。"
+            "「几乎对半」这句话会整个反过来，而表格照常排版整齐",
+        target="docs/BENCHMARK.md",
+        old="| 过合并（条件 a 失败） | 438,085 | 51.4% |",
+        new="| 过合并（条件 a 失败） | 438,085 | 20.0% |",
+        tests=["tests/test_ga_gap_table.py"],
+    ),
+    # ---- SAST 条数对账的作用域（v2.11.6 批3） -----------------------
+    Mutation(
+        id="sast/count-scope-reverted-to-whole-changelog",
+        why="把豁免条数对账的作用域从「CHANGELOG 顶格版本节」改回**整份文件**。"
+            "这看起来是简化，实际是**判据读错了对象**：v2.11.5 那一节里"
+            "写下的当时条数是历史记录（AGENTS.md §2.4 明写历史不重写），"
+            "而整文件扫会把它当成对现状的声明。于是每次基线增长，"
+            "唯一能过的改法变成篡改历史或让 CI 变红 —— 两条都是错的，"
+            "而门禁**仍然是绿的**。这条是 2026-10-19 实测撞出来的："
+            "我加豁免时它立刻把 v2.11.5 的旧数字判成了「写错」",
+        target="tests/test_sast_gate.py",
+        old='    if doc != "CHANGELOG.md":\n        return text\n',
+        new='    if doc != "CHANGELOG.md":\n'
+            '        pass  # 变异：作用域退回整份文件\n',
+        tests=["tests/test_sast_gate.py"],
     ),
 ]
 

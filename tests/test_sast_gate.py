@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -165,13 +166,51 @@ def test_real_baseline_is_valid_and_reasoned():
 _COUNT_PATTERNS = (r"剩下\s*(\d+)\s*条", r"（(\d+)\s*条豁免")
 
 
+def _current_scope(doc: str) -> str:
+    """只取**当前**版本节里写的条数。
+
+    CHANGELOG 是历史档案：AGENTS.md §2.4 明写「撤回的记录不要删，
+    历史引用刻意不重写」。而 v2.11.5 的条目里有一句
+    「新增 `docs/sast_baseline.json`（43 条豁免…）」—— 那是**当时**的条数，
+    是关于那次发布的记录，不是对现状的声明。
+
+    第一版扫**整份**文件，于是每次基线增长都要求把这两处一起改 ——
+    而唯一的改法是篡改历史记录或让 CI 变红，两条都是错的。
+    这正是本仓库记过多次的形状：**判据读到的不是它以为的那个对象**。
+
+    所以 CHANGELOG 只认顶格 `## [...]` 节；docs/DEVELOPMENT.md 是活文档，
+    全文扫。
+    """
+    text = (ROOT / doc).read_text(encoding="utf-8")
+    if doc != "CHANGELOG.md":
+        return text
+    m = re.search(r"^## \[", text, re.M)
+    assert m, "CHANGELOG.md 里找不到任何 `## [...]` 版本节"
+    nxt = re.search(r"^## \[", text[m.end():], re.M)
+    return text[m.start(): m.end() + nxt.start()] if nxt else text[m.start():]
+
+
+def test_only_the_current_changelog_section_carries_a_live_count():
+    """反过来守着上面那个作用域：顶格节里**必须**有一个条数。
+
+    只把历史排除在外是不够的 —— 那样会退化成「扫不到任何处，于是通过」。
+    """
+    scope = _current_scope("CHANGELOG.md")
+    found = []
+    for pat in _COUNT_PATTERNS:
+        found += [int(x) for x in re.findall(pat, scope)]
+    assert found, (
+        "CHANGELOG 顶格节里没有写当前豁免条数 —— 基线动了要在这里回填，"
+        "否则这条判据扫的是历史记录，等于什么都不查")
+
+
 @pytest.mark.parametrize("doc", ["docs/DEVELOPMENT.md", "CHANGELOG.md"])
 def test_documented_exemption_count_matches_the_baseline(doc):
     import re
     baseline = json.loads((ROOT / "docs" / "sast_baseline.json")
                           .read_text(encoding="utf-8"))
     want = len(baseline["entries"])
-    text = (ROOT / doc).read_text(encoding="utf-8")
+    text = _current_scope(doc)
     found = []
     for pat in _COUNT_PATTERNS:
         found += [int(x) for x in re.findall(pat, text)]

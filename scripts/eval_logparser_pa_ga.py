@@ -273,6 +273,11 @@ def run_drain(ds) -> Optional[dict]:
         "PA_correct": pa_lines,
         "GA": round(100.0 * ga, 2),
         "GA_lines": ga_lines,
+        # 私有键，不进 CSV（fieldnames 是显式列表 + extrasaction="ignore"）。
+        # 给 scripts/diagnose_ga_gap.py 做失分分解用 —— 没有它就没法把
+        # 「GA 为什么低」拆成过合并与过分裂两摊。
+        "_pred_group": pred_group,
+        "_gt_event": gt_event,
     }
 
 
