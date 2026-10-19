@@ -99,6 +99,12 @@
     },
     {
       "test_id": "B311",
+      "path": "tests/test_diagnose_ga_gap.py",
+      "count": 2,
+      "reason": "误报用途：`random.Random(seed)` 生成随机的 (地真值, 预测分组, 总行数) 三元组，为的是让「decompose 的 correct 必须逐位等于 grouping_accuracy 的命中数」这条恒等式在**大量**形状上被验证，而不是只在一个手写样例上。种子写死在 parametrize 里（1/7/13/29/101/997 与 2/8/14/30/102/998），所以失败可复现。与安全、加密、令牌生成无关。"
+    },
+    {
+      "test_id": "B311",
       "path": "tests/test_invariants.py",
       "count": 1,
       "reason": "误报用途：生成形状各异的日志夹具（乱序、混合级别、部分无戳）用的固定种子随机。与安全无关。"
