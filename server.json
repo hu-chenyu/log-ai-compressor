@@ -3,7 +3,7 @@
   "name": "io.github.hu-chenyu/log-ai-compressor",
   "title": "log-ai-compressor",
   "description": "Local log forensics: compress logs into citable evidence with root-cause confidence tiers.",
-  "version": "2.12.1",
+  "version": "2.12.2",
   "repository": {
     "url": "https://github.com/hu-chenyu/log-ai-compressor",
     "source": "github"
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "log-ai-compressor",
-      "version": "2.12.1",
+      "version": "2.12.2",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
