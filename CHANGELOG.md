@@ -132,6 +132,10 @@ help.github.com, and support.github.com in your browser." ——
   **反悔时的退路**：它的 27 个 Release、54 个附件与 90 天可恢复窗口都在。
 * 27 个 Release 的正文、发布日期与 54 个附件字节另有离线备份。
 
+> **2026-10-20 补**：这一节写的「旧仓库没有删」是**当时**的状态。
+> 后来用网页的 Danger Zone 删掉了（OAuth 凭据没有 `delete_repo` scope，
+> API 走不通）—— 实测登录后与匿名访问都返回 404。见下面「第二轮措辞审计」。
+
 重建之后，重写前那 330 笔提交不再有任何公开入口：三个已合并 PR 的页面
 连同它们的 diff 一起消失（`GET /pulls/1` → 404、
 `GET /git/refs/pull/1/head` → 404），旧 SHA 直读也读不出来
@@ -277,8 +281,9 @@ python scripts/audit_wording.py --repo /tmp/lac-remote \
 | 3 个 Release 正文命中 | 本版逐个重写并复核（v2.4.0 / v2.5.0 / v2.11.1） |
 | PyPI 上已发布的 31 个版本 | **动不了** —— PyPI 不允许覆盖已发布文件。实测 62 个已发布文件里 61 个含命中词 |
 | GitHub Release 的 54 个附件 | 与 PyPI 上的那一份同源同残留（逐字节相同） |
-| 旧仓库（已转私有） | 仍含重写前的历史；公开不可达（匿名 404），留着作退路 |
+| 旧仓库 `log-ai-compressor-legacy` | **已删除**（2026-10-20，网页 Danger Zone）。实测：登录后与匿名 `GET` 均 404，账号下只剩新仓库 |
 | 本地 bundle 备份 | 4 份，含重写前历史 —— 终态复核之后删 |
+| 重写前那 354 笔提交的 **cached view** | 已提 **Support 工单 #4880080**（2026-10-20），请 GitHub 对本仓库跑 GC。实测它们目前仍能通过 `/commits` 与 `/contents` 读出旧内容 —— 这是官方文档点名的现象，只有 GC 能消 |
 
 #### 门禁状态
 
