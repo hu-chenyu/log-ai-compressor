@@ -288,6 +288,18 @@ _MIN_BLOBS = 50
 #: 变小是好事（历史重写会清掉），变大说明有人新写进了一处。
 _WHITESPACE_SPLIT_BASELINE = 6
 
+#: 带 U+FFFD（替换字符）的历史对象数量上界（当前 91 个）。
+#:
+#: 这**不是**措辞问题 —— 那 91 个 blob 里没有一个词表里的词。它是另一类：
+#: **读出来的不是原文**。一个汉字的 3 个 UTF-8 字节被逐字节替换成 U+FFFD，
+#: 于是那句话在扫描口径下根本不存在，而门禁照样是绿的。
+#:
+#: 分布（实测）：CHANGELOG.md 72 + 变异记分卡 9 + 门禁文件 3 + 另 4 个文件各 1，
+#: 其中 **3 个是提交对象**（3 笔提交信息里各有一处坏字）。
+#: 上界不是等号：变小是好事（历史重写会清掉），变大说明有人新写进了一处。
+#: 口径是**可达** blob —— CI 上是浅对象库，看不到不可达的那些，看到的只会更少。
+_FFFD_HISTORY_BASELINE = 91
+
 #: GitHub API 的仓库地址（面 6 用）
 _RELEASES_API = ("https://api.github.com/repos/hu-chenyu/log-ai-compressor"
                  "/releases?per_page=100")
@@ -428,6 +440,21 @@ def _decode_text(raw: bytes) -> str:
         return raw.decode("gb18030")
     except UnicodeDecodeError:
         return raw.decode("utf-8", errors="replace")
+
+
+def _replacement_chars(text: str) -> list[int]:
+    """text 里 U+FFFD（替换字符）的下标。
+
+    为什么单独查它：**解码失败时每个坏字节会变成一个 U+FFFD**，
+    而一个 U+FFFD 能把一个词**劈成两半** —— 于是「这个词在文件里」
+    这件事在扫描口径下彻底消失，而门禁还是绿的。
+
+    这是「0 命中」最阴的一种：不是扫不到，是**读到的不是原文**。
+    本仓库实测到过 6 处，形态是**一个汉字的 3 个 UTF-8 字节被逐字节替换**
+    （例：注释里的一句中文变成了「什么都<U+FFFD><U+FFFD><U+FFFD>没有」）。
+    原文不可考 —— 逐版本比对过，那几个文件的**每一版**都已经是坏的。
+    """
+    return [i for i, c in enumerate(text) if c == "\ufffd"]
 
 
 # ---------------------------------------------------------------------------
@@ -1027,7 +1054,7 @@ def test_non_utf8_text_files_are_still_scanned():
         "（要么夹具被删了，要么解码兜底把这条通道吃掉了）")
     for rel, text in work:
         assert text.strip(), "%s 解不出文本 —— GB18030 兜底没生效" % rel
-        assert "�" not in text, (
+        assert "\ufffd" not in text, (
             "%s 解出来带替换字符 —— 降级路径被用上了，"
             "这个文件的编码门禁读不懂" % rel)
 
@@ -1037,6 +1064,81 @@ def test_non_utf8_text_files_are_still_scanned():
         "历史里一个非 UTF-8 的 blob 都没有 —— 历史侧的编码通道形同虚设")
     for sha in _FALLBACK_BLOBS:
         assert texts.get(sha), "blob %s 走了兜底却没读出文本" % sha[:10]
+
+
+def test_worktree_has_no_replacement_characters():
+    """工作区里不许有 U+FFFD —— 它是「读到的不是原文」的指纹。
+
+    这条守的是**另一类**缺陷。前面那几条守的是「词表里的词跑进了文件」；
+    这条守的是「文件里的字**读不出来**」。两者的症状在扫描结果上长得
+    **一模一样**（都是 0 命中），但后者更危险：门禁是绿的，而人眼看到的是
+    一句读不通的中文 —— 2026-10 实测到的 6 处里有 5 处在注释与 docstring 里。
+
+    范围是**全部被跟踪的文本文件**，不只是文档：只扫文档的话，源码注释里
+    的坏字就永远没人管（那 5 处里有 4 处在 `scripts/` 与 `tests/` 下）。
+    """
+    paths = _tracked_paths()
+    hits = []
+    scanned = 0
+    skipped_binary = 0
+    scanned_paths = []
+    for rel in paths:
+        raw = (ROOT / rel).read_bytes()
+        if b"\0" in raw[:8000]:
+            skipped_binary += 1
+            continue          # 二进制 —— 与 _read_text 的口径一致
+        scanned += 1
+        scanned_paths.append(rel)
+        if _replacement_chars(_decode_text(raw)):
+            hits.append(rel)
+
+    # **先证真**：探测器本身要能抓到东西 —— 否则「工作区 0 处」可能只是
+    # 「探测器恒返回空」。报数为 0 与报数为错在输出里长得一样。
+    assert _replacement_chars("好\ufffd坏"), (
+        "U+FFFD 探测器什么都抓不到 —— 它形同虚设，"
+        "下面那条「工作区 0 处」也就没有意义了")
+    assert not _replacement_chars("好字无坏"), (
+        "探测器把没有替换字符的文本判成了有 —— 它的判据反了")
+    # **逐个对账**：读过的 + 跳过的 = 列出来的。少读一个文件却仍然报
+    # 「0 处」—— 那是**什么都没扫**，而它看起来像「扫过了、没问题」。
+    assert scanned + skipped_binary == len(paths), (
+        "列出来的 %d 个文件里，只读了 %d 个、跳过 %d 个 —— 对不上："
+        "有的文件根本没被读，而报告仍然会说「工作区 0 处」"
+        % (len(paths), scanned, skipped_binary))
+    assert scanned >= _MIN_FILES, (
+        "只读到 %d 个文本文件 —— 扫描面塌了（不是仓库的问题，是读取坏了）"
+        % scanned)
+    # **范围不许缩水**：这两个目录是那 5 处坏字真正待着的地方。
+    # 少扫一个目录就少一半，而报告仍然会说「工作区 0 处」。
+    for prefix in ("scripts/", "tests/"):
+        assert any(p.startswith(prefix) for p in scanned_paths), (
+            "读到的文件里一个 %s 下的都没有 —— 范围缩了，"
+            "而下面的「0 处」不再说明任何事" % prefix)
+    assert not hits, (
+        "工作区有文件里带 U+FFFD（读出来的不是原文）：\n"
+        + "\n".join("  " + r for r in hits[:20]))
+
+
+def test_history_replacement_characters_stay_within_baseline():
+    """历史里带 U+FFFD 的对象不得超过基线（当前 91 个）。
+
+    上界不是等号：历史重写会让它变小（变小是好事），而**变大**说明有人
+    新写进了一处坏字 —— 那要红。
+
+    这 91 个对象里**没有一个词表里的词**，所以它不是措辞问题；它是
+    「读出来不是原文」。分布：CHANGELOG.md 72 + 变异记分卡 9 + 门禁文件 3
+    + 另 4 个文件各 1，**其中 3 个是提交对象**（3 笔提交信息里各有一处坏字）。
+
+    工作区那 6 处已在 v2.12.5 修掉，历史里的这些改不动了（重写历史不减少
+    已发布的暴露面，见 CHANGELOG 第七轮）—— 于是这里只做**上界**，把它钉住，
+    不让它悄悄长大。
+    """
+    hits = [sha for sha, text in _all_blob_texts().items()
+            if _replacement_chars(text)]
+    assert len(hits) <= _FFFD_HISTORY_BASELINE, (
+        "带 U+FFFD 的历史对象有 %d 个，超过基线 %d —— "
+        "要么有人新写进了一处坏字，要么基线该更新了（先看清楚再改）"
+        % (len(hits), _FFFD_HISTORY_BASELINE))
 
 
 def test_forbidden_table_entries_are_real_words():

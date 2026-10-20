@@ -6,7 +6,7 @@
 ----------
 零构建的前端没有打包器替你做 tree-shaking，写完删掉或改坏一个函数，
 不会有任何报错 —— 只会静静躺在 35KB 的 app.js 里。Python 侧有 ruff 的
-F401/F811 兜着，前端这边什么都���没有。
+F401/F811 兜着，前端这边什么都没有。
 
 判定口径（宁可漏报不可误报）：
 - JS：顶层 `function NAME` / `const NAME =` / `class NAME`，

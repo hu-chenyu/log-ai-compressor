@@ -1107,6 +1107,41 @@ MUTATIONS: List[Mutation] = [
         new="",
         tests=["tests/test_no_job_wording.py"],
     ),
+    # ---- U+FFFD 这条（2026-10，v2.12.5 批） ------------------------------
+    Mutation(
+        id="wording/replacement-char-detector-returns-nothing",
+        why="让 U+FFFD 探测器恒返回空 —— 于是「工作区 0 处」与「历史不超过基线 91」"
+            "这两条断言**全都变成空跑**，而它们守的恰恰是「读出来的不是原文」"
+            "那个缺口：一个汉字的 3 个字节被逐字节替换之后，那句话在扫描口径下"
+            "根本不存在，而门禁还是绿的。报数为 0 与报数为错在输出里长得一模一样 ——"
+            "**探测器恒返回空**与「真的没有」无法区分。这条守的是探测器自己的牙齿。",
+        target="tests/test_no_job_wording.py",
+        old='    return [i for i, c in enumerate(text) if c == "\\ufffd"]',
+        new="    return []",
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/replacement-char-worktree-scan-skipped",
+        why="把工作区那条扫描整个跳过 —— 于是「工作区 0 处」变成**空跑**："
+            "一个文件都没读，而报告仍然说「0 处」。**报「检查通过」但其实"
+            "什么都没扫**的门禁，比没有门禁更糟 —— 没有门禁，你知道那里没检查。",
+        target="tests/test_no_job_wording.py",
+        old="    for rel in paths:\n        raw = (ROOT / rel).read_bytes()",
+        new="    for rel in []:\n        raw = (ROOT / rel).read_bytes()",
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/replacement-char-scan-narrowed-to-docs",
+        why="把扫描范围缩到只剩文档 —— 于是源码注释与测试里的坏字**不再有人管**。"
+            "这一类是实测踩过的：5 处坏字里有 4 处在 `scripts/` 与 `tests/` 下，"
+            "只扫文档的话它们一条都抓不到，而门禁照样报「工作区 0 处」。"
+            "只测「工作区 0 处」而不测**扫的是不是全部**，这条断言就是空的。",
+        target="tests/test_no_job_wording.py",
+        old="    for rel in paths:\n        raw = (ROOT / rel).read_bytes()",
+        new=('    for rel in [p for p in paths if p.startswith("docs/")]:\n'
+             "        raw = (ROOT / rel).read_bytes()"),
+        tests=["tests/test_no_job_wording.py"],
+    ),
 ]
 
 

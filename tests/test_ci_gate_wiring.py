@@ -37,7 +37,7 @@ def _steps() -> list[tuple[str, dict]]:
     判据于是在读「这个文件怎么谈论某个词」，而不是「这个步骤实际配了什么」。
 
     同族的三个错都犯过一遍：`localtime` 撞上了 docstring、
-    `clean_regex_content` 撞上了「为什么不���它」的说明、
+    `clean_regex_content` 撞上了「为什么不管它」的说明、
     `continue-on-error` 撞上了 CI 注释。
     **判据要认结构，不是认文本。**
     """
@@ -198,7 +198,7 @@ def test_every_contract_entry_is_a_real_gate_step():
 def test_dependency_gate_is_not_reported_as_a_bare_bare_list():
     """依赖扫描那一步必须带 --self-check，而不是只跑一次裸扫。
 
-    这条与上面 `test_dep_gate_runs_self_check` 有意重复：上面那���钉
+    这条与上面 `test_dep_gate_runs_self_check` 有意重复：上面那条钉
     「存在」，这里钉「README 承诺的那道就是带自检的那道」——
     README 与 FAQ 写的都是「依赖漏洞扫描」，而「裸扫」和「带阳性对照
     的扫」是两种不同的承诺。

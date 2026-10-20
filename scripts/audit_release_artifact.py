@@ -27,7 +27,7 @@
 用法
 ----
     python scripts/audit_release_artifact.py                 # 用 pyproject 里的版本号
-    python scripts/audit_release_artifact.py --version 2.12.4
+    python scripts/audit_release_artifact.py --version X.Y.Z
     python scripts/audit_release_artifact.py --dist dist
 
 退出码：0 = 通过；1 = 产物里有禁用词；2 = 产物缺失或跑不起来。

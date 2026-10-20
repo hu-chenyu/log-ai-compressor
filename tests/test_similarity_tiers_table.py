@@ -170,7 +170,7 @@ class TestTierTableSummaryIsDerived:
                           (deliv_line, "delivered_coverage")):
             wins = self._exclusive_wins(measured, key)
             cells = [c.strip() for c in line.strip("|").split("|")]
-            # 单元格里写的是 `**8 / 10**` 或裸的 `0` / `5` —— 取分子那���个数
+            # 单元格里写的是 `**8 / 10**` 或裸的 `0` / `5` —— 取分子那个个数
             nums = [int(re.search(r"\d+", c).group()) for c in cells[1:] if c]
             assert nums == [wins[t] for t in TIERS], (
                 f"汇总行写着 {nums}，从 CSV 重算是 "

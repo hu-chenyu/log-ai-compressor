@@ -72,7 +72,7 @@ def test_omit_list_matches_the_recorded_decision():
 def test_every_omitted_path_really_exists():
     """排除一个不存在的文件 = 空转规则，看起来做了事其实没做。"""
     for rel, why in _EXPECTED_OMIT.items():
-        assert (ROOT / rel).is_file(), f"omit 里��� {rel} 不存在（{why}）"
+        assert (ROOT / rel).is_file(), f"omit 里的 {rel} 不存在（{why}）"
 
 
 def test_the_exclusion_is_actually_visible_to_readers():
