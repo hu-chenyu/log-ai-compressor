@@ -1066,15 +1066,34 @@ MUTATIONS: List[Mutation] = [
             "一模一样：**探测器恒返回空**与「真的没有」无法区分。"
             "这条守的是探测器自己的牙齿。",
         target="tests/test_no_job_wording.py",
-        old=("    for w in FORBIDDEN:\n"
-             "        for m in re.finditer(_pattern(w), flat):\n"
-             "            a = index[m.start()]\n"
-             "            b = index[m.end() - 1]\n"
-             "            if all(ch.isspace() for ch in text[a + 1:b]):\n"
-             "                out.append(w)\n"
-             "                break\n"
+        old=("    out = []\n"
+             "    for w in FORBIDDEN:\n"
+             "        if \"\".join(w.split()) not in cands:\n"
+             "            continue\n"
+             "        for m in re.finditer(_flex_pattern(w), text):\n"
+             "            span = text[m.start():m.end()]\n"
+             "            if span == w:                       # 字面 —— 红线会报它\n"
+             "                continue\n"
+             "            if not any(ch.isspace() for ch in span):   # 变体，不是「被拆开」\n"
+             "                continue\n"
+             "            out.append(w)\n"
+             "            break\n"
              "    return out"),
         new="    return []",
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/whitespace-split-literal-not-excluded",
+        why="去掉「字面命中不算被拆开」那一条 —— 于是**字面出现**也被算进"
+            "「被拆开的词」里。第一版就是这么错的（`all([])` 对空串恒真），"
+            "后果是那个数字不再是「缺口的大小」，而是「字面命中 + 拆开命中」"
+            "的混账：一旦历史上出现一处字面命中，基线就会被调高去**掩护**它。"
+            "2026-10 的外部复核把这一条复现了 —— 判据是对的，钉它的测试"
+            "（`字面必须返回 []`）也是新加的。",
+        target="tests/test_no_job_wording.py",
+        old=("            if span == w:                       # 字面 —— 红线会报它\n"
+             "                continue\n"),
+        new="",
         tests=["tests/test_no_job_wording.py"],
     ),
 ]

@@ -110,20 +110,23 @@ def _is_binary(raw: bytes) -> bool:
     return b"\0" in raw[:8000]
 
 
-def _releases(repo: Path) -> list[tuple[str, str]]:
+def _releases(repo: Path, headers: dict) -> list[tuple[str, str]]:
     """GitHub 上每个 Release 的**标题与正文**（面 6）。
 
     这两个字段**不在 git 里** —— 它们只存在于 GitHub 的数据库上。2026-10 的
     复核在这里抓到一处漏网：某个 Release 的**标题**带着违禁词，而它的正文与
     CHANGELOG 对应小节都已经改过了（只改了正文，忘了标题）。
 
-    走匿名 API（公开仓库够用）；拿不到就**报错**，不静默跳过 ——
+    **请求头由门禁给**（`gate._api_headers()`）—— 那里有 token 就带上：
+    匿名的额度是每 IP 每小时 60 次，共享出口 IP 很容易撞上限，撞了门禁与
+    审计都会**红**，而红的原因与仓库无关（实测踩过）。
+
+    拿不到就**报错**，不静默跳过 ——
     「扫了 0 个 Release 却报通过」是最没用的结论。
     """
     url = ("https://api.github.com/repos/%s/releases?per_page=100"
            % _repo_slug(repo))
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "lac-wording-audit", "Accept": "application/vnd.github+json"})
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             data = json.loads(r.read().decode("utf-8"))
@@ -279,7 +282,7 @@ def audit(repo: Path, gate) -> dict:
             add("ref_name", w, name, snippet)
 
     # ---- 面 6：GitHub 上的 Release 标题与正文（不在 git 里）----
-    for name, text in _releases(repo):
+    for name, text in _releases(repo, gate._api_headers()):
         for w, lineno, snippet in _matches(text, words, pattern):
             add("release", w, name, snippet)
 

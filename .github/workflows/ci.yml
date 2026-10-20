@@ -130,6 +130,13 @@ jobs:
         run: python scripts/build_repro.py --verify
 
       - name: Unit & integration tests with coverage
+        # 措辞门禁的面 6 要拉 GitHub 的 Release 列表。**匿名的额度是每个 IP
+        # 每小时 60 次** —— 共享出口 IP（CI runner、公司网络）很容易撞上限，
+        # 撞了门禁就红，而**红的原因与仓库无关**（实测踩过：一次自测连续
+        # 拉了几十次就把额度烧光，门禁当场红成「读不到 Release 列表」）。
+        # 有 token 就用它：额度是 5000 次/小时。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # 用 python 承载这段逻辑，而不是 shell：
         # Windows runner 的默认 shell 是 pwsh，`if !` / `2>/dev/null` 这类
         # bash 语法会直接 ParserError（run #159 就栽在这里）。`shell: python`

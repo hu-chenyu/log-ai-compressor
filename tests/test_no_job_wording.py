@@ -291,6 +291,14 @@ _WHITESPACE_SPLIT_BASELINE = 6
 _RELEASES_API = ("https://api.github.com/repos/hu-chenyu/log-ai-compressor"
                  "/releases?per_page=100")
 
+#: GitHub API 的 token —— **环境里有就用**。匿名的额度是**每个 IP 每小时
+#: 60 次**，而面 6 每跑一次门禁就要拉一次 Release 列表；共享出口 IP
+#: （CI runner、公司网络）很容易撞上限，于是门禁会**红** —— 那是诚实的红，
+#: 但红的原因与仓库无关。实测踩过：一次自测连续拉了几十次就把额度烧光，
+#: 门禁当场红成「读不到 Release 列表」。
+_TOKEN = (os.environ.get("GITHUB_TOKEN")
+          or os.environ.get("GH_TOKEN") or "")
+
 
 def _is_ascii_word(word: str) -> bool:
     """这个词是不是纯 ASCII（拉丁字母 / 数字 / 常见符号）。
@@ -487,8 +495,18 @@ def _read_blobs(shas: list[str], repo: Path | None = None) -> dict[str, str]:
         pos += size + 1
         if b"\0" in body[:8000]:
             continue          # 二进制：不当文本扫（与 _read_text 同口径）
+        try:
+            body.decode("utf-8")
+        except UnicodeDecodeError:
+            # 非 UTF-8 → 走了 GB18030 兜底。**记下来**：那是「这条通道真的
+            # 被走过」的证据，没有它，这条通道可以悄悄消失而门禁全绿。
+            _FALLBACK_BLOBS.add(sha)
         texts[sha] = _decode_text(body)
     return texts
+
+
+#: 走了解码兜底（非 UTF-8 → GB18030）的 blob —— 那条通道存在过的证据。
+_FALLBACK_BLOBS: set[str] = set()
 
 
 #: 全部可达 blob 的正文（**只读一次**）。面 3 与「被拆开的词」那条断言
@@ -504,52 +522,85 @@ def _all_blob_texts() -> dict[str, str]:
     return _BLOB_TEXTS
 
 
-def _flatten(text: str) -> tuple[str, list[int]]:
-    """去掉所有空白后的文本，以及每个保留字符在**原文**里的下标。
+def _flatten(text: str) -> str:
+    """去掉所有空白后的文本（**只用来做候选发现**）。"""
+    return "".join(text.split())
 
-    下标表是必需的：去掉空白之后位置全乱了，而「命中在哪一行」还得报准。
+
+def _flex_pattern(word: str) -> str:
+    """词的「允许词内出现空白」正则。
+
+    - **每个字符之间**允许任意空白（`\\s*`）；
+    - 词条**本身**的空白位置也用 `\\s*` 填充 —— 所以那 11 条**自带空格**的
+      词条（模型名那一族）也能匹配折行形式（写成字面空格就匹配不到，
+      那是第一版的第二个缺陷）；
+    - 纯 ASCII 的词保留**整词边界**（否则那个两字母缩写会撞进 `X…Y`
+      这种更长的词里）。
+
+    **这里刻意不举具体词条的例子** —— 本文件也在扫描范围内，例子一写出来，
+    门禁就会先把自己判红（2026-10 栽过两次：一次在 docstring 里引用了
+    一整句被清掉的话，一次就在这个函数的注释里）。
     """
-    chars: list[str] = []
-    index: list[int] = []
-    for i, ch in enumerate(text):
-        if ch.isspace():
-            continue
-        chars.append(ch)
-        index.append(i)
-    return "".join(chars), index
+    import re
+    parts = [r"\s*" if c.isspace() else re.escape(c) for c in word]
+    body = r"\s*".join(parts)
+    if _is_ascii_word(word):
+        return r"(?<![A-Za-z0-9_])" + body + r"(?![A-Za-z0-9_])"
+    return body
+
+
+#: 所有词条的「去空白形式」合成一个正则 —— **只用来做候选发现**。
+#: 长的排前面（Python 的 alternation 是 leftmost-first，短的先匹配会盖住长的）。
+_FLAT_COMBINED = None
+
+
+def _flat_combined():
+    global _FLAT_COMBINED
+    if _FLAT_COMBINED is None:
+        import re
+        needles = sorted({("".join(w.split()), w) for w in FORBIDDEN},
+                         key=lambda t: -len(t[0]))
+        _FLAT_COMBINED = re.compile(
+            "|".join(re.escape(n) for n, _w in needles))
+    return _FLAT_COMBINED
 
 
 def _whitespace_split_hits(text: str) -> list[str]:
     """text 里**被空白拆开**的禁用词（渲染口径下才会命中的那些）。
 
-    判据（必须**逐个出现位置**地判，不能整段判）：
-    在**去空白**后的文本里找到这个词的每一次出现，再把它的首尾字符
-    **映射回原文** —— 只有当这两个字符之间**全是空白**时，它才算
-    「被拆开」。
+    **两道工序**（2026-10 的外部复核把这一版的三个缺陷逐条复现了，全是真缺陷）：
 
-    **为什么不能整段判**（第一版就是这么写的，错了）：
-    判据写成「去空白后有这个词，且原文里没有」→ 对 ASCII 词会**成片假阳性**
-    —— 原文里明明有 `HRX`（子串在，但整词不在），却被判成「被拆开」，
-    实测 313 处。
-    正确做法是看**具体那一次出现**在原文里的字符间隔。
+    1. **候选发现**（便宜）：在**去空白**后的文本上，用一个合成正则找出
+       可能命中的词条。**这一步不判定** —— 扁平化会把 ASCII 词的词边界
+       也毁掉（更长的词会被当成含那个缩写），判定必须回到原文。
+    2. **精确判定**（在**原文**上）：用「允许词内出现空白」的正则逐词找，
+       然后看**那一次匹配的原文片段**：
+       * 片段 == 原词 → 那是**字面**（红线会报它），不算「被拆开」；
+       * 片段里**没有空白** → 那是变体（`ClaudeOpus`），也不算；
+       * 否则 → 中间插进了空白 → **算被拆开**。
 
-    这条辅助函数服务的是「字面口径看不见的那一类」：它不是另一个红线，
-    而是把那个缺口的**大小**变成可测量的数字（见
-    `test_worktree_has_no_whitespace_split_forbidden_word` 与
-    `test_history_whitespace_split_hits_stay_within_baseline`）。
+    第一版（只做扁平判定）有三个缺陷：字面命中被算成拆开（`all([])` 恒真）、
+    **11 条自带空格的词条连字面都匹配不到**、每词每文本只记一次。
     """
     import re
-    flat, index = _flatten(text)
+    flat = _flatten(text)
     if not flat:
+        return []
+    cands = {m.group(0) for m in _flat_combined().finditer(flat)}
+    if not cands:
         return []
     out = []
     for w in FORBIDDEN:
-        for m in re.finditer(_pattern(w), flat):
-            a = index[m.start()]
-            b = index[m.end() - 1]
-            if all(ch.isspace() for ch in text[a + 1:b]):
-                out.append(w)
-                break
+        if "".join(w.split()) not in cands:
+            continue
+        for m in re.finditer(_flex_pattern(w), text):
+            span = text[m.start():m.end()]
+            if span == w:                       # 字面 —— 红线会报它
+                continue
+            if not any(ch.isspace() for ch in span):   # 变体，不是「被拆开」
+                continue
+            out.append(w)
+            break
     return out
 
 
@@ -590,23 +641,33 @@ def _tag_messages(repo: Path | None = None) -> list[tuple[str, str]]:
     return msgs
 
 
-def _release_bodies() -> list[tuple[str, str]]:
+def _api_headers() -> dict:
+    """面 6 的 API 请求头（有 token 就带上 —— 见 `_TOKEN` 的注释）。"""
+    headers = {"User-Agent": "lac-wording-gate",
+               "Accept": "application/vnd.github+json"}
+    if _TOKEN:
+        headers["Authorization"] = "Bearer " + _TOKEN
+    return headers
+
+
+def _release_bodies() -> tuple[list[tuple[str, str]], int]:
     """GitHub 上 27 个 Release 的**标题、正文与附件名**（面 6）。
 
     标题与正文**不在 git 里** —— 它们只存在于 GitHub 的数据库上。
     2026-10 的复核在这里抓到一处漏网：某个 Release 的**标题**带着违禁词，
     而它的正文与 CHANGELOG 对应小节都已经改过了（只改了正文，忘了标题）。
 
-    附件名一并扫：它也是公开内容，**也在 git 里**（`dist/` 下的文件名）。
-    附件的**内容**不扫 —— 那是已知的不可清除残留（PyPI 上已发布的版本
-    不允许覆盖，见 CHANGELOG）。
+    附件名一并扫：它也是公开内容。
+
+    **返回两个值**：字段列表 + **API 实际返回的附件总数**。第二个返回值
+    让判据能做一条**精确**的对账（抽出来的附件名数量 == API 里的附件数），
+    而不是靠一个写死的数字 —— 少了它，「某个 Release 的附件名被静默丢掉」
+    这类塌陷查不出来（2026-10 的外部复核指出的正是这一点）。
 
     走匿名 API（本仓库是公开的），拿不到就**报错**而不是静默跳过 ——
     「扫了 0 个 Release 却报通过」是这道门禁最没用的结论。
     """
-    req = urllib.request.Request(
-        _RELEASES_API, headers={"User-Agent": "lac-wording-gate",
-                                "Accept": "application/vnd.github+json"})
+    req = urllib.request.Request(_RELEASES_API, headers=_api_headers())
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             data = json.loads(r.read().decode("utf-8"))
@@ -615,12 +676,15 @@ def _release_bodies() -> list[tuple[str, str]]:
             "读不到 Release 列表（%s）—— 面 6 扫不了，"
             "**不要**当成「扫过了、没问题」" % exc) from exc
     out = []
+    n_assets = 0
     for rel in data:
         out.append((rel["tag_name"] + "（标题）", rel.get("name") or ""))
         out.append((rel["tag_name"] + "（正文）", rel.get("body") or ""))
-        for asset in rel.get("assets", []):
+        assets = rel.get("assets", [])
+        n_assets += len(assets)
+        for asset in assets:
             out.append((rel["tag_name"] + "（附件名）", asset.get("name") or ""))
-    return out
+    return out, n_assets
 
 
 # ---------------------------------------------------------------------------
@@ -888,12 +952,26 @@ def test_worktree_has_no_whitespace_split_forbidden_word():
     for rel in _tracked_paths():
         for w in _whitespace_split_hits(_read_text(rel)):
             hits.append((rel, w))
-    # **先证真**：这个辅助函数本身要能抓到东西 —— 否则「工作区 0 处」这句
+    # **先证真**：这个探测器本身要能抓到东西 —— 否则「工作区 0 处」这句
     # 结论可能只是「探测器恒返回空」。报数为 0 与报数为错在输出里长得一样。
     probe = FORBIDDEN[0]
     assert _whitespace_split_hits("x" + probe[0] + " " + probe[1:] + "y"), (
         "「被拆开的词」这个探测器什么都抓不到 —— 它形同虚设，"
         "下面那条「工作区 0 处」也就没有意义了")
+    # **也要能分辨**：字面出现**不算**「被拆开」。少了这一条，探测器会把
+    # 字面命中与被拆开混为一谈 —— 那个数字就不再是「缺口的大小」。
+    assert not _whitespace_split_hits("x" + probe + "y"), (
+        "字面出现被判成了「被拆开」—— 探测器把「字面命中」与「被拆开」"
+        "混成了一笔账，那个数字就不能拿来做基线了")
+    # **自带空格的词条也要探得到**（模型名那一族，11 条）。第一版把词条里
+    # 那个空格当成了字面空格，于是这一族**连字面都匹配不到**。
+    spaced = next((w for w in FORBIDDEN if " " in w), None)
+    assert spaced, "词表里一条自带空格的词条都没有 —— 这一族怎么测？"
+    assert _whitespace_split_hits(spaced.replace(" ", "\n")), (
+        "自带空格的词条探测不到（模型名那一族）—— "
+        "探测器把词条里的空格当成了字面空格")
+    assert not _whitespace_split_hits(spaced), (
+        "自带空格的词条，字面出现被判成了「被拆开」")
     assert not hits, (
         "工作区出现了被空白拆开的禁用词（渲染口径下会命中）：\n"
         + "\n".join("  %s —— %s" % (r, w) for r, w in hits[:20]))
@@ -919,7 +997,7 @@ def test_history_whitespace_split_hits_stay_within_baseline():
 
 
 def test_non_utf8_text_files_are_still_scanned():
-    """**非 UTF-8 的文本文件必须也被扫到** —— 且这一维不许悄悄消失。
+    """**非 UTF-8 的文本必须也被扫到** —— 且这一维不许悄悄消失。
 
     2026-10 的外部复核发现：工作区有一个 GBK 编码的夹具、历史里有一个
     GBK 编码的批处理文件。当时它们都是 0 命中，但那是**因为里面本来就没
@@ -927,10 +1005,10 @@ def test_non_utf8_text_files_are_still_scanned():
     GBK 的中文会变成 U+FFFD，任何中文词都匹配不到。
 
     现在解码有 GB18030 兜底（见 `_decode_text`），本条断言「这条通道
-    真的存在」：工作区里非 UTF-8 文本**不少于 1 个**，且它们**确实被
-    解出了文本**（解不出来就说明兜底没生效）。
+    真的存在」：工作区**与历史**里非 UTF-8 的文本都不得少于 1 个，
+    且它们**确实被解出了文本**（解不出来就说明兜底没生效）。
     """
-    items = []
+    work = []
     for rel in _tracked_paths():
         raw = (ROOT / rel).read_bytes()
         if b"\0" in raw[:8000]:
@@ -940,15 +1018,22 @@ def test_non_utf8_text_files_are_still_scanned():
             continue
         except UnicodeDecodeError:
             pass
-        items.append((rel, _decode_text(raw)))
-    assert len(items) >= 1, (
+        work.append((rel, _decode_text(raw)))
+    assert len(work) >= 1, (
         "工作区里一个非 UTF-8 文本都没有 —— 这条断言形同虚设"
         "（要么夹具被删了，要么解码兜底把这条通道吃掉了）")
-    for rel, text in items:
+    for rel, text in work:
         assert text.strip(), "%s 解不出文本 —— GB18030 兜底没生效" % rel
         assert "�" not in text, (
             "%s 解出来带替换字符 —— 降级路径被用上了，"
             "这个文件的编码门禁读不懂" % rel)
+
+    # **历史那一侧也要有哨** —— 否则「历史编码通道」可以悄悄消失而门禁全绿。
+    texts = _all_blob_texts()
+    assert len(_FALLBACK_BLOBS) >= 1, (
+        "历史里一个非 UTF-8 的 blob 都没有 —— 历史侧的编码通道形同虚设")
+    for sha in _FALLBACK_BLOBS:
+        assert texts.get(sha), "blob %s 走了兜底却没读出文本" % sha[:10]
 
 
 def test_forbidden_table_entries_are_real_words():
@@ -991,7 +1076,7 @@ def test_release_titles_and_bodies_have_no_forbidden_wording():
     抓到一处漏网：某个 Release 的标题带着违禁词，而它的正文与 CHANGELOG
     对应小节都已经改过了（只改了正文，忘了标题）。
     """
-    releases = _release_bodies()
+    releases, n_assets = _release_bodies()
     assert len(releases) >= _MIN_RELEASE_FIELDS, (
         "只拿到 %d 个 Release 字段（门限 %d）—— 面 6 塌了"
         % (len(releases), _MIN_RELEASE_FIELDS))
@@ -999,6 +1084,11 @@ def test_release_titles_and_bodies_have_no_forbidden_wording():
     assert assets, (
         "一个附件名都没拿到 —— 面 6 的附件名那一半塌了"
         "（标题与正文还在，附件名这一路静默失能了）")
+    # **精确**对账：抽出来的附件名数量必须等于 API 实际返回的附件数。
+    # 这条不靠写死的数字，所以下次多发一个 Release 也不会假红。
+    assert len(assets) == n_assets, (
+        "抽出来 %d 个附件名，API 实际返回 %d 个 —— 有附件名被静默丢掉了"
+        % (len(assets), n_assets))
     hits = []
     for name, text in releases:
         for word, n in _hits_in(text):
