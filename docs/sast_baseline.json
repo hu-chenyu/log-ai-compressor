@@ -75,6 +75,12 @@
     },
     {
       "test_id": "B310",
+      "path": "scripts/audit_published_versions.py",
+      "count": 2,
+      "reason": "已修过一半，留这一条是因为 bandit 认的是 `urlopen` 调用本身而不是校验逻辑。实际防护是同文件里的 `_require_https()`：两个 urlopen 之前都过它，非 https 直接 ValueError（且守卫调用在重试循环之外，不合规的 URL 不会被当成网络抖动重试）。URL 前一段固定为 pypi.org，后一段是命令行给的包名与 API 返回的文件下载地址。守卫本身由 tests/test_audit_published_versions_scheme_guard.py 守着 —— 那条测试把 file:// 喂进去并要求它抛异常，所以这里不是一句注释式的豁免。"
+    },
+    {
+      "test_id": "B310",
       "path": "scripts/audit_wording.py",
       "count": 1,
       "reason": "复核：这一处是 urllib.request.urlopen 拉 GitHub 的 Release 列表（面 6）。URL 固定是 api.github.com，路径部分经 _repo_slug() 校验为合法的 owner/repo（只放行字母数字与 . _ -），不接受任意输入；走 https。"

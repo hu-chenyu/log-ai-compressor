@@ -558,6 +558,17 @@ MUTATIONS: List[Mutation] = [
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
+        id="sast/https-guard-removed",
+        why="把 https 白名单守卫改成恒不拦 —— 于是 `file://` 之类的 URL 也能"
+            "被 urlopen 取走。这一条守的是**守卫本身**：SAST 基线里那条 B310 的"
+            "理由写的是「有 `_require_https()` 挡着」，守卫一被删，那句话就变成"
+            "一句没人验的注释（而注释不会因为守卫被删而变红）。",
+        target="scripts/audit_published_versions.py",
+        old='    if not url.lower().startswith("https://"):',
+        new="    if False:",
+        tests=["tests/test_audit_published_versions_scheme_guard.py"],
+    ),
+    Mutation(
         id="sast/documented-count-drifts-from-baseline",
         why="文档里写的豁免条数与基线对不上。**这一条是真的发生过**："
             "`tests/test_dep_audit_gate.py` 去掉一个用不上的 "
@@ -566,8 +577,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 54 条才是真该留下的。",
-        new="剩下 55 条才是真该留下的。",
+        old="剩下 55 条才是真该留下的。",
+        new="剩下 56 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(

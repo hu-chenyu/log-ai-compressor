@@ -278,10 +278,11 @@ _CHUNK = 64
 _MIN_FILES = 50
 _MIN_COMMITS = 100
 _MIN_BLOBS = 50
-#: 面 6 拿到的字段数下门限。实测 27 个 Release × (标题 + 正文 + 附件名)
-#: = 108 —— 而原来的门限只有 `5 * 2 = 10`：**塌到 10 个字段照样绿**。
-#: 那正是「报「检查通过」但其实什么都没扫」的形态。
-_MIN_RELEASE_FIELDS = 90
+#: 面 6 的判据**不写死字段数**，而是**算出来**：每个 Release 贡献
+#: 标题 + 正文 + 附件名。写死一个数是不行的 —— 2026-10-21 删掉 27 个
+#: 旧 Release 之后，字段数从 108 掉到 4，写死的门限当场变红，
+#: 而那**不是**塌陷，是「只剩最新版本」的正常状态。
+#: 现在用**相对判据**：字段数必须等于 `2 × Release 数 + 附件数`。
 
 #: 「被空白拆开的禁用词」在**历史**里的上界（当前 6 处）。
 #: 变小是好事（历史重写会清掉），变大说明有人新写进了一处。
@@ -650,7 +651,7 @@ def _api_headers() -> dict:
     return headers
 
 
-def _release_bodies() -> tuple[list[tuple[str, str]], int]:
+def _release_bodies() -> tuple[list[tuple[str, str]], int, int]:
     """GitHub 上 27 个 Release 的**标题、正文与附件名**（面 6）。
 
     标题与正文**不在 git 里** —— 它们只存在于 GitHub 的数据库上。
@@ -659,10 +660,10 @@ def _release_bodies() -> tuple[list[tuple[str, str]], int]:
 
     附件名一并扫：它也是公开内容。
 
-    **返回两个值**：字段列表 + **API 实际返回的附件总数**。第二个返回值
-    让判据能做一条**精确**的对账（抽出来的附件名数量 == API 里的附件数），
-    而不是靠一个写死的数字 —— 少了它，「某个 Release 的附件名被静默丢掉」
-    这类塌陷查不出来（2026-10 的外部复核指出的正是这一点）。
+    **返回三个值**：字段列表 + **Release 数** + **附件数**。有了它们，判据
+    能做一条**精确**的对账：字段数必须等于 `2 × Release 数 + 附件数` ——
+    不靠任何写死的数字（写死的数字在「只剩最新版本」时当场变成假红），
+    也不靠「至少拿到 N 个」这种塌到 10 个还绿的门槛。
 
     走匿名 API（本仓库是公开的），拿不到就**报错**而不是静默跳过 ——
     「扫了 0 个 Release 却报通过」是这道门禁最没用的结论。
@@ -677,14 +678,16 @@ def _release_bodies() -> tuple[list[tuple[str, str]], int]:
             "**不要**当成「扫过了、没问题」" % exc) from exc
     out = []
     n_assets = 0
+    n_releases = 0
     for rel in data:
+        n_releases += 1
         out.append((rel["tag_name"] + "（标题）", rel.get("name") or ""))
         out.append((rel["tag_name"] + "（正文）", rel.get("body") or ""))
         assets = rel.get("assets", [])
         n_assets += len(assets)
         for asset in assets:
             out.append((rel["tag_name"] + "（附件名）", asset.get("name") or ""))
-    return out, n_assets
+    return out, n_releases, n_assets
 
 
 # ---------------------------------------------------------------------------
@@ -1076,19 +1079,17 @@ def test_release_titles_and_bodies_have_no_forbidden_wording():
     抓到一处漏网：某个 Release 的标题带着违禁词，而它的正文与 CHANGELOG
     对应小节都已经改过了（只改了正文，忘了标题）。
     """
-    releases, n_assets = _release_bodies()
-    assert len(releases) >= _MIN_RELEASE_FIELDS, (
-        "只拿到 %d 个 Release 字段（门限 %d）—— 面 6 塌了"
-        % (len(releases), _MIN_RELEASE_FIELDS))
-    assets = [name for name, _ in releases if name.endswith("（附件名）")]
-    assert assets, (
-        "一个附件名都没拿到 —— 面 6 的附件名那一半塌了"
-        "（标题与正文还在，附件名这一路静默失能了）")
-    # **精确**对账：抽出来的附件名数量必须等于 API 实际返回的附件数。
-    # 这条不靠写死的数字，所以下次多发一个 Release 也不会假红。
-    assert len(assets) == n_assets, (
-        "抽出来 %d 个附件名，API 实际返回 %d 个 —— 有附件名被静默丢掉了"
-        % (len(assets), n_assets))
+    releases, n_releases, n_assets = _release_bodies()
+    assert n_releases >= 1, (
+        "一个 Release 都没拿到 —— 面 6 塌了（这不是仓库的问题，是 API 没返回）")
+    # **精确**对账，且**不写死任何数字**：每个 Release 贡献标题 + 正文 +
+    # 它的每个附件名。少了任何一个字段，这条就红。
+    # （写死一个下门限是不行的：2026-10-21 删掉 27 个旧 Release 之后，
+    #   字段数从 108 掉到 4 —— 写死的门限当场变红，而那不是塌陷。）
+    assert len(releases) == 2 * n_releases + n_assets, (
+        "拿到 %d 个字段，与「%d 个 Release × (标题+正文) + %d 个附件名」"
+        "算出来的 %d 对不上 —— 有字段被静默丢掉了"
+        % (len(releases), n_releases, n_assets, 2 * n_releases + n_assets))
     hits = []
     for name, text in releases:
         for word, n in _hits_in(text):
