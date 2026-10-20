@@ -250,8 +250,8 @@
     {
       "test_id": "B603",
       "path": "tests/test_audit_wording_script.py",
-      "count": 2,
-      "reason": "复核：两处都是列表传参 + shell=False，跑的是 shutil.which 解析出的 `git` 与本项目的审计脚本（sys.executable），参数是本测试的临时目录常量。不接收任何外部输入作为命令行片段。"
+      "count": 3,
+      "reason": "复核：三处都是列表传参 + shell=False，跑的是 shutil.which 解析出的 `git` 与本项目的审计脚本（sys.executable），参数是本测试的临时目录常量；新增的一处是 `git tag -a`，**说明文字走 stdin**（`-F -`），不进命令行。不接收任何外部输入作为命令行片段。"
     },
     {
       "test_id": "B603",
@@ -280,8 +280,8 @@
     {
       "test_id": "B603",
       "path": "tests/test_no_job_wording.py",
-      "count": 3,
-      "reason": "复核：三处都是列表传参 + shell=False，跑的是 `git`（shutil.which 解析出的绝对路径），参数是本文件的常量与 rev/blob 列表。不接收任何外部输入作为命令行片段。"
+      "count": 4,
+      "reason": "复核：四处都是列表传参 + shell=False，跑的是 `git`（shutil.which 解析出的绝对路径），参数是本文件的常量与 rev/blob 列表；新增的一处是面 4 反向测试里的临时仓库（init/add/commit/tag，路径是 pytest 的 tmp_path）。不接收任何外部输入作为命令行片段。"
     },
     {
       "test_id": "B603",

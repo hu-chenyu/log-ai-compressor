@@ -10,14 +10,18 @@
 
 所以这里照 §2.2 的规矩：**故意做坏 → 断言必须变红**。
 
-三个面各埋一次
+四个面各埋一次
 --------------
 1. 工作区文件内容
 2. 提交信息
 3. 历史版本文件内容（先提交，再改掉 —— 词只留在历史里）
+4. tag 说明文字（词放在**第二行** —— 旧实现只看得到每个 tag 的第一行）
 
-外加一条**正常路径没被写坏**的对照：一个干净的仓库必须是 0 命中、退出 0。
-只写前三条的话，「脚本恒返回空」也能让它们全绿。
+外加两条对照
+------------
+* **正常路径没被写坏**：一个干净的仓库必须是 0 命中、退出 0。
+  只写上面四条的话，「脚本恒返回空」也能让它们全绿。
+* **审计脚本与门禁给出同一份命中** —— 「口径只有一份」这句话的可测版本。
 
 **为什么测试文件里没有字面量**
 -----------------------------
@@ -84,6 +88,22 @@ def _init_repo(tmp_path: Path) -> Path:
 def _commit(repo: Path, message: str) -> None:
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", message)
+
+
+def _tag(repo: Path, name: str, message: str) -> None:
+    """造一个 annotated tag，说明文字从 stdin 进（`-F -`）。
+
+    刻意不用 `-m`：`-m` 的多行行为在不同 git 版本上并不一致，
+    而这条测试要的就是「说明确实有多行」。
+    """
+    assert _GIT is not None, "找不到 git —— 这条测试要起真仓库"
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.run(
+        [_GIT, "-C", str(repo), "tag", "-a", name, "-F", "-"],
+        input=message, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", env=env, check=False, timeout=120)
+    assert proc.returncode == 0, "git tag 失败：%s" % proc.stderr
 
 
 def _run_audit(repo: Path) -> dict:
@@ -161,6 +181,56 @@ def test_word_planted_only_in_history_is_found(tmp_path: Path) -> None:
     hits = out["data"]["hits"]
     assert any(h["surface"] == "history" and h["word"] == _PLANTED
                for h in hits), "没抓到历史版本里的词：%s" % hits
+
+
+def test_audit_agrees_with_the_gate_on_the_same_repo(tmp_path: Path) -> None:
+    """「口径只有一份」必须**可测** —— 审计脚本与门禁给出同一份命中。
+
+    2026-10 的外部复核抓到过一次漂移：门禁的面 3 从逐行改成整 blob，
+    审计脚本还在逐行。当时两边**结果**碰巧相同（对不含换行符的词，
+    逐行与整段必然等价），但那是运气 —— 一旦有人改动其中一边的读法，
+    两边就会给出不同的答案，而「审计说干净」正是用来回答
+    「发布态干不干净」的那句话。
+
+    这条把那句话变成可测的：同一个临时仓库，**门禁自己算一遍**、
+    **审计脚本算一遍**，两份命中必须完全一致。
+    """
+    repo = _init_repo(tmp_path)
+    (repo / "doc.md").write_text("这里有%s。\n" % _PLANTED, encoding="utf-8")
+    _commit(repo, "加入一个文件")
+    _tag(repo, "v0.0.0-test", "第一行\n第二行有 %s\n" % _PLANTED)
+    out = _run_audit(repo)
+
+    gate = _AUDIT.load_gate(_GATE)
+    gate_hits = {(name, word)
+                 for name, text in gate._tag_messages(repo=repo)
+                 for word, _ in gate._hits_in(text)}
+    audit_hits = {(h["where"], h["word"])
+                  for h in out["data"]["hits"] if h["surface"] == "tag_msg"}
+    assert gate_hits, "临时仓库的 tag 说明明明有词，门禁却没报 —— 这条测试自己失效了"
+    assert gate_hits == audit_hits, (
+        "门禁与审计脚本对同一个仓库给出了不同的命中：\n"
+        "  门禁：%s\n  审计：%s" % (sorted(gate_hits), sorted(audit_hits)))
+
+
+def test_word_on_the_second_line_of_a_tag_message_is_found(tmp_path: Path) -> None:
+    """面 4：tag 说明**第二行**里的词必须被抓到。
+
+    旧实现用 `for-each-ref --format='%(contents)'` + `splitlines()`，
+    而 `%(contents)` 是**多行**值 —— 拆行之后只有含 tab 的那行被扫，
+    于是**每个 tag 只有第一行**被检查。2026-10 的外部复核抓到的就是
+    这个洞：32 个 annotated tag 的说明共 270 行，旧实现只扫到 33 行
+    （**12.2%**），而 169 行被直接跳过。
+    """
+    repo = _init_repo(tmp_path)
+    (repo / "a.txt").write_text("内容\n", encoding="utf-8")
+    _commit(repo, "一笔提交")
+    _tag(repo, "v0.0.0-test", "第一行没有词\n第二行有 %s\n" % _PLANTED)
+    out = _run_audit(repo)
+    assert out["rc"] == 1, "埋了词却没报出来 —— 脚本没有牙齿"
+    hits = out["data"]["hits"]
+    assert any(h["surface"] == "tag_msg" and h["word"] == _PLANTED
+               for h in hits), "没抓到 tag 说明第二行里的词：%s" % hits
 
 
 def test_surfaces_are_not_vacuous(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""措辞审计：把一个 git 仓库的**五个面**扫一遍，报出命中词与出处。
+"""措辞审计：把一个 git 仓库的**七个面**扫一遍，报出命中词与出处。
 
 为什么要有这个脚本
 ------------------
@@ -11,18 +11,25 @@
 克隆、GitHub 上拉下来的发布态。用门禁做不了（门禁扫的是自己的
 `ROOT`）。所以这里把同一套口径抽成一个可以指定目标仓库的脚本。
 
-**口径只有一份**：词表与匹配规则都从门禁文件里取（`--words-from` 默认
-`<本仓库>/tests/test_no_job_wording.py`）。复制两份就等于两份会漂移的
-真相，而那正是本项目反复栽过的形态。
+**口径只有一份**：词表、匹配正则、blob 读取、tag 读取**全部**从门禁
+文件里取（`--words-from` 默认 `<本仓库>/tests/test_no_job_wording.py`）。
+复制两份就等于两份会漂移的真相，而那正是本项目反复栽过的形态。
 
-五个面
+2026-10 的外部复核抓到过一次漂移：门禁的面 3 已经从「逐行」改成
+「整 blob」，而**审计脚本还在逐行**。两边的**命中结果**当时其实相同
+（对不含换行符的词，逐行与整段必然等价）—— 但那是**碰巧**：一旦有人
+改动其中一边的读法，两边就会给出不同的答案，而「审计说干净」正是用来
+回答「发布态干不干净」的那句话。现在两边的读取与匹配函数**都直接取自
+门禁文件**，漂移在结构上不可能再发生。
+
+七个面
 ------
 | 面 | 扫什么 | 为什么这一面不能少 |
 | --- | --- | --- |
 | 1 工作区 | HEAD 全部跟踪文件的内容 | 贡献者看得见的那一份 |
 | 2 提交信息 | 全部提交信息（subject + body） | 重写漏掉的就是这一面 |
-| 3 历史内容 | 全部历史版本的文件内容 | 已经删掉的版本里也可能有 |
-| 4 tag 说明 | 每个 tag 的说明文字 | 门禁不扫这一面 |
+| 3 历史内容 | 全部历史版本的文件内容（**整 blob**） | 已经删掉的版本里也可能有 |
+| 4 tag 说明 | 每个 tag 的说明文字（**整条**，不是第一行） | 门禁曾只扫每个 tag 的第一行 |
 | 5 ref 名 | 所有 ref 的名字 | 名字也是内容 |
 | 6 Release | GitHub 上每个 Release 的**标题与正文** | 这两个字段只在 GitHub 的数据库上，git 里没有 |
 | 7 不可达对象 | 对象库里**不可达**的 blob 与 commit（reflog 持有、被强推替换掉的那批） | `rev-list --all` 按定义看不见它们 |
@@ -61,9 +68,6 @@ ROOT = Path(__file__).resolve().parent.parent
 #: git 的**绝对路径**。bandit 的 B607 报「用部分路径启动进程」——
 # scripts/mutation_scorecard.py 早就这么处理了，这里照抄那条做法。
 _GIT = shutil.which("git")
-
-#: 一次 git grep 传多少个 rev。命令行长度有限，批次大了会在 Windows 上撞上限。
-_CHUNK = 64
 
 
 def _child_env() -> dict:
@@ -189,10 +193,33 @@ def _read_blob(repo: Path, sha: str) -> str:
     return raw.decode("utf-8", "replace")
 
 
+def _matches(text: str, words: list[str], pattern_fn):
+    """text 里每个词的出现位置（行号 + 该行内容）。
+
+    **用门禁的正则**（`gate._pattern`）而不是自己再写一套 —— 两边口径
+    必须一模一样，否则「门禁说干净」与「审计说干净」就是两件事，
+    而审计才是回答「发布态干不干净」的那个。
+
+    整段匹配（不按行拆），与门禁同一口径。
+
+    **但有一件事要说清**：对**不含换行符**的词，整段匹配与逐行匹配的
+    **命中结果必然相同** —— 一个词跨不过换行符。2026-10 门禁面 3 从逐行
+    改成整 blob 时，写下的理由是「整 blob 能看见折行的词组」，那句话
+    **不成立**（本轮已更正）。整 blob 真正换来的是：一次批量读、对词表
+    正则元字符的免疫、显式的二进制判定。
+    """
+    lines = text.splitlines()
+    for w in words:
+        for m in re.finditer(pattern_fn(w), text):
+            lineno = text.count("\n", 0, m.start()) + 1
+            snippet = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ""
+            yield w, lineno, snippet
+
+
 def audit(repo: Path, gate) -> dict:
-    """扫五个面，返回命中明细。"""
+    """扫七个面，返回命中明细。"""
     words = list(gate.FORBIDDEN)
-    count = gate._count            # 匹配规则同样取自门禁
+    pattern = gate._pattern         # 匹配正则取自门禁
     hits = []
 
     def add(surface, word, where, snippet):
@@ -212,11 +239,8 @@ def audit(repo: Path, gate) -> dict:
         if _is_binary(raw):
             continue
         text = raw.decode("utf-8", "replace")
-        for i, line in enumerate(text.splitlines(), 1):
-            for w in words:
-                n = count(line, w)
-                if n:
-                    add("worktree", w, "%s:%d" % (rel, i), line.strip())
+        for w, lineno, snippet in _matches(text, words, pattern):
+            add("worktree", w, "%s:%d" % (rel, lineno), snippet)
 
     # ---- 面 2：提交信息 ----
     out = _git(repo, "log", "--all", "--format=%H%x01%s%x01%b%x02")
@@ -227,64 +251,42 @@ def audit(repo: Path, gate) -> dict:
         if len(parts) < 2:
             continue
         sha = parts[0].strip()
-        for line in "\n".join(parts[1:]).splitlines():
-            for w in words:
-                n = count(line, w)
-                if n:
-                    add("commit_msg", w, sha[:10], line.strip())
+        text = "\n".join(parts[1:])
+        for w, lineno, snippet in _matches(text, words, pattern):
+            add("commit_msg", w, sha[:10], snippet)
 
-    # ---- 面 3：历史版本文件内容 ----
-    revs = _git(repo, "rev-list", "--all").split()
-    patterns = []
-    for w in words:
-        patterns += ["-e", w]
-    for start in range(0, len(revs), _CHUNK):
-        chunk = revs[start:start + _CHUNK]
-        out = _git(repo, "grep", "-I", "-h", "-n", *patterns, *chunk)
-        for line in out.splitlines():
-            for w in words:
-                if count(line, w):
-                    add("history", w, "rev", line.strip()[:180])
-                    break
+    # ---- 面 3：历史版本文件内容（**整 blob**，与门禁同口径）----
+    reach = gate._reachable_blobs(repo=repo)
+    texts = gate._read_blobs(sorted(reach), repo=repo)
+    for sha, text in texts.items():
+        for w, lineno, snippet in _matches(text, words, pattern):
+            add("history", w, sha[:10], snippet)
 
-    # ---- 面 4：tag 说明 ----
-    for line in _git(repo, "for-each-ref", "--format=%(refname:short)%09%(contents)",
-                     "refs/tags").splitlines():
-        if "\t" not in line:
-            continue
-        name, content = line.split("\t", 1)
-        for ln in content.splitlines():
-            for w in words:
-                n = count(ln, w)
-                if n:
-                    add("tag_msg", w, name, ln.strip())
+    # ---- 面 4：tag 说明（**整条**，不是第一行）----
+    for name, text in gate._tag_messages(repo=repo):
+        for w, lineno, snippet in _matches(text, words, pattern):
+            add("tag_msg", w, name, snippet)
 
     # ---- 面 5：ref 名 ----
     for name in _git(repo, "for-each-ref", "--format=%(refname)").splitlines():
-        for w in words:
-            n = count(name, w)
-            if n:
-                add("ref_name", w, name, name)
+        for w, lineno, snippet in _matches(name, words, pattern):
+            add("ref_name", w, name, snippet)
 
     # ---- 面 6：GitHub 上的 Release 标题与正文（不在 git 里）----
     for name, text in _releases(repo):
-        for w in words:
-            n = count(text, w)
-            if n:
-                add("release", w, name, text.strip()[:180])
+        for w, lineno, snippet in _matches(text, words, pattern):
+            add("release", w, name, snippet)
 
     # ---- 面 7：不可达对象（reflog 持有、被强推替换掉的那批）----
     for name, text in _unreachable(repo):
-        for w in words:
-            n = count(text, w)
-            if n:
-                add("unreachable", w, name, text.strip()[:180])
+        for w, lineno, snippet in _matches(text, words, pattern):
+            add("unreachable", w, name, snippet)
 
     by_surface = Counter(h["surface"] for h in hits)
     by_word = Counter()
     for h in hits:
         by_word[h["word"]] += 1
-    # 五个面都要出现（没有命中也给 0）—— 「这个面没扫过」和「这个面是干净的」
+    # 七个面都要出现（没有命中也给 0）—— 「这个面没扫过」和「这个面是干净的」
     # 必须能分辨开。
     faces = ("worktree", "commit_msg", "history", "tag_msg", "ref_name",
              "release", "unreachable")
@@ -325,7 +327,7 @@ def _print_report(result: dict, max_report: int) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="措辞审计：扫一个 git 仓库的五个面，报命中词与出处")
+        description="措辞审计：扫一个 git 仓库的七个面，报命中词与出处")
     ap.add_argument("--repo", default=str(ROOT), help="要扫的仓库目录（默认本仓库）")
     ap.add_argument("--words-from", default=None,
                     help="门禁文件（词表与匹配规则的来源；默认 <repo>/tests/test_no_job_wording.py）")

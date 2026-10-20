@@ -668,7 +668,7 @@ MUTATIONS: List[Mutation] = [
     ),
     Mutation(
         id="perf/workload-switches-to-localtime",
-        why="负载改用 localtime。同一 seed 在不同���区生成不同字节的日志，"
+        why="负载改用 localtime。同一 seed 在不同时区生成不同字节的日志，"
             "基线会以「平台差异」的名义变红 —— 而那是门禁自己的 bug。"
             "这一条守的是「跨平台可比」这个前提本身",
         target="scripts/perf_gate.py",
@@ -1028,6 +1028,22 @@ MUTATIONS: List[Mutation] = [
         target="tests/test_no_job_wording.py",
         old="FORBIDDEN = tuple(_decode(c) for c in _FORBIDDEN_CODES)",
         new="FORBIDDEN = ()",
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/tag-message-first-line-only",
+        why="把面 4 退回「每个 tag 只扫第一行」。旧实现用 "
+            "`for-each-ref --format='%(contents)'`，而 %(contents) 是"
+            "**多行**值：一次 splitlines() 把说明拆成多行，"
+            "「只认含 tab 的行」那一步把没有 tab 的**续行整条丢掉** —— "
+            "于是每个 tag 只有第一行被检查。实测：本仓库 32 个 annotated "
+            "tag 的说明共 270 行，旧实现只扫到 33 行（**12.2%**）。"
+            "2026-10 的外部复核抓到的就是这个洞 —— 它当时没漏到东西，"
+            "但那是运气，不是口径。",
+        target="tests/test_no_job_wording.py",
+        old='        msgs.append((name, _git("cat-file", "tag", sha, repo=repo)))',
+        new=('        msgs.append((name, _git("cat-file", "tag", sha, repo=repo)'
+             '.splitlines()[0]))'),
         tests=["tests/test_no_job_wording.py"],
     ),
 ]

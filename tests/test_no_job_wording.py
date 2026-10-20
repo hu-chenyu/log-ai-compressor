@@ -11,9 +11,9 @@
   1. HEAD 全部跟踪文件的**工作区内容** —— 贡献者看得见的那一份
   2. 全部提交信息（subject + body）
   3. 全部历史版本的文件内容 —— 已经删掉的版本里也可能有
-  4. 全部 tag 的说明文字
+  4. 全部 tag 的说明文字（**整条**，不是第一行）
   5. 全部 ref 的名字
-  6. GitHub 上 27 个 Release 的**标题与正文**（不在 git 里，只在 API 上）
+  6. GitHub 上 27 个 Release 的**标题、正文与附件名**（不在 git 里，只在 API 上）
   7. **不可达对象**（reflog 持有的、被强推替换掉的那些提交）
 
 **为什么词表按码点存放**：
@@ -306,13 +306,33 @@ def _is_ascii_word(word: str) -> bool:
     return all(ord(c) < 128 for c in word)
 
 
+def _pattern(word: str) -> str:
+    """这个词的匹配正则（口径见 :func:`_is_ascii_word`）。
+
+    单独抽出来，是因为**审计脚本也要用同一套口径定位出处** ——
+    它要报「第几行」，光有次数不够，得有匹配位置。
+    """
+    import re
+    if _is_ascii_word(word):
+        return r"(?<![A-Za-z0-9_])" + re.escape(word) + r"(?![A-Za-z0-9_])"
+    return re.escape(word)
+
+
+def _is_cjk(ch: str) -> bool:
+    """这个字符是不是汉字（CJK 扩展 A 与统一表意文字）。
+
+    判据为什么只认这两块：这个词表里的中文词条**只应该**由常用汉字
+    组成。出现表外的字符（比如兼容表意文字、扩展 B、假名）几乎总是
+    **码点打错了** —— 手打十六进制最容易错在位数与高位上。
+    """
+    cp = ord(ch)
+    return (0x3400 <= cp <= 0x4DBF) or (0x4E00 <= cp <= 0x9FFF)
+
+
 def _count(text: str, word: str) -> int:
     """text 里 word 出现了几次（口径见 :func:`_is_ascii_word`）。"""
-    if _is_ascii_word(word):
-        import re
-        pat = r"(?<![A-Za-z0-9_])" + re.escape(word) + r"(?![A-Za-z0-9_])"
-        return len(re.findall(pat, text))
-    return text.count(word)
+    import re
+    return len(re.findall(_pattern(word), text))
 
 
 def _hits_in(text: str) -> list[tuple[str, int]]:
@@ -331,11 +351,17 @@ def _env() -> dict:
     return env
 
 
-def _git(*args: str) -> str:
+def _git(*args: str, repo: Path | None = None) -> str:
+    """跑一条 git 命令。
+
+    `repo` 默认是本仓库。**临时仓库的反向测试要传它** —— 面 4 的反向测试
+    就在一个「只有一条 tag 说明」的临时仓库上跑（见
+    `test_tag_scan_detects_a_word_on_the_second_line`）。
+    """
     if _GIT is None:
         raise AssertionError("找不到 git —— 这道门禁要读全历史，它跑不了")
     proc = subprocess.run(
-        [_GIT, "-C", str(ROOT), *args],
+        [_GIT, "-C", str(repo or ROOT), *args],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=_env())
     # grep 没有命中时退出码是 1 —— 那不是错误
@@ -377,10 +403,10 @@ def _object_blobs() -> list[str]:
     return [s for s, t in _object_types() if t == "blob"]
 
 
-def _object_types() -> list[tuple[str, str]]:
+def _object_types(repo: Path | None = None) -> list[tuple[str, str]]:
     """对象库里所有对象的 (sha, type)（**含不可达的**）。"""
     out = subprocess.run(
-        [_GIT, "-C", str(ROOT), "cat-file", "--batch-all-objects",
+        [_GIT, "-C", str(repo or ROOT), "cat-file", "--batch-all-objects",
          "--batch-check=%(objectname) %(objecttype)"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         env=_env(), timeout=900).stdout
@@ -392,12 +418,12 @@ def _object_types() -> list[tuple[str, str]]:
     return pairs
 
 
-def _reachable_blobs() -> set[str]:
-    out = _git("rev-list", "--objects", "--all")
+def _reachable_blobs(repo: Path | None = None) -> set[str]:
+    out = _git("rev-list", "--objects", "--all", repo=repo)
     return {line.split()[0] for line in out.splitlines() if line.strip()}
 
 
-def _read_blobs(shas: list[str]) -> dict[str, str]:
+def _read_blobs(shas: list[str], repo: Path | None = None) -> dict[str, str]:
     """一次进程读完多个 blob（`cat-file --batch`）。
 
     逐个 `git cat-file blob` 会起 1,300 次进程；一次批量读只要一个。
@@ -410,7 +436,7 @@ def _read_blobs(shas: list[str]) -> dict[str, str]:
         return {}
     payload = ("\n".join(shas) + "\n").encode("utf-8")
     proc = subprocess.run(
-        [_GIT, "-C", str(ROOT), "cat-file", "--batch"],
+        [_GIT, "-C", str(repo or ROOT), "cat-file", "--batch"],
         input=payload, capture_output=True, env=_env(), timeout=1800)
     raw = proc.stdout
     texts: dict[str, str] = {}
@@ -432,12 +458,51 @@ def _read_blobs(shas: list[str]) -> dict[str, str]:
     return texts
 
 
-def _release_bodies() -> list[tuple[str, str]]:
-    """GitHub 上 27 个 Release 的**标题与正文**（面 6）。
+def _tag_messages(repo: Path | None = None) -> list[tuple[str, str]]:
+    """每个 annotated tag 的**整条**说明文字（面 4）。
 
-    这两个字段**不在 git 里** —— 它们只存在于 GitHub 的数据库上。2026-10 的
-    复核在这里抓到一处漏网：某个 Release 的**标题**带着违禁词，而它的正文
-    与 CHANGELOG 对应小节都已经改过了（只改了正文，忘了标题）。
+    **不能靠 `for-each-ref --format='%(contents)'`。** 那个字段是**多行**值：
+    一个 tag 的说明有多行时，一次 `splitlines()` 会把它拆成多行，
+    而后面「只认含 tab 的行」那一步会把没有 tab 的**续行整条丢掉** ——
+    于是**每个 tag 只有第一行**被检查。
+
+    2026-10 的外部复核实测过这个洞：本仓库 32 个 annotated tag 的说明
+    共 270 行，旧实现只扫到 **33 行（12.2%）**，169 行被直接跳过。
+    当时没漏到东西（整条读也是 0 命中），但那是运气，不是口径。
+
+    改成按**对象**读：`cat-file tag <sha>` 给出 tag 对象的全文
+    （头部 + 说明，多行完整保留）。顺带把 tagger 署名也扫进去了 ——
+    署名也是内容。
+
+    轻量 tag（`%(objecttype)` 是 commit）没有说明文字，跳过。
+    """
+    out = _git("for-each-ref",
+               "--format=%(refname:short)%09%(objecttype)%09%(objectname)",
+               "refs/tags", repo=repo)
+    msgs: list[tuple[str, str]] = []
+    for line in out.splitlines():
+        if "\t" not in line:
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        name, otype, sha = parts
+        if otype != "tag":
+            continue          # 轻量 tag 没有说明文字
+        msgs.append((name, _git("cat-file", "tag", sha, repo=repo)))
+    return msgs
+
+
+def _release_bodies() -> list[tuple[str, str]]:
+    """GitHub 上 27 个 Release 的**标题、正文与附件名**（面 6）。
+
+    标题与正文**不在 git 里** —— 它们只存在于 GitHub 的数据库上。
+    2026-10 的复核在这里抓到一处漏网：某个 Release 的**标题**带着违禁词，
+    而它的正文与 CHANGELOG 对应小节都已经改过了（只改了正文，忘了标题）。
+
+    附件名一并扫：它也是公开内容，**也在 git 里**（`dist/` 下的文件名）。
+    附件的**内容**不扫 —— 那是已知的不可清除残留（PyPI 上已发布的版本
+    不允许覆盖，见 CHANGELOG）。
 
     走匿名 API（本仓库是公开的），拿不到就**报错**而不是静默跳过 ——
     「扫了 0 个 Release 却报通过」是这道门禁最没用的结论。
@@ -456,6 +521,8 @@ def _release_bodies() -> list[tuple[str, str]]:
     for rel in data:
         out.append((rel["tag_name"] + "（标题）", rel.get("name") or ""))
         out.append((rel["tag_name"] + "（正文）", rel.get("body") or ""))
+        for asset in rel.get("assets", []):
+            out.append((rel["tag_name"] + "（附件名）", asset.get("name") or ""))
     return out
 
 
@@ -545,8 +612,21 @@ def test_commit_messages_have_no_forbidden_wording():
 def test_history_contents_have_no_forbidden_wording():
     """扫描面 3：全部历史版本的文件内容。
 
-    **整 blob 匹配**，不是逐行匹配：Markdown 折行会把一个词组拆到两行，
-    逐行扫就看不见了（面 1/面 2 是整段匹配的，三面口径必须一致）。
+    **整 blob 匹配**，与面 1 / 面 2 的整段口径一致。
+
+    **这里要更正一句曾经写在这段里的说法**：「整 blob 能看见折行的词组」
+    —— **不成立**。一个词跨不过换行符，所以对**不含换行符**的词，
+    整段匹配与逐行匹配的**命中结果必然相同**（实测：七个面逐条比对，
+    零处差异）。换成整 blob 真正换来的是三样：
+
+    1. **一次批量读**（`cat-file --batch`）比「200 个正则 × N 个 rev」的
+       `git grep` 便宜得多；
+    2. **对词表里正则元字符的免疫** —— 词表用 `re.escape` 处理，
+       不再靠 shell 传 200 个 `-e` 参数；
+    3. **二进制判定显式化**（判据与面 1 同一份），而不是委托给 `git grep -I`。
+
+    折行的词**两种口径都看不见** —— 那是判据问题，不是实现问题，
+    见 `test_matching_semantics_are_literal_substring`。
     """
     reachable = _reachable_blobs()
     texts = _read_blobs(sorted(reachable))
@@ -586,17 +666,128 @@ def test_unreachable_objects_have_no_forbidden_wording():
 
 
 def test_tag_messages_have_no_forbidden_wording():
-    """扫描面 4：每个 tag 的说明文字。"""
-    out = _git("for-each-ref", "--format=%(refname:short)%09%(contents)", "refs/tags")
+    """扫描面 4：每个 tag 的说明文字（**整条**，不是第一行）。"""
+    msgs = _tag_messages()
     hits = []
-    for line in out.splitlines():
-        if "\t" not in line:
-            continue
-        name, content = line.split("\t", 1)
-        for word, n in _hits_in(content):
+    for name, text in msgs:
+        for word, n in _hits_in(text):
             hits.append((name, word, n))
     assert not hits, "tag 说明文字里出现了禁用词：\n" + "\n".join(
         "  %s —— %d 处" % (name, n) for name, word, n in hits)
+
+
+def test_tag_messages_are_read_in_full():
+    """面 4 的**非空断言**：读到的是整条说明，不只是第一行。
+
+    这条是给**盲区本身**设的哨。判据刻意不绑实现方式，而只问一件事：
+    「读到的文本里必须有换行」。一旦有人把读取改回
+    `for-each-ref --format='%(contents)'` 那种逐行取法，这里立刻变红 ——
+    而面 4 那条**不会**变红（它扫的东西更少，当然也更干净）。
+    """
+    msgs = _tag_messages()
+    assert len(msgs) >= 20, (
+        "只读到 %d 个 tag 的说明 —— 面 4 塌了（本仓库有 30 多个 annotated tag）"
+        % len(msgs))
+    multiline = [name for name, text in msgs if "\n" in text]
+    assert multiline, (
+        "读到的 tag 说明**全是单行** —— 说明只取到了第一行。"
+        "`for-each-ref --format='%(contents)'` 是多行值，"
+        "splitlines() 之后只有含 tab 的那行会被扫")
+
+
+def test_tag_scan_detects_a_word_on_the_second_line(tmp_path):
+    """面 4 的**反向测试**：说明**第二行**里的词必须被抓到。
+
+    照 AGENTS.md §2.2 的规矩：故意做坏 → 断言必须变红。这里造一个
+    「只有一条 tag 说明」的临时仓库，把词放在**第二行**：
+
+    * 旧实现（`for-each-ref` + `splitlines()` + 只认含 tab 的行）
+      **扫不到** → 这条测试会红；
+    * 现在的实现（`cat-file tag` 读整条）**扫得到** → 这条测试绿。
+
+    词从词表里取，**不写字面量** —— 本文件也在门禁的扫描范围内。
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def g(*args: str, stdin: str | None = None) -> None:
+        proc = subprocess.run(
+            [_GIT, "-C", str(repo), *args], input=stdin,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            env=_env(), timeout=120)
+        assert proc.returncode == 0, (
+            "git %s 失败：%s" % (" ".join(args), proc.stderr.strip()))
+
+    g("-c", "init.defaultBranch=main", "init", "-q")
+    (repo / "a.txt").write_text("x\n", encoding="utf-8")
+    g("add", "-A")
+    g("-c", "user.name=wording-gate", "-c", "user.email=wording@example.invalid",
+      "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init")
+    word = FORBIDDEN[0]
+    g("-c", "user.name=wording-gate", "-c", "user.email=wording@example.invalid",
+      "tag", "-a", "v0.0.0-test", "-F", "-",
+      stdin="第一行没有词\n第二行有 %s\n" % word)
+
+    msgs = _tag_messages(repo=repo)
+    assert msgs, "没读到那条 tag 的说明 —— 读取逻辑坏了"
+    hits = [(name, w, n) for name, text in msgs for w, n in _hits_in(text)]
+    assert hits, (
+        "说明**第二行**里的禁用词没被抓到 —— 面 4 又退回到「只扫第一行」了")
+
+
+def test_matching_semantics_are_literal_substring():
+    """匹配口径钉死：**字面子串** —— 被空格或换行拆开**不算**命中。
+
+    这条测试的作用不是「检查代码」，而是把一个**判据问题**钉在明面上：
+    一个词被空格或换行拆开时，算不算它？
+
+    **当前答案：不算。** 依据是清单里的判据原文 ——「含中文的词按
+    **子串**匹配」。一个被空格（或换行）拆开的词**不是**那个词的子串。
+    （这里刻意不举具体例子 —— 本文件也在扫描范围内，例子一写出来，
+    门禁就会先把自己判红。）
+
+    **这个选择有代价，而且代价是实测过的**：按「渲染语义」（去掉所有空白
+    后再匹配）扫七个面，本仓库会多出 6 处命中，全都是同一句
+    「谁让哪个 AI 复核的」—— 5 处在历史、1 处在工作区。
+    也就是说：**折行的词现在是看不见的**，而这**不是**门禁坏了，
+    是判据选了「字面」。
+
+    钉死它的理由：口径若在没人察觉的情况下漂移，前后的扫描结果就不可比，
+    而「不可比」是最难被发现的一类问题。要改这个判据，就**改这条测试**，
+    并把代价重新量一遍。
+    """
+    word = FORBIDDEN[0]
+    assert _count(word, word) == 1, "词自己都匹配不上 —— 匹配器坏了"
+    assert _count("前面 " + word + " 后面", word) == 1, "词被前后文字包着时匹配不上"
+    assert _count(word[0] + "\n" + word[1:], word) == 0, (
+        "折行的词被判成了命中 —— 匹配口径变了。"
+        "请把这条测试连同判据一起改，并把代价重新量一遍")
+    assert _count(word[0] + " " + word[1:], word) == 0, (
+        "被空格拆开的词被判成了命中 —— 匹配口径变了。"
+        "请把这条测试连同判据一起改，并把代价重新量一遍")
+
+
+def test_forbidden_table_entries_are_real_words():
+    """词表里每一条都必须是一个**像样的词** —— 防住「手打码点」那类错。
+
+    2026-10 的事故：某条新词的首字码位打成了同音的另一字，解码出来
+    根本不是一个词。门禁按码点扫，**对它完全无感** —— 那条错误条目
+    匹配不到任何东西，于是「表里有 200 条」与「每条都是词」同时绿着，
+    而后者**从来没有人看守**。
+
+    这条断言能自动抓住那一类错：解码后的条目里不允许出现
+    **ASCII 与 CJK 之外**的字符 —— 手打十六进制打错时，落点常常在
+    Latin-1 补充区之类的地方（那次错解出来是 `wZÖ¸` 这种东西）。
+
+    **它只能**抓「字符集不对」这一类：「码点对、但词写错了」（比如两个
+    字的顺序反了）抓不到 —— 那要靠人读。
+    """
+    for codes, word in zip(_FORBIDDEN_CODES, FORBIDDEN):
+        bad = [c for c in word if not (c.isascii() or _is_cjk(c))]
+        assert not bad, (
+            "词表条目 %r 解码出来不是词（含非 ASCII 非 CJK 字符 %r）：%r"
+            % (codes, bad, word))
+    assert len(set(FORBIDDEN)) == len(FORBIDDEN), "词表里有重复条目"
 
 
 def test_ref_names_have_no_forbidden_wording():
