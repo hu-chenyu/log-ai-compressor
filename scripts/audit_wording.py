@@ -11,9 +11,9 @@
 克隆、GitHub 上拉下来的发布态。用门禁做不了（门禁扫的是自己的
 `ROOT`）。所以这里把同一套口径抽成一个可以指定目标仓库的脚本。
 
-**词表只有一份**：`tests/test_no_job_wording.py` 里的 `_FORBIDDEN_CODES`
-（按码点存放，仓库里不留字面量）。脚本不复制词表 —— 复制两份就等于
-两份会漂移的真相，而那正是本项目反复栽过的形态。
+**口径只有一份**：词表与匹配规则都从门禁文件里取（`--words-from` 默认
+`<本仓库>/tests/test_no_job_wording.py`）。复制两份就等于两份会漂移的
+真相，而那正是本项目反复栽过的形态。
 
 五个面
 ------
@@ -30,15 +30,13 @@
     python scripts/audit_wording.py --repo <克隆目录>     # 扫任意克隆
     python scripts/audit_wording.py --json               # 机器可读
     python scripts/audit_wording.py --words-from <文件>   # 换一份词表
-
-退出码：0 = 五个面全 0 命中；1 = 有命中（并打印出处）；2 = 参数/环境错误。
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -63,10 +61,6 @@ _GIT = shutil.which("git")
 #: 一次 git grep 传多少个 rev。命令行长度有限，批次大了会在 Windows 上撞上限。
 _CHUNK = 64
 
-#: 词表在源文件里的形状：`_FORBIDDEN_CODES = (` 后面的一串十六进制码点。
-_CODES_BLOCK = re.compile(r"_FORBIDDEN_CODES\s*=\s*\((.*?)\n\)", re.S)
-_CODE_ENTRY = re.compile(r'"([0-9A-Fa-f][0-9A-Fa-f\s]*)"')
-
 
 def _child_env() -> dict:
     """子进程的环境变量：显式把编码钉死，不继承开发机的那一套。"""
@@ -87,38 +81,38 @@ def _git(repo: Path, *args: str, check: bool = False) -> str:
     return proc.stdout
 
 
-def load_words(path: Path) -> list[str]:
-    """从门禁文件里读出词表（码点 → 文本）。
+def load_gate(path: Path):
+    """加载门禁模块 —— 词表与匹配规则都从它那里来（口径只有一份）。
 
-    **故意不去 import 那个测试模块**：import 会在 import 期执行它的模块级
-    代码，而这里只需要一个常量。读源码更直白，也避免了「门禁改了写法
-    就把审计脚本弄坏」这种耦合。
+    刻意**不去 import** 那个测试模块：import 会在 import 期执行它的模块级
+    代码，而这里只需要常量与两个函数。按路径加载最直白。
     """
-    try:
-        src = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError("读不到词表文件 %s：%s" % (path, exc)) from exc
-    m = _CODES_BLOCK.search(src)
-    if not m:
+    spec = importlib.util.spec_from_file_location("wording_gate", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("读不到门禁文件 %s" % path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    if not getattr(mod, "FORBIDDEN", None):
         raise RuntimeError(
-            "在 %s 里找不到 _FORBIDDEN_CODES = (...) —— "
-            "词表的形状变了，审计脚本要跟着改" % path)
-    words = []
-    for raw in _CODE_ENTRY.findall(m.group(1)):
-        codes = [int(c, 16) for c in raw.split()]
-        words.append("".join(chr(c) for c in codes))
-    if not words:
-        raise RuntimeError("词表是空的 —— %s 里的 _FORBIDDEN_CODES 没有条目" % path)
-    return words
+            "%s 里没有 FORBIDDEN —— 门禁的形状变了，审计脚本要跟着改" % path)
+    return mod
 
 
 def _is_binary(raw: bytes) -> bool:
     return b"\0" in raw[:8000]
 
 
-def scan_worktree(repo: Path, words: list[str]) -> list[dict]:
-    """面 1：HEAD 全部跟踪文件的工作区内容。"""
+def audit(repo: Path, gate) -> dict:
+    """扫五个面，返回命中明细。"""
+    words = list(gate.FORBIDDEN)
+    count = gate._count            # 匹配规则同样取自门禁
     hits = []
+
+    def add(surface, word, where, snippet):
+        hits.append({"surface": surface, "word": word, "where": where,
+                     "snippet": snippet[:200]})
+
+    # ---- 面 1：工作区跟踪文件 ----
     for rel in _git(repo, "ls-files").splitlines():
         rel = rel.strip()
         if not rel:
@@ -131,128 +125,96 @@ def scan_worktree(repo: Path, words: list[str]) -> list[dict]:
         if _is_binary(raw):
             continue
         text = raw.decode("utf-8", "replace")
-        for w in words:
-            n = text.count(w)
-            if n:
-                hits.append({"surface": "worktree", "word": w, "where": rel, "count": n})
-    return hits
+        for i, line in enumerate(text.splitlines(), 1):
+            for w in words:
+                n = count(line, w)
+                if n:
+                    add("worktree", w, "%s:%d" % (rel, i), line.strip())
 
-
-def scan_commit_messages(repo: Path, words: list[str]) -> list[dict]:
-    """面 2：全部提交信息（subject + body）。"""
+    # ---- 面 2：提交信息 ----
     out = _git(repo, "log", "--all", "--format=%H%x01%s%x01%b%x02")
-    hits = []
-    for block in out.split("\x02"):
-        if not block.strip():
+    for blk in out.split("\x02"):
+        if not blk.strip():
             continue
-        parts = block.split("\x01")
+        parts = blk.split("\x01")
         if len(parts) < 2:
             continue
         sha = parts[0].strip()
-        text = "\n".join(parts[1:])
-        for w in words:
-            n = text.count(w)
-            if n:
-                hits.append({"surface": "commit_messages", "word": w,
-                             "where": sha[:12], "count": n})
-    return hits
+        for line in "\n".join(parts[1:]).splitlines():
+            for w in words:
+                n = count(line, w)
+                if n:
+                    add("commit_msg", w, sha[:10], line.strip())
 
-
-def scan_history_contents(repo: Path, words: list[str]) -> list[dict]:
-    """面 3：全部历史版本的文件内容。"""
+    # ---- 面 3：历史版本文件内容 ----
     revs = _git(repo, "rev-list", "--all").split()
     patterns = []
     for w in words:
         patterns += ["-e", w]
-    hits = []
     for start in range(0, len(revs), _CHUNK):
         chunk = revs[start:start + _CHUNK]
         out = _git(repo, "grep", "-I", "-h", "-n", *patterns, *chunk)
         for line in out.splitlines():
             for w in words:
-                if w in line:
-                    hits.append({"surface": "history_contents", "word": w,
-                                 "where": line.strip()[:160], "count": 1})
+                if count(line, w):
+                    add("history", w, "rev", line.strip()[:180])
                     break
-    return hits
 
-
-def scan_tag_messages(repo: Path, words: list[str]) -> list[dict]:
-    """面 4：每个 tag 的说明文字（门禁不扫这一面）。"""
-    hits = []
+    # ---- 面 4：tag 说明 ----
     for line in _git(repo, "for-each-ref", "--format=%(refname:short)%09%(contents)",
                      "refs/tags").splitlines():
         if "\t" not in line:
             continue
         name, content = line.split("\t", 1)
-        for w in words:
-            n = content.count(w)
-            if n:
-                hits.append({"surface": "tag_messages", "word": w,
-                             "where": name, "count": n})
-    return hits
+        for ln in content.splitlines():
+            for w in words:
+                n = count(ln, w)
+                if n:
+                    add("tag_msg", w, name, ln.strip())
 
-
-def scan_ref_names(repo: Path, words: list[str]) -> list[dict]:
-    """面 5：所有 ref 的名字。"""
-    hits = []
+    # ---- 面 5：ref 名 ----
     for name in _git(repo, "for-each-ref", "--format=%(refname)").splitlines():
         for w in words:
-            n = name.count(w)
+            n = count(name, w)
             if n:
-                hits.append({"surface": "ref_names", "word": w,
-                             "where": name.strip(), "count": n})
-    return hits
+                add("ref_name", w, name, name)
 
-
-SURFACES = (
-    ("worktree", "工作区文件内容", scan_worktree),
-    ("commit_messages", "提交信息", scan_commit_messages),
-    ("history_contents", "历史版本文件内容", scan_history_contents),
-    ("tag_messages", "tag 说明文字", scan_tag_messages),
-    ("ref_names", "ref 名字", scan_ref_names),
-)
-
-
-def audit(repo: Path, words: list[str]) -> dict:
-    result = {"repo": str(repo), "word_count": len(words), "surfaces": {}, "hits": []}
-    for key, label, fn in SURFACES:
-        found = fn(repo, words)
-        result["surfaces"][key] = {"label": label, "hits": len(found),
-                                   "occurrences": sum(h["count"] for h in found)}
-        result["hits"].extend(found)
-    return result
+    by_surface = Counter(h["surface"] for h in hits)
+    by_word = Counter()
+    for h in hits:
+        by_word[h["word"]] += 1
+    # 五个面都要出现（没有命中也给 0）—— 「这个面没扫过」和「这个面是干净的」
+    # 必须能分辨开。
+    faces = ("worktree", "commit_msg", "history", "tag_msg", "ref_name")
+    return {"repo": str(repo), "word_count": len(words),
+            "by_surface": {f: by_surface.get(f, 0) for f in faces},
+            "by_word": dict(by_word),
+            "total": len(hits), "hits": hits}
 
 
 def _print_report(result: dict, max_report: int) -> None:
     print("仓库：%s" % result["repo"])
     print("词表：%d 条" % result["word_count"])
     print()
-    print("%-22s %8s %10s" % ("扫描面", "命中条目", "出现次数"))
-    total_items = 0
-    total_occ = 0
-    for key, label, _ in SURFACES:
-        s = result["surfaces"][key]
-        total_items += s["hits"]
-        total_occ += s["occurrences"]
-        print("%-22s %8d %10d" % (label, s["hits"], s["occurrences"]))
-    print("%-22s %8d %10d" % ("合计", total_items, total_occ))
-
-    dist = Counter()
-    for h in result["hits"]:
-        dist[h["word"]] += h["count"]
-    if dist:
+    print("%-22s %8s" % ("扫描面", "命中条目"))
+    for face, label in (("worktree", "工作区文件内容"),
+                        ("commit_msg", "提交信息"),
+                        ("history", "历史版本文件内容"),
+                        ("tag_msg", "tag 说明文字"),
+                        ("ref_name", "ref 名字")):
+        print("%-22s %8d" % (label, result["by_surface"].get(face, 0)))
+    print("%-22s %8d" % ("合计", result["total"]))
+    if result["by_word"]:
         print()
-        print("按词分布（%d 个词有命中）：" % len(dist))
-        for w, n in dist.most_common():
-            print("  %-8s %6d" % (w, n))
-
+        print("按词分布（%d 个词有命中）：" % len(result["by_word"]))
+        for w, n in sorted(result["by_word"].items(), key=lambda kv: -kv[1]):
+            print("  %-14s %6d" % (w, n))
     if result["hits"]:
         print()
         print("出处（前 %d 条）：" % min(max_report, len(result["hits"])))
         for h in result["hits"][:max_report]:
-            print("  [%s] %s —— %s x%d"
-                  % (h["surface"], h["word"], h["where"], h["count"]))
+            print("  [%s] %s —— %s x1"
+                  % (h["surface"], h["word"], h["where"]))
         if len(result["hits"]) > max_report:
             print("  …… 还有 %d 条" % (len(result["hits"]) - max_report))
 
@@ -262,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         description="措辞审计：扫一个 git 仓库的五个面，报命中词与出处")
     ap.add_argument("--repo", default=str(ROOT), help="要扫的仓库目录（默认本仓库）")
     ap.add_argument("--words-from", default=None,
-                    help="词表文件（默认 <repo>/tests/test_no_job_wording.py）")
+                    help="门禁文件（词表与匹配规则的来源；默认 <repo>/tests/test_no_job_wording.py）")
     ap.add_argument("--json", action="store_true", help="机器可读输出")
     ap.add_argument("--max-report", type=int, default=40, help="最多打印多少条出处")
     args = ap.parse_args(argv)
@@ -272,10 +234,10 @@ def main(argv: list[str] | None = None) -> int:
         print("不是一个 git 仓库：%s" % repo, file=sys.stderr)
         return 2
     words_from = Path(args.words_from) if args.words_from else \
-        repo / "tests" / "test_no_job_wording.py"
+        ROOT / "tests" / "test_no_job_wording.py"
     try:
-        words = load_words(words_from)
-        result = audit(repo, words)
+        gate = load_gate(words_from)
+        result = audit(repo, gate)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 2

@@ -55,7 +55,7 @@ def _load_audit_module():
 
 _AUDIT = _load_audit_module()
 #: 从门禁文件里读出来的词表（码点形式，仓库里不留字面量）
-_WORDS = _AUDIT.load_words(_GATE)
+_WORDS = _AUDIT.load_gate(_GATE).FORBIDDEN
 #: 埋进临时仓库的那个词。取列表里的第一个 —— 选哪个都一样，
 #: 只要它不是空串、也不是某个别的词的子串（那会让断言变得含糊）。
 _PLANTED = _WORDS[0]
@@ -142,7 +142,7 @@ def test_word_planted_in_commit_message_is_found(tmp_path: Path) -> None:
     out = _run_audit(repo)
     assert out["rc"] == 1, "埋了词却没报出来 —— 脚本没有牙齿"
     hits = out["data"]["hits"]
-    assert any(h["surface"] == "commit_messages" and h["word"] == _PLANTED for h in hits), \
+    assert any(h["surface"] == "commit_msg" and h["word"] == _PLANTED for h in hits), \
         "没抓到提交信息里的词：%s" % hits
 
 
@@ -159,7 +159,7 @@ def test_word_planted_only_in_history_is_found(tmp_path: Path) -> None:
     out = _run_audit(repo)
     assert out["rc"] == 1, "埋了词却没报出来 —— 脚本没有牙齿"
     hits = out["data"]["hits"]
-    assert any(h["surface"] == "history_contents" and h["word"] == _PLANTED
+    assert any(h["surface"] == "history" and h["word"] == _PLANTED
                for h in hits), "没抓到历史版本里的词：%s" % hits
 
 
@@ -172,7 +172,7 @@ def test_surfaces_are_not_vacuous(tmp_path: Path) -> None:
     (repo / "c.txt").write_text("内容\n", encoding="utf-8")
     _commit(repo, "一笔")
     out = _run_audit(repo)
-    surfaces = out["data"]["surfaces"]
-    assert set(surfaces) == {"worktree", "commit_messages", "history_contents",
-                              "tag_messages", "ref_names"}, "扫描面少了：%s" % set(surfaces)
+    surfaces = out["data"]["by_surface"]
+    assert set(surfaces) == {"worktree", "commit_msg", "history",
+                              "tag_msg", "ref_name"}, "扫描面少了：%s" % set(surfaces)
     assert out["data"]["word_count"] == len(_WORDS)
