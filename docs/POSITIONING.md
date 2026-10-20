@@ -514,7 +514,7 @@ mcp-publisher publish           # 提交 server.json
 | Loghub 2.0（ISSTA'24） | github.com/logpai/Loghub-2.0 | 14 个带标注真实数据集，平均 360 万行；Drain 综合居首 |
 | LogsLop（AMD ROCm 博客，2026-07-14） | rocm.blogs.amd.com/software-tools-optimization/logslop/README.html | **已核实的正面竞品**（`pip install logslop`，amd/logslop）：去重式日志摘要 + SURCL 指标（中位 96 行 → 5 行）；同样用 Loghub HDFS 与 Drain3 对照，并自述 Drain3 的 PA 99.75% 远高于自己 81% |
 | o11y-bench（Grafana） | GrafanaCON 2026 | 开源公开基准连自家产品都可能考不过 —— 营销动作的标杆 |
-| HF 事故取证复盘 | Hugging Face 官方事故通报（2026-07-16），多方独立转载可交叉验证 | 商业 LLM API 被安全策略拦截（HF 原话：「它们无法区分事件响应者和攻击者」）；最终自托管 自托管模型；凭据未离开环境 |
+| HF 事故取证复盘 | Hugging Face 官方事故通报（2026-07-16），多方独立转载可交叉验证 | 商业 LLM API 被安全策略拦截（HF 原话：「它们无法区分事件响应者和攻击者」）；最终自托管模型；凭据未离开环境 |
 | 官方 MCP Registry | modelcontextprotocol.io/registry/quickstart | PyPI 是受支持的包类型；`mcp-publisher`；命名空间与质量评分规则 |
 | NetForensicAI | github.com/Sh3n0bi/NetForensicAI | 确定性优先、证据 ID、相关性≠因果的表述范式 |
 | AI Incident Investigator | github.com/lyudmylan/ai-incident-investigator | 对抗性评测集 + 评分卡的工程范式 |

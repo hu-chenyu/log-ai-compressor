@@ -342,7 +342,7 @@ python scripts/audit_wording.py --repo /tmp/lac-remote \
 
 | 类别 | 词 | 理由 |
 | --- | --- | --- |
-| 同形词 | 字节（逐字节）、package（打包）、Continue（CI 契约与 Python 关键字）、Cursor（SQL 与 CSS）、该缩写（英文词里的大小写不敏感误命中）、QQ（测试里的字符串）、第一（序数用法）、展示（动词用法） | 同一个串，意思完全不同 |
+| 同形词 | 字节（逐字节）、package（打包）、Continue（CI 契约与 Python 关键字）、Cursor（SQL 与 CSS）、QQ（测试里的字符串）、第一（序数用法）、展示（动词用法） | 同一个串，意思完全不同 |
 | 产品功能本体 | Drain3、LogsLop（评测基线）、Agent（交付形态与本仓库自己的文件名）、LLM / 大模型 / 提示词 / prompt（可选解读 extra）、DeepSeek / Kimi / GLM / Qwen / 智谱 / Moonshot / 月之暗面 / Zhipu / 通义千问 / MiniMax / Claude / Anthropic / GPT（provider 清单与支持的客户端） | 写的是这个工具**接什么、用什么**，不是「谁让 AI 改的」 |
 | 引用与安全说明 | 阿里、华为（竞品与供应商）、邮箱、手机号（脱敏规则名）、内网（只允许可信内网）、日报（引证来源） | 第三方事实与功能描述 |
 
