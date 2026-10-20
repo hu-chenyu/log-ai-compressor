@@ -523,6 +523,11 @@ _GATE_STEPS = {
     "SAST (bandit baseline reconciliation)",
     "Dependency vulnerability scan (pip-audit)",
     "Performance regression (deterministic work counters)",
+    # v2.12.4 新增：**产物本身**要过门禁。
+    # 「仓库干净 ≠ 产物干净」—— 2.12.3 就是措辞清理之前构建的，产物里带着
+    # 88 处禁用词（含一个真实内部主机名），而仓库当时已经是 0 命中。
+    # 这一道查的是「**将要发布出去的那份字节**」，不是源码树。
+    "Release artifact audit (content + self-consistency)",
 }
 
 #: 不是门禁的：装环境 / 装依赖 / 产物构建 / 传产物。
@@ -558,7 +563,7 @@ class TestGateCountCannotDrift:
     def test_the_documented_count_matches_the_workflow(self):
         actual = len(_GATE_STEPS)
         cn = {2: "两", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七",
-              8: "八", 9: "九", 10: "十"}
+              8: "八", 9: "九", 10: "十", 11: "十一"}
         word = cn.get(actual, str(actual))
         docs = {
             "README.md": f"{word}道门禁",

@@ -141,6 +141,15 @@ python scripts/benchmark_loghub.py --no-logslop --no-drain3 --budgets 32000
 python scripts/build_repro.py --verify   # 不用 python -m build（那个每次字节都不同）
 sha256sum dist/*
 
+# 2.5 **审计产物本身**（不是源码树）—— 这一步在 2.12.3 之前是不存在的
+python scripts/audit_release_artifact.py
+#    查两件事：产物里的每个文本文件用措辞门禁那套词表再扫一遍；
+#    把 sdist 解包后跑它自带的 scripts/sast_gate.py（自洽性）。
+#    **为什么必须做**：2.12.3 的产物是措辞清理**之前**构建的 ——
+#    实测产物里 88 处、38 个文件（含一个真实内部主机名），而仓库当时
+#    已经是 0 命中。清理只改了仓库、没重建产物，而 PyPI 不允许覆盖
+#    已发布文件，那一版**永远留在那儿**。仓库干净 ≠ 产物干净。
+
 # 3. 先传 PyPI —— 必须在推 tag 之前
 #    **按完整文件名钉死这两个，不要 `dist/*`**
 python -m twine upload \

@@ -123,6 +123,12 @@
     },
     {
       "test_id": "B404",
+      "path": "scripts/audit_release_artifact.py",
+      "count": 1,
+      "reason": "复核过：只调用 `sys.executable` 跑解包后目录里的 scripts/sast_gate.py（产物自洽性那一半），参数是本脚本的常量。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
       "path": "scripts/audit_wording.py",
       "count": 1,
       "reason": "复核：这一处是 `subprocess.run` 读 git 的输出，命令固定为 `git`（绝对路径由 shutil.which 解析），参数是本脚本的常量与目标仓库目录。`check=False` 是必须的 —— `git grep` 没有命中时退出码是 1，那不是错误。import 本脚本无法消除。"
@@ -216,6 +222,12 @@
       "path": "tests/test_verdict_surfaces.py",
       "count": 1,
       "reason": "复核过：跑真实导出以检查三档置信在各个面上的呈现。import 本身无法消除。"
+    },
+    {
+      "test_id": "B603",
+      "path": "scripts/audit_release_artifact.py",
+      "count": 1,
+      "reason": "复核过：一处列表传参 + shell=False，跑的是 sys.executable 与解包后目录里的 scripts/sast_gate.py（产物自洽性那一半）。命令与参数都是本脚本的常量，不接收任何外部输入作为命令行片段。"
     },
     {
       "test_id": "B603",

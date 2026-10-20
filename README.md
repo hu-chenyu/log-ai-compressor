@@ -203,12 +203,12 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 | --- | --- |
 | 生产代码 | 7,951 行（32 个模块），硬依赖只有 PyYAML |
 | 测试 | **1659 用例**，覆盖率 **96%**（漏行 158 / 3,995 语句），`ruff` 全绿 |
-| CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**十道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **变异存活率记分卡**（只跑参考矩阵一条）/ **SAST** / **依赖漏洞扫描** / **性能回归** |
+| CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**十一道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **变异存活率记分卡**（只跑参考矩阵一条）/ **SAST** / **依赖漏洞扫描** / **性能回归** / **产物审计**（产物本身，不是源码树） |
 | 自证脚本 | 现已断言 **11 条**主张，含「README 工程指标与架构树必须与仓库一致」「README 写的条数不许漂」「**每一处基准表逐格对账实测基线（含胜负场次与合计行）**」 |
 | 构建 | 可复现 —— 同源码两次构建字节相同，本地/PyPI/GitHub 三方 sha256 对账 |
 | 依赖 | **运行时硬依赖只有 PyYAML 一个**，全部 16 条声明依赖（含 web/mcp/ai 三个 extra 与开发工具）经 pip-audit 扫描无已知漏洞；Dependabot 每周一提 PR |
 
-> **上面这十道门禁里的门禁清单本身也有门禁在守**：
+> **上面这十一道门禁里的门禁清单本身也有门禁在守**：
 > `tests/test_ci_gate_wiring.py` 双向核对 —— README 写下的每一道都必须
 > 在 `ci.yml` 里有一个真正执行它的步骤（认的是 `run:` 正文，不是步骤名），
 > 而 `ci.yml` 里的每一道也必须出现在这张表里。
@@ -343,7 +343,7 @@ Windows 可双击 `start.bat` 自动定位 Python、装依赖、启动并打开�
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 模块树、分层依赖、核心算法 |
 | [`docs/CLI.md`](docs/CLI.md) | 完整命令行用法 + 自定义解析规则 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 开发、测试、门禁说明 |
-| [`AGENTS.md`](AGENTS.md) | **给 AI agent 的工作契约**：分层与唯一门面、十道门禁各自守什么、这个仓库特有的坑 |
+| [`AGENTS.md`](AGENTS.md) | **给 AI agent 的工作契约**：分层与唯一门面、十一道门禁各自守什么、这个仓库特有的坑 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 人类贡献流程：分支、提交约定、基准纪律、发版与三方 sha256 对账 |
 | `SKILL.md` / `INSTRUCTIONS` | 接入 Claude Code / Codex / Mavis 等 Agent |
 

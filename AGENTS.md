@@ -160,7 +160,7 @@ v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一�
 
 ---
 
-## 4. CI 的十道门禁
+## 4. CI 的十一道门禁
 
 改代码前要知道它们各自在守什么 —— **不要通过删断言、跳过测试、放宽阈值让 CI 变绿。**
 
@@ -176,6 +176,7 @@ v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一�
 | 8 | `python scripts/sast_gate.py` | **静态分析发现是否都有交代**。bandit 一开几十条，逐条 `nosec` 等于没检查；判据是逐条对账 `docs/sast_baseline.json`，四件事都让门禁红：新发现 / 数量对不上 / **豁免过期** / **豁免没写理由**。三矩阵全跑 |
 | 9 | `python scripts/dep_audit_gate.py --self-check` | **声明依赖有没有已知漏洞**。来源唯一（`pyproject.toml`）。`--self-check` 先喂已知有漏洞的 pin，要求它必须报出来，否则返回 2（门禁自身失能）而不是绿 |
 | 10 | `python scripts/perf_gate.py` | **性能回归**。硬门禁建在**确定性工作量计数**上（相似度回退次数 / `ratio` 次数 / 掩码次数 / 簇数 / 条目数），同一份负载在任何机器上必须给出同一组整数。**墙钟只报告、不判定** —— 跨机器不可比，噪声只会向下，做成红线只会收获假红然后被人 `--continue-on-error` |
+| 11 | `python scripts/audit_release_artifact.py` | **产物本身**（不是源码树）要过门禁。查两件事：产物里每个文本文件用措辞门禁那套词表再扫一遍；把 sdist 解包后跑它自带的 `scripts/sast_gate.py`（自洽性）。**「仓库干净 ≠ 产物干净」**：v2.12.3 是措辞清理**之前**构建的，产物里实测 88 处、38 个文件（含一个真实内部主机名），而仓库当时已是 0 命中；PyPI 不允许覆盖已发布文件，那一版**永远留在那儿**。三矩阵全跑 |
 
 矩阵是 `ubuntu-3.11` / `ubuntu-3.12` / `windows-3.12` 三条。
 `3.11` 是 `pyproject.toml` 的下限（改矩阵必须同步改那边），
@@ -276,6 +277,7 @@ python scripts/adversarial_eval.py           # 对抗性评分卡
 python scripts/sast_gate.py                  # 第八道：SAST 发现逐条对账
 python scripts/dep_audit_gate.py --self-check  # 第九道：依赖漏洞（含阳性对照）
 python scripts/perf_gate.py                  # 第十道：性能回归（确定性计数）
+python scripts/audit_release_artifact.py     # 第十一道：产物本身（不是源码树）要过门禁
 
 # 诊断：有没有任何相似度量能把「该合并」和「不该合并」分开
 python scripts/diagnose_merge_decisions.py
