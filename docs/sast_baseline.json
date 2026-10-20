@@ -111,6 +111,12 @@
     },
     {
       "test_id": "B404",
+      "path": "scripts/audit_wording.py",
+      "count": 1,
+      "reason": "复核：这一处是 `subprocess.run` 读 git 的输出，命令固定为 `git`（绝对路径由 shutil.which 解析），参数是本脚本的常量与目标仓库目录。`check=False` 是必须的 —— `git grep` 没有命中时退出码是 1，那不是错误。import 本脚本无法消除。"
+    },
+    {
+      "test_id": "B404",
       "path": "scripts/build_repro.py",
       "count": 1,
       "reason": "复核过：本文件只调用 `git log`（取提交时间）与 `python -m build`，参数全是本文件里的常量，没有任何一个来自日志内容或外部输入。已把写死的 `\"git\"` 换成 `git_exe()`（shutil.which + 明确报错），这条留着是因为 import 本身无法消除。"
@@ -132,6 +138,12 @@
       "path": "scripts/sast_gate.py",
       "count": 1,
       "reason": "复核过：只调用 `python -m bandit`，目标是本仓库自己的三个目录。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_audit_wording_script.py",
+      "count": 1,
+      "reason": "复核：这一处是 `subprocess.run` 起本项目的审计脚本与 git，命令固定为 `sys.executable` 与 shutil.which 解析出的 git，参数是本测试的临时目录常量。import 本测试无法消除。"
     },
     {
       "test_id": "B404",
@@ -195,6 +207,12 @@
     },
     {
       "test_id": "B603",
+      "path": "scripts/audit_wording.py",
+      "count": 1,
+      "reason": "复核：列表传参 + shell=False，命令固定为 `git`（绝对路径由 shutil.which 解析），参数只来自本脚本的常量与用户指定的仓库目录。不接收任何外部输入作为命令行片段。"
+    },
+    {
+      "test_id": "B603",
       "path": "scripts/build_repro.py",
       "count": 2,
       "reason": "复核过：两处都是列表传参 + shell=False + check=True，命令是 git / sys.executable -m build，参数为常量。bandit 报的是「请复核」，复核结论是：不接收任何外部输入作为命令行。"
@@ -216,6 +234,12 @@
       "path": "scripts/sast_gate.py",
       "count": 1,
       "reason": "复核过：列表传参、shell=False，命令固定为 `python -m bandit`，目标是仓库自己的三个目录。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_audit_wording_script.py",
+      "count": 2,
+      "reason": "复核：两处都是列表传参 + shell=False，跑的是 shutil.which 解析出的 `git` 与本项目的审计脚本（sys.executable），参数是本测试的临时目录常量。不接收任何外部输入作为命令行片段。"
     },
     {
       "test_id": "B603",

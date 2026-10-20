@@ -66,7 +66,7 @@ python scripts/sast_gate.py --print-baseline   # 生成骨架（reason 全空，
 把它抄进 `docs/sast_baseline.json` 并**逐条写 reason**。门禁会在四种情况下红：
 新发现不在基线、数量对不上、**豁免过期**（代码里已不报错而基线里还留着）、
 **豁免没写 reason**。能修的一律先修 —— v2.11.5 建基线时修掉了 5 处，
-剩下 46 条才是真该留下的。
+剩下 50 条才是真该留下的。
 
 **性能基线怎么维护**：
 
