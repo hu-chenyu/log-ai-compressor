@@ -75,9 +75,21 @@
     },
     {
       "test_id": "B310",
+      "path": "scripts/audit_wording.py",
+      "count": 1,
+      "reason": "复核：这一处是 urllib.request.urlopen 拉 GitHub 的 Release 列表（面 6）。URL 固定是 api.github.com，路径部分经 _repo_slug() 校验为合法的 owner/repo（只放行字母数字与 . _ -），不接受任意输入；走 https。"
+    },
+    {
+      "test_id": "B310",
       "path": "scripts/fetch_datasets.py",
       "count": 2,
       "reason": "已修过一半，留这一条是因为 bandit 认的是 `urlopen` 调用本身而不是校验逻辑。实际防护是同文件里的 `_require_https()`：两个 urlopen 之前都过它，非 https 直接 ValueError。URL 全部由 `LOGS_2_0` 常量表拼出，今天全是 https。守卫本身由 tests/test_fetch_datasets_scheme_guard.py 守着 —— 那条测试把 file:// 喂进去并要求它抛异常，所以这里不是一句注释式的豁免。"
+    },
+    {
+      "test_id": "B310",
+      "path": "tests/test_no_job_wording.py",
+      "count": 1,
+      "reason": "复核：这一处是 urllib.request.urlopen 拉 GitHub 的 Release 列表（面 6）。URL 固定是 api.github.com，路径部分经 _repo_slug() 校验为合法的 owner/repo（只放行字母数字与 . _ -），不接受任意输入；走 https。"
     },
     {
       "test_id": "B311",
@@ -208,7 +220,7 @@
     {
       "test_id": "B603",
       "path": "scripts/audit_wording.py",
-      "count": 1,
+      "count": 3,
       "reason": "复核：列表传参 + shell=False，命令固定为 `git`（绝对路径由 shutil.which 解析），参数只来自本脚本的常量与用户指定的仓库目录。不接收任何外部输入作为命令行片段。"
     },
     {
@@ -268,8 +280,8 @@
     {
       "test_id": "B603",
       "path": "tests/test_no_job_wording.py",
-      "count": 1,
-      "reason": "复核过：列表传参 + shell=False，跑的是 git（绝对路径由 shutil.which 解析），参数是本文件里的常量与 rev-list 的输出。读的是本仓库自己的历史，不涉及任何外部输入。"
+      "count": 3,
+      "reason": "复核：三处都是列表传参 + shell=False，跑的是 `git`（shutil.which 解析出的绝对路径），参数是本文件的常量与 rev/blob 列表。不接收任何外部输入作为命令行片段。"
     },
     {
       "test_id": "B603",

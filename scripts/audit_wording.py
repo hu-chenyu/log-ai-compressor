@@ -24,6 +24,8 @@
 | 3 历史内容 | 全部历史版本的文件内容 | 已经删掉的版本里也可能有 |
 | 4 tag 说明 | 每个 tag 的说明文字 | 门禁不扫这一面 |
 | 5 ref 名 | 所有 ref 的名字 | 名字也是内容 |
+| 6 Release | GitHub 上每个 Release 的**标题与正文** | 这两个字段只在 GitHub 的数据库上，git 里没有 |
+| 7 不可达对象 | 对象库里**不可达**的 blob 与 commit（reflog 持有、被强推替换掉的那批） | `rev-list --all` 按定义看不见它们 |
 
 用法：
     python scripts/audit_wording.py                      # 扫本仓库
@@ -37,9 +39,11 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 from collections import Counter
 from pathlib import Path
 
@@ -100,6 +104,89 @@ def load_gate(path: Path):
 
 def _is_binary(raw: bytes) -> bool:
     return b"\0" in raw[:8000]
+
+
+def _releases(repo: Path) -> list[tuple[str, str]]:
+    """GitHub 上每个 Release 的**标题与正文**（面 6）。
+
+    这两个字段**不在 git 里** —— 它们只存在于 GitHub 的数据库上。2026-10 的
+    复核在这里抓到一处漏网：某个 Release 的**标题**带着违禁词，而它的正文与
+    CHANGELOG 对应小节都已经改过了（只改了正文，忘了标题）。
+
+    走匿名 API（公开仓库够用）；拿不到就**报错**，不静默跳过 ——
+    「扫了 0 个 Release 却报通过」是最没用的结论。
+    """
+    url = ("https://api.github.com/repos/%s/releases?per_page=100"
+           % _repo_slug(repo))
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "lac-wording-audit", "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("读不到 Release 列表（%s）：%r" % (url, exc)) from exc
+    out = []
+    for rel in data:
+        out.append((rel["tag_name"] + "（标题）", rel.get("name") or ""))
+        out.append((rel["tag_name"] + "（正文）", rel.get("body") or ""))
+    return out
+
+
+def _repo_slug(repo: Path) -> str:
+    """从 remote URL 里取出 owner/repo。
+
+    **只放行合法的 slug**（字母数字与 `.` `_` `-`）—— 这个值会拼进
+    api.github.com 的 URL，放行任意字符就等于把 URL 交给别处。
+    """
+    url = _git(repo, "remote", "get-url", "origin").strip()
+    if url.endswith(".git"):
+        url = url[:-4]
+    parts = [p for p in url.replace(":", "/").split("/") if p]
+    if len(parts) >= 2:
+        slug = "%s/%s" % (parts[-2], parts[-1])
+        if re.match(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$", slug):
+            return slug
+    return "hu-chenyu/log-ai-compressor"
+
+
+def _unreachable(repo: Path) -> list[tuple[str, str]]:
+    """**不可达对象**（面 7）：对象库里够不着、但磁盘上还在的那些。
+
+    `git rev-list --all` 只给可达的；`cat-file --batch-all-objects` 给全集。
+    两者相减 = 被强推替换掉的提交、reflog 还持有的提交 —— 2026-10 的复核
+    就是在这里抓到一笔「不在可达历史里、GitHub 侧却仍能直读」的提交，
+    它的信息里带着违禁词。
+    """
+    out = subprocess.run(
+        [_GIT, "-C", str(repo), "cat-file", "--batch-all-objects",
+         "--batch-check=%(objectname) %(objecttype)"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=_child_env(), timeout=900).stdout
+    all_objs = [ln.split() for ln in out.splitlines() if len(ln.split()) >= 2]
+    reach = set()
+    for line in _git(repo, "rev-list", "--objects", "--all").splitlines():
+        parts = line.split(" ", 1)
+        if parts:
+            reach.add(parts[0])
+    reach_commits = set(_git(repo, "rev-list", "--all").split())
+
+    res = []
+    for sha, typ in all_objs:
+        if typ == "blob" and sha not in reach:
+            res.append(("blob " + sha[:10], _read_blob(repo, sha)))
+        elif typ == "commit" and sha not in reach_commits:
+            res.append(("commit " + sha[:10], _git(repo, "cat-file", "commit", sha)))
+    return [(n, t) for n, t in res if t]
+
+
+def _read_blob(repo: Path, sha: str) -> str:
+    """读一个 blob 的正文；二进制不当文本扫（与门禁同口径）。"""
+    p = subprocess.run([_GIT, "-C", str(repo), "cat-file", "blob", sha],
+                       capture_output=True, env=_child_env(), timeout=300)
+    raw = p.stdout
+    if b"\0" in raw[:8000]:
+        return ""
+    return raw.decode("utf-8", "replace")
 
 
 def audit(repo: Path, gate) -> dict:
@@ -179,13 +266,28 @@ def audit(repo: Path, gate) -> dict:
             if n:
                 add("ref_name", w, name, name)
 
+    # ---- 面 6：GitHub 上的 Release 标题与正文（不在 git 里）----
+    for name, text in _releases(repo):
+        for w in words:
+            n = count(text, w)
+            if n:
+                add("release", w, name, text.strip()[:180])
+
+    # ---- 面 7：不可达对象（reflog 持有、被强推替换掉的那批）----
+    for name, text in _unreachable(repo):
+        for w in words:
+            n = count(text, w)
+            if n:
+                add("unreachable", w, name, text.strip()[:180])
+
     by_surface = Counter(h["surface"] for h in hits)
     by_word = Counter()
     for h in hits:
         by_word[h["word"]] += 1
     # 五个面都要出现（没有命中也给 0）—— 「这个面没扫过」和「这个面是干净的」
     # 必须能分辨开。
-    faces = ("worktree", "commit_msg", "history", "tag_msg", "ref_name")
+    faces = ("worktree", "commit_msg", "history", "tag_msg", "ref_name",
+             "release", "unreachable")
     return {"repo": str(repo), "word_count": len(words),
             "by_surface": {f: by_surface.get(f, 0) for f in faces},
             "by_word": dict(by_word),
@@ -201,7 +303,9 @@ def _print_report(result: dict, max_report: int) -> None:
                         ("commit_msg", "提交信息"),
                         ("history", "历史版本文件内容"),
                         ("tag_msg", "tag 说明文字"),
-                        ("ref_name", "ref 名字")):
+                        ("ref_name", "ref 名字"),
+                        ("release", "Release 标题与正文"),
+                        ("unreachable", "不可达对象")):
         print("%-22s %8d" % (label, result["by_surface"].get(face, 0)))
     print("%-22s %8d" % ("合计", result["total"]))
     if result["by_word"]:

@@ -174,5 +174,6 @@ def test_surfaces_are_not_vacuous(tmp_path: Path) -> None:
     out = _run_audit(repo)
     surfaces = out["data"]["by_surface"]
     assert set(surfaces) == {"worktree", "commit_msg", "history",
-                              "tag_msg", "ref_name"}, "扫描面少了：%s" % set(surfaces)
+                              "tag_msg", "ref_name", "release",
+                              "unreachable"}, "扫描面少了：%s" % set(surfaces)
     assert out["data"]["word_count"] == len(_WORDS)
