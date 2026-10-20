@@ -1037,13 +1037,44 @@ MUTATIONS: List[Mutation] = [
             "**多行**值：一次 splitlines() 把说明拆成多行，"
             "「只认含 tab 的行」那一步把没有 tab 的**续行整条丢掉** —— "
             "于是每个 tag 只有第一行被检查。实测：本仓库 32 个 annotated "
-            "tag 的说明共 270 行，旧实现只扫到 33 行（**12.2%**）。"
-            "2026-10 的外部复核抓到的就是这个洞 —— 它当时没漏到东西，"
-            "但那是运气，不是口径。",
+            "tag 的**整条对象**共 270 行（其中说明文字 110 行），"
+            "旧实现只扫到 33 行。2026-10 的外部复核抓到的就是这个洞 —— "
+            "它当时没漏到东西，但那是运气，不是口径。",
         target="tests/test_no_job_wording.py",
         old='        msgs.append((name, _git("cat-file", "tag", sha, repo=repo)))',
         new=('        msgs.append((name, _git("cat-file", "tag", sha, repo=repo)'
              '.splitlines()[0]))'),
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/gb18030-fallback-removed",
+        why="把解码的 GB18030 兜底去掉 —— 于是 GBK 编码的文件又被当成 UTF-8 "
+            "解，中文变成一串 U+FFFD。**那不是「里面没有词」，那是「看不见」**："
+            "2026-10 的外部复核在编码这一维找到一个我完全没想到的洞"
+            "（工作区 1 个 GBK 文本、历史 2 个），当时都是 0 命中 —— "
+            "但那是**因为里面本来就没有词**，不是因为门禁看得见。",
+        target="tests/test_no_job_wording.py",
+        old='        return raw.decode("gb18030")',
+        new='        return raw.decode("utf-8", errors="replace")',
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/whitespace-split-detector-disabled",
+        why="让「被空白拆开的词」这个探测器恒返回空 —— 于是「工作区 0 处、"
+            "历史不超过基线 6」这两条断言**全都变成空跑**，而它们守的恰恰是"
+            "那道「折行的词看不见」的缺口。报数为 0 与报数为错在输出里长得"
+            "一模一样：**探测器恒返回空**与「真的没有」无法区分。"
+            "这条守的是探测器自己的牙齿。",
+        target="tests/test_no_job_wording.py",
+        old=("    for w in FORBIDDEN:\n"
+             "        for m in re.finditer(_pattern(w), flat):\n"
+             "            a = index[m.start()]\n"
+             "            b = index[m.end() - 1]\n"
+             "            if all(ch.isspace() for ch in text[a + 1:b]):\n"
+             "                out.append(w)\n"
+             "                break\n"
+             "    return out"),
+        new="    return []",
         tests=["tests/test_no_job_wording.py"],
     ),
 ]

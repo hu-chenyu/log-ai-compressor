@@ -133,6 +133,8 @@ def _releases(repo: Path) -> list[tuple[str, str]]:
     for rel in data:
         out.append((rel["tag_name"] + "（标题）", rel.get("name") or ""))
         out.append((rel["tag_name"] + "（正文）", rel.get("body") or ""))
+        for asset in rel.get("assets", []):
+            out.append((rel["tag_name"] + "（附件名）", asset.get("name") or ""))
     return out
 
 
@@ -153,7 +155,7 @@ def _repo_slug(repo: Path) -> str:
     return "hu-chenyu/log-ai-compressor"
 
 
-def _unreachable(repo: Path) -> list[tuple[str, str]]:
+def _unreachable(repo: Path, decode) -> list[tuple[str, str]]:
     """**不可达对象**（面 7）：对象库里够不着、但磁盘上还在的那些。
 
     `git rev-list --all` 只给可达的；`cat-file --batch-all-objects` 给全集。
@@ -177,20 +179,23 @@ def _unreachable(repo: Path) -> list[tuple[str, str]]:
     res = []
     for sha, typ in all_objs:
         if typ == "blob" and sha not in reach:
-            res.append(("blob " + sha[:10], _read_blob(repo, sha)))
+            res.append(("blob " + sha[:10], _read_blob(repo, sha, decode)))
         elif typ == "commit" and sha not in reach_commits:
             res.append(("commit " + sha[:10], _git(repo, "cat-file", "commit", sha)))
     return [(n, t) for n, t in res if t]
 
 
-def _read_blob(repo: Path, sha: str) -> str:
-    """读一个 blob 的正文；二进制不当文本扫（与门禁同口径）。"""
+def _read_blob(repo: Path, sha: str, decode) -> str:
+    """读一个 blob 的正文；二进制不当文本扫（与门禁同口径）。
+
+    **解码也用门禁那份**（含 GB18030 兜底）—— 口径只有一份。
+    """
     p = subprocess.run([_GIT, "-C", str(repo), "cat-file", "blob", sha],
                        capture_output=True, env=_child_env(), timeout=300)
     raw = p.stdout
     if b"\0" in raw[:8000]:
         return ""
-    return raw.decode("utf-8", "replace")
+    return decode(raw)
 
 
 def _matches(text: str, words: list[str], pattern_fn):
@@ -220,6 +225,7 @@ def audit(repo: Path, gate) -> dict:
     """扫七个面，返回命中明细。"""
     words = list(gate.FORBIDDEN)
     pattern = gate._pattern         # 匹配正则取自门禁
+    decode = gate._decode_text      # 解码也取自门禁（含 GB18030 兜底）
     hits = []
 
     def add(surface, word, where, snippet):
@@ -238,7 +244,7 @@ def audit(repo: Path, gate) -> dict:
             continue
         if _is_binary(raw):
             continue
-        text = raw.decode("utf-8", "replace")
+        text = decode(raw)
         for w, lineno, snippet in _matches(text, words, pattern):
             add("worktree", w, "%s:%d" % (rel, lineno), snippet)
 
@@ -278,7 +284,7 @@ def audit(repo: Path, gate) -> dict:
             add("release", w, name, snippet)
 
     # ---- 面 7：不可达对象（reflog 持有、被强推替换掉的那批）----
-    for name, text in _unreachable(repo):
+    for name, text in _unreachable(repo, decode):
         for w, lineno, snippet in _matches(text, words, pattern):
             add("unreachable", w, name, snippet)
 

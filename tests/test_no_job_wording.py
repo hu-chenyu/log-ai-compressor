@@ -278,7 +278,14 @@ _CHUNK = 64
 _MIN_FILES = 50
 _MIN_COMMITS = 100
 _MIN_BLOBS = 50
-_MIN_RELEASES = 5
+#: 面 6 拿到的字段数下门限。实测 27 个 Release × (标题 + 正文 + 附件名)
+#: = 108 —— 而原来的门限只有 `5 * 2 = 10`：**塌到 10 个字段照样绿**。
+#: 那正是「报「检查通过」但其实什么都没扫」的形态。
+_MIN_RELEASE_FIELDS = 90
+
+#: 「被空白拆开的禁用词」在**历史**里的上界（当前 6 处）。
+#: 变小是好事（历史重写会清掉），变大说明有人新写进了一处。
+_WHITESPACE_SPLIT_BASELINE = 6
 
 #: GitHub API 的仓库地址（面 6 用）
 _RELEASES_API = ("https://api.github.com/repos/hu-chenyu/log-ai-compressor"
@@ -385,7 +392,33 @@ def _read_text(rel: str) -> str:
         return ""
     if b"\0" in raw[:8000]:
         return ""  # 二进制 —— 与 git grep -I 的口径保持一致
-    return raw.decode("utf-8", errors="replace")
+    return _decode_text(raw)
+
+
+def _decode_text(raw: bytes) -> str:
+    """把一段字节解成文本：先严格 UTF-8，失败再试 GB18030，最后才降级。
+
+    **为什么要兜底**：只用 `utf-8, errors="replace"` 的话，GBK 编码的
+    中文会变成一串 U+FFFD —— 那不是「里面没有词」，那是**看不见**。
+    2026-10 的外部复核抓到过两个这样的文件（工作区的一个 GBK 夹具、
+    历史里一个 GBK 编码的批处理文件）：当时它们都是 0 命中，但那是
+    **因为里面本来就没有词**，不是因为门禁看得见。
+
+    **为什么是 GB18030 而不是 GBK**：GB18030 是 GBK 的超集，也覆盖
+    GBK 之外的汉字与符号，试它一个就够。
+
+    **降级路径（两个编码都失败）会产生 U+FFFD** —— 那条路只留给真正的
+    二进制乱码；门禁里另有一条断言盯着它（见
+    `test_non_utf8_text_files_are_still_scanned`）。
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return raw.decode("gb18030")
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------
@@ -454,8 +487,70 @@ def _read_blobs(shas: list[str], repo: Path | None = None) -> dict[str, str]:
         pos += size + 1
         if b"\0" in body[:8000]:
             continue          # 二进制：不当文本扫（与 _read_text 同口径）
-        texts[sha] = body.decode("utf-8", "replace")
+        texts[sha] = _decode_text(body)
     return texts
+
+
+#: 全部可达 blob 的正文（**只读一次**）。面 3 与「被拆开的词」那条断言
+#: 要的是同一批文本 —— 读两遍只是白花时间。
+_BLOB_TEXTS: dict[str, str] | None = None
+
+
+def _all_blob_texts() -> dict[str, str]:
+    """全部可达 blob 的正文（读一次，缓存住）。"""
+    global _BLOB_TEXTS
+    if _BLOB_TEXTS is None:
+        _BLOB_TEXTS = _read_blobs(sorted(_reachable_blobs()))
+    return _BLOB_TEXTS
+
+
+def _flatten(text: str) -> tuple[str, list[int]]:
+    """去掉所有空白后的文本，以及每个保留字符在**原文**里的下标。
+
+    下标表是必需的：去掉空白之后位置全乱了，而「命中在哪一行」还得报准。
+    """
+    chars: list[str] = []
+    index: list[int] = []
+    for i, ch in enumerate(text):
+        if ch.isspace():
+            continue
+        chars.append(ch)
+        index.append(i)
+    return "".join(chars), index
+
+
+def _whitespace_split_hits(text: str) -> list[str]:
+    """text 里**被空白拆开**的禁用词（渲染口径下才会命中的那些）。
+
+    判据（必须**逐个出现位置**地判，不能整段判）：
+    在**去空白**后的文本里找到这个词的每一次出现，再把它的首尾字符
+    **映射回原文** —— 只有当这两个字符之间**全是空白**时，它才算
+    「被拆开」。
+
+    **为什么不能整段判**（第一版就是这么写的，错了）：
+    判据写成「去空白后有这个词，且原文里没有」→ 对 ASCII 词会**成片假阳性**
+    —— 原文里明明有 `HRX`（子串在，但整词不在），却被判成「被拆开」，
+    实测 313 处。
+    正确做法是看**具体那一次出现**在原文里的字符间隔。
+
+    这条辅助函数服务的是「字面口径看不见的那一类」：它不是另一个红线，
+    而是把那个缺口的**大小**变成可测量的数字（见
+    `test_worktree_has_no_whitespace_split_forbidden_word` 与
+    `test_history_whitespace_split_hits_stay_within_baseline`）。
+    """
+    import re
+    flat, index = _flatten(text)
+    if not flat:
+        return []
+    out = []
+    for w in FORBIDDEN:
+        for m in re.finditer(_pattern(w), flat):
+            a = index[m.start()]
+            b = index[m.end() - 1]
+            if all(ch.isspace() for ch in text[a + 1:b]):
+                out.append(w)
+                break
+    return out
 
 
 def _tag_messages(repo: Path | None = None) -> list[tuple[str, str]]:
@@ -466,8 +561,10 @@ def _tag_messages(repo: Path | None = None) -> list[tuple[str, str]]:
     而后面「只认含 tab 的行」那一步会把没有 tab 的**续行整条丢掉** ——
     于是**每个 tag 只有第一行**被检查。
 
-    2026-10 的外部复核实测过这个洞：本仓库 32 个 annotated tag 的说明
-    共 270 行，旧实现只扫到 **33 行（12.2%）**，169 行被直接跳过。
+    2026-10 的外部复核实测过这个洞：本仓库 32 个 annotated tag 的
+    **整条对象**共 270 行（**其中说明文字只有 110 行**，其余是
+    `object`/`type`/`tag`/`tagger` 头部与空行），旧实现只扫到 **33 行** ——
+    169 行被直接跳过。12.2% 是对整条对象算的；若只对说明文字算，是 30%。
     当时没漏到东西（整条读也是 0 命中），但那是运气，不是口径。
 
     改成按**对象**读：`cat-file tag <sha>` 给出 tag 对象的全文
@@ -628,8 +725,7 @@ def test_history_contents_have_no_forbidden_wording():
     折行的词**两种口径都看不见** —— 那是判据问题，不是实现问题，
     见 `test_matching_semantics_are_literal_substring`。
     """
-    reachable = _reachable_blobs()
-    texts = _read_blobs(sorted(reachable))
+    texts = _all_blob_texts()
     hits = []
     for sha, text in texts.items():
         for word, n in _hits_in(text):
@@ -747,9 +843,16 @@ def test_matching_semantics_are_literal_substring():
     门禁就会先把自己判红。）
 
     **这个选择有代价，而且代价是实测过的**：按「渲染语义」（去掉所有空白
-    后再匹配）扫七个面，本仓库会多出 6 处命中，全都是同一句
-    「谁让哪个 AI 复核的」—— 5 处在历史、1 处在工作区。
-    也就是说：**折行的词现在是看不见的**，而这**不是**门禁坏了，
+    后再匹配）扫七个面，本仓库会多出 6 处命中，**全在历史里**（工作区已
+    清零）—— 全都是同一句保留表里的自述（那句话在否定句里点名了被清掉的
+    做法，所以它既是一处命中，也是一条「清掉了什么」的记录）。
+
+    **那句原文刻意不抄在这里。** 本文件也在扫描范围内：抄了它，一旦口径
+    改成渲染语义，门禁会**先把自己判红** —— 守门的人与被守的东西住在
+    同一处，形状与「手打码点」那次一模一样。引文请查 CHANGELOG「第五轮」
+    那一节。
+
+    也就是说：**被拆开的词现在是看不见的**，而这**不是**门禁坏了，
     是判据选了「字面」。
 
     钉死它的理由：口径若在没人察觉的情况下漂移，前后的扫描结果就不可比，
@@ -765,6 +868,87 @@ def test_matching_semantics_are_literal_substring():
     assert _count(word[0] + " " + word[1:], word) == 0, (
         "被空格拆开的词被判成了命中 —— 匹配口径变了。"
         "请把这条测试连同判据一起改，并把代价重新量一遍")
+
+
+def test_worktree_has_no_whitespace_split_forbidden_word():
+    """工作区里不许有**被空白拆开**的禁用词（渲染口径下会命中的那些）。
+
+    **这是本轮新加的一条**：上一轮把「代价我量过了」写进了 docstring，
+    而那句话是**散文** —— 没人看守。本条把它变成可执行断言：工作区一旦
+    出现一个被拆开的词，立刻红。
+
+    历史那一侧的同口径计数见下一条（基线 6，全是保留表里的自述）。
+
+    为什么单立一条、而不是并进面 1：**面 1 的红线是字面口径**，
+    「被拆开的词算不算」是**判据问题**（见
+    `test_matching_semantics_are_literal_substring`）。这条守的不是
+    判据本身，而是「**工作区不许再长出新的这一类**」。
+    """
+    hits = []
+    for rel in _tracked_paths():
+        for w in _whitespace_split_hits(_read_text(rel)):
+            hits.append((rel, w))
+    # **先证真**：这个辅助函数本身要能抓到东西 —— 否则「工作区 0 处」这句
+    # 结论可能只是「探测器恒返回空」。报数为 0 与报数为错在输出里长得一样。
+    probe = FORBIDDEN[0]
+    assert _whitespace_split_hits("x" + probe[0] + " " + probe[1:] + "y"), (
+        "「被拆开的词」这个探测器什么都抓不到 —— 它形同虚设，"
+        "下面那条「工作区 0 处」也就没有意义了")
+    assert not hits, (
+        "工作区出现了被空白拆开的禁用词（渲染口径下会命中）：\n"
+        + "\n".join("  %s —— %s" % (r, w) for r, w in hits[:20]))
+
+
+def test_history_whitespace_split_hits_stay_within_baseline():
+    """历史里「被拆开的词」不得超过基线（当前 6 处，全是保留表里的自述）。
+
+    数字是**上界**，不是等号：历史重写会让它变小（变小是好事），
+    而**变大**说明有人新写进了一处 —— 那要红。
+
+    基线 6 = 5 个 CHANGELOG.md 的旧版本 + 1 个门禁文件旧版本
+    （那一版在 docstring 里引用了那句话；本版起不再引用，所以工作区已 0）。
+    """
+    hits = []
+    for sha, text in _all_blob_texts().items():
+        for w in _whitespace_split_hits(text):
+            hits.append((sha, w))
+    assert len(hits) <= _WHITESPACE_SPLIT_BASELINE, (
+        "被空白拆开的禁用词有 %d 处，超过基线 %d —— "
+        "要么有人新写进了一处，要么基线该更新了（先看清楚再改）"
+        % (len(hits), _WHITESPACE_SPLIT_BASELINE))
+
+
+def test_non_utf8_text_files_are_still_scanned():
+    """**非 UTF-8 的文本文件必须也被扫到** —— 且这一维不许悄悄消失。
+
+    2026-10 的外部复核发现：工作区有一个 GBK 编码的夹具、历史里有一个
+    GBK 编码的批处理文件。当时它们都是 0 命中，但那是**因为里面本来就没
+    有词**，不是因为门禁看得见 —— 旧实现用 `errors="replace"` 解码，
+    GBK 的中文会变成 U+FFFD，任何中文词都匹配不到。
+
+    现在解码有 GB18030 兜底（见 `_decode_text`），本条断言「这条通道
+    真的存在」：工作区里非 UTF-8 文本**不少于 1 个**，且它们**确实被
+    解出了文本**（解不出来就说明兜底没生效）。
+    """
+    items = []
+    for rel in _tracked_paths():
+        raw = (ROOT / rel).read_bytes()
+        if b"\0" in raw[:8000]:
+            continue
+        try:
+            raw.decode("utf-8")
+            continue
+        except UnicodeDecodeError:
+            pass
+        items.append((rel, _decode_text(raw)))
+    assert len(items) >= 1, (
+        "工作区里一个非 UTF-8 文本都没有 —— 这条断言形同虚设"
+        "（要么夹具被删了，要么解码兜底把这条通道吃掉了）")
+    for rel, text in items:
+        assert text.strip(), "%s 解不出文本 —— GB18030 兜底没生效" % rel
+        assert "�" not in text, (
+            "%s 解出来带替换字符 —— 降级路径被用上了，"
+            "这个文件的编码门禁读不懂" % rel)
 
 
 def test_forbidden_table_entries_are_real_words():
@@ -808,12 +992,16 @@ def test_release_titles_and_bodies_have_no_forbidden_wording():
     对应小节都已经改过了（只改了正文，忘了标题）。
     """
     releases = _release_bodies()
-    assert len(releases) >= _MIN_RELEASES * 2, (
+    assert len(releases) >= _MIN_RELEASE_FIELDS, (
         "只拿到 %d 个 Release 字段（门限 %d）—— 面 6 塌了"
-        % (len(releases), _MIN_RELEASES * 2))
+        % (len(releases), _MIN_RELEASE_FIELDS))
+    assets = [name for name, _ in releases if name.endswith("（附件名）")]
+    assert assets, (
+        "一个附件名都没拿到 —— 面 6 的附件名那一半塌了"
+        "（标题与正文还在，附件名这一路静默失能了）")
     hits = []
     for name, text in releases:
         for word, n in _hits_in(text):
             hits.append((name, word, n))
-    assert not hits, "Release 的标题或正文里出现了禁用词：\n" + "\n".join(
+    assert not hits, "Release 的标题、正文或附件名里出现了禁用词：\n" + "\n".join(
         "  %s —— %d 处" % (name, n) for name, word, n in hits)
