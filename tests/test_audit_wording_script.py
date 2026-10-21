@@ -169,6 +169,17 @@ def test_text_report_prints_the_scale(tmp_path: Path) -> None:
         env=env, check=False, timeout=300)
     assert proc.returncode in (0, 1), proc.stderr[-400:]
     assert "扫了多少对象" in proc.stdout, "表格里没有「扫了多少对象」这一列"
+    # 单位也要在**人看的表格**里 —— 七个数不同量纲（个文件 / 笔 / 个文本 blob），
+    # 只有数字没有单位，跨面比较就会把「1 个 blob」与「4 个字段」当同一件事比。
+    assert "个文件" in proc.stdout, "表格里没有每一面的单位"
+    # 这一列印的必须是**扫过的对象数**，不是命中数。
+    # 干净仓库的命中数恒为 0 —— 两列一旦印反了，上面那行断言照样绿。
+    row = next((ln for ln in proc.stdout.splitlines()
+                if ln.startswith("工作区文件内容")), "")
+    assert row, "表格里没有「工作区文件内容」这一行"
+    nums = [int(tok) for tok in row.split() if tok.isdigit()]
+    assert nums and nums[0] >= 1, (
+        "「扫了多少对象」那一列印的不是扫过的对象数：%r" % row)
 
 
 def test_clean_repo_reports_zero_hits(tmp_path: Path) -> None:

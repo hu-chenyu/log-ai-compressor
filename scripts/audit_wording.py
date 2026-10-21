@@ -346,7 +346,7 @@ def _print_report(result: dict, max_report: int) -> None:
     # 「扫了多少对象」这一列是**故意加的**：「扫了 0 个」与「扫了 1400 个
     # 但一个没命中」在输出里必须能分辨开 —— 前者是「没装计数器」，后者是
     # 「真的干净」。
-    print("%-30s %12s %8s" % ("扫描面（单位）", "扫了多少", "命中处数"))
+    print("%-30s %12s %8s" % ("扫描面（单位）", "扫了多少对象", "命中处数"))
     for face, label, unit in _FACES:
         scanned = result["scanned"].get(face, 0)
         if isinstance(scanned, dict):
