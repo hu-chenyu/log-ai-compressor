@@ -823,7 +823,7 @@ MUTATIONS: List[Mutation] = [
             "一个把「十道过了、一道超时」显示成「整个 run 取消」的结论，"
             "比红本身更费时间",
         target=".github/workflows/ci.yml",
-        old="    timeout-minutes: 45",
+        old="    timeout-minutes: 60",
         new="    timeout-minutes: 20",
         tests=["tests/test_ci_long_pole.py"],
     ),
