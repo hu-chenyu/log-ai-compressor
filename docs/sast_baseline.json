@@ -268,8 +268,8 @@
     {
       "test_id": "B603",
       "path": "tests/test_audit_wording_script.py",
-      "count": 3,
-      "reason": "复核：三处都是列表传参 + shell=False，跑的是 shutil.which 解析出的 `git` 与本项目的审计脚本（sys.executable），参数是本测试的临时目录常量；新增的一处是 `git tag -a`，**说明文字走 stdin**（`-F -`），不进命令行。不接收任何外部输入作为命令行片段。"
+      "count": 4,
+      "reason": "复核：四处都是列表传参 + shell=False，跑的是 shutil.which 解析出的 `git` 与本项目的审计脚本（sys.executable），参数是本测试的临时目录常量；一处是 `git tag -a`，**说明文字走 stdin**（`-F -`），不进命令行；**第四处（2026-10-21 新增）是同一条审计脚本的非 JSON 运行** —— 只为核对人看的表格里有没有「扫了多少对象」那一列，命令行固定为 `sys.executable` + 脚本路径 + 三个常量参数。不接收任何外部输入作为命令行片段。"
     },
     {
       "test_id": "B603",

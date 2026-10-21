@@ -142,9 +142,17 @@ def test_report_sees_how_many_objects_each_face_scanned(tmp_path: Path) -> None:
     assert out["rc"] == 0, "干净仓库不该返回 1"
     scanned = out["data"]["scanned"]
     assert set(scanned) == set(out["data"]["by_surface"]), "两列的面不对齐"
-    assert scanned["worktree"] >= 1, "工作区明明有文件，却报「扫了 0 个」"
-    assert scanned["commit_msg"] >= 1, "明明有提交信息，却报「扫了 0 个」"
-    assert scanned["history"] >= 1, "明明有历史内容，却报「扫了 0 个」"
+    # 「扫了多少」必须**带单位** —— 七个数不同量纲，只有数字没有量纲，
+    # 跨面比较就会出错（外部复核指出的）。
+    for face, unit in (("worktree", "个文件"), ("commit_msg", "笔"),
+                        ("history", "个文本 blob"), ("tag_msg", "条"),
+                        ("ref_name", "个"), ("release", "个字段"),
+                        ("unreachable", "个对象")):
+        assert scanned[face]["unit"] == unit, (
+            "面 %s 的单位变了：%r" % (face, scanned[face]["unit"]))
+    assert scanned["worktree"]["n"] >= 1, "工作区明明有文件，却报「扫了 0 个」"
+    assert scanned["commit_msg"]["n"] >= 1, "明明有提交信息，却报「扫了 0 个」"
+    assert scanned["history"]["n"] >= 1, "明明有历史内容，却报「扫了 0 个」"
     assert out["data"]["by_surface"]["worktree"] == 0, "干净仓库不该有命中"
 
 

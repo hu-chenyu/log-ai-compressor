@@ -69,6 +69,27 @@ ROOT = Path(__file__).resolve().parent.parent
 # scripts/mutation_scorecard.py 早就这么处理了，这里照抄那条做法。
 _GIT = shutil.which("git")
 
+#: 每一面的**名字与单位**（唯一一处定义，报告与 JSON 都从这里取）。
+#:
+#: **单位必须跟着数一起出现**：七个数不同量纲 —— 文件 / 提交 / blob / 条 / 个 /
+#: **字段** / 对象。混在一个列名下，读者会把「1,918 个 blob」与「4 个字段」
+#: 当同一件事比。2026-10-21 的外部复核指出的正是这一条。
+#:
+#: 面 7 标「**本机**」是有意的：它数的是**本地对象库**里的不可达对象
+#: （判据 = `git fsck --unreachable`），而**服务端**的对象库里那些被强推
+#: 替换掉的旧提交**仍可按 SHA 取回**（判据 = `git fetch` 的退出码）。
+#: **两个不同的对象库，两个不同的读数** —— 把它们并排写，读者才不会把
+#: 「本地 0」读成「服务端 0」。
+_FACES = (
+    ("worktree", "工作区文件内容", "个文件"),
+    ("commit_msg", "提交信息", "笔"),
+    ("history", "历史版本文件内容", "个文本 blob"),
+    ("tag_msg", "tag 说明文字", "条"),
+    ("ref_name", "ref 名字", "个"),
+    ("release", "Release 标题与正文", "个字段"),
+    ("unreachable", "不可达对象（本机）", "个对象"),
+)
+
 
 def _child_env() -> dict:
     """子进程的环境变量：显式把编码钉死，不继承开发机的那一套。"""
@@ -308,11 +329,12 @@ def audit(repo: Path, gate) -> dict:
         by_word[h["word"]] += 1
     # 七个面都要出现（没有命中也给 0）—— 「这个面没扫过」和「这个面是干净的」
     # 必须能分辨开。
-    faces = ("worktree", "commit_msg", "history", "tag_msg", "ref_name",
-             "release", "unreachable")
+    faces = tuple(f for f, _label, _unit in _FACES)
     return {"repo": str(repo), "word_count": len(words),
             "by_surface": {f: by_surface.get(f, 0) for f in faces},
-            "scanned": {f: scanned.get(f, 0) for f in faces},
+            # 「扫了多少」**带单位** —— 只有数字没有量纲，跨面比较就会出错。
+            "scanned": {f: {"n": scanned.get(f, 0), "unit": unit}
+                        for f, _label, unit in _FACES},
             "by_word": dict(by_word),
             "total": len(hits), "hits": hits}
 
@@ -324,17 +346,16 @@ def _print_report(result: dict, max_report: int) -> None:
     # 「扫了多少对象」这一列是**故意加的**：「扫了 0 个」与「扫了 1400 个
     # 但一个没命中」在输出里必须能分辨开 —— 前者是「没装计数器」，后者是
     # 「真的干净」。
-    print("%-22s %12s %8s" % ("扫描面", "扫了多少对象", "命中条目"))
-    for face, label in (("worktree", "工作区文件内容"),
-                        ("commit_msg", "提交信息"),
-                        ("history", "历史版本文件内容"),
-                        ("tag_msg", "tag 说明文字"),
-                        ("ref_name", "ref 名字"),
-                        ("release", "Release 标题与正文"),
-                        ("unreachable", "不可达对象")):
-        print("%-22s %12d %8d" % (label, result["scanned"].get(face, 0),
+    print("%-30s %12s %8s" % ("扫描面（单位）", "扫了多少", "命中处数"))
+    for face, label, unit in _FACES:
+        scanned = result["scanned"].get(face, 0)
+        if isinstance(scanned, dict):
+            n, u = scanned.get("n", 0), scanned.get("unit", "")
+        else:                       # 兼容旧格式
+            n, u = scanned, ""
+        print("%-30s %12d %8d" % ("%s（%s）" % (label, u), n,
                                   result["by_surface"].get(face, 0)))
-    print("%-22s %12s %8d" % ("合计", "", result["total"]))
+    print("%-30s %12s %8d" % ("合计", "", result["total"]))
     if result["by_word"]:
         print()
         print("按词分布（%d 个词有命中）：" % len(result["by_word"]))
