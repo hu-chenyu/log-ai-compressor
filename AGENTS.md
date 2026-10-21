@@ -172,7 +172,7 @@ v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一�
 | 4 | `python scripts/prove.py` | README 里每个数字与主张，重新算一遍 |
 | 5 | 构建 + 可复现性 | 同一份源码能否重建出**逐字节相同**的产物 |
 | 6 | `pytest --cov-fail-under=90` | 单测 + 覆盖率地板 |
-| 7 | `python scripts/mutation_scorecard.py` | **门禁本身有没有牙齿**。把每一处「曾经让门禁失明」的改动固化成变异，逐条施加回去，看负责它的那组测试会不会红。只跑 `ubuntu-3.12` |
+| 7 | `python scripts/mutation_scorecard.py` | **门禁本身有没有牙齿**。把每一处「曾经让门禁失明」的改动固化成变异，逐条施加回去，看负责它的那组测试会不会红。只跑 `ubuntu-3.12`，且**独立成一个 job**（它的耗时与其它十道差一个数量级，共享一个 job 的 `timeout-minutes` 会把它砍在半路 —— 详见 `tests/test_ci_long_pole.py`） |
 | 8 | `python scripts/sast_gate.py` | **静态分析发现是否都有交代**。bandit 一开几十条，逐条 `nosec` 等于没检查；判据是逐条对账 `docs/sast_baseline.json`，四件事都让门禁红：新发现 / 数量对不上 / **豁免过期** / **豁免没写理由**。三矩阵全跑 |
 | 9 | `python scripts/dep_audit_gate.py --self-check` | **声明依赖有没有已知漏洞**。来源唯一（`pyproject.toml`）。`--self-check` 先喂已知有漏洞的 pin，要求它必须报出来，否则返回 2（门禁自身失能）而不是绿 |
 | 10 | `python scripts/perf_gate.py` | **性能回归**。硬门禁建在**确定性工作量计数**上（相似度回退次数 / `ratio` 次数 / 掩码次数 / 簇数 / 条目数），同一份负载在任何机器上必须给出同一组整数。**墙钟只报告、不判定** —— 跨机器不可比，噪声只会向下，做成红线只会收获假红然后被人 `--continue-on-error` |

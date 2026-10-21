@@ -786,6 +786,31 @@ MUTATIONS: List[Mutation] = [
         tests=["tests/test_ci_gate_wiring.py"],
     ),
     Mutation(
+        id="ci/long-pole-budget-shrunk-to-shared",
+        why="把变异记分卡那个独立 job 的 timeout 调回跟 `test` job 一样 —— "
+            "预算于是变回共享的，长杆照样把短杆挤爆。2026-10-21 那次"
+            "实测就是 `test` job 的 20 分钟被记分卡吃穿、run 结论是 "
+            "**cancelled**，而前面十道门禁全 success —— "
+            "一个把「十道过了、一道超时」显示成「整个 run 取消」的结论，"
+            "比红本身更费时间",
+        target=".github/workflows/ci.yml",
+        old="    timeout-minutes: 45",
+        new="    timeout-minutes: 20",
+        tests=["tests/test_ci_long_pole.py"],
+    ),
+    Mutation(
+        id="ci/long-pole-shallow-clone",
+        why="记分卡那个 job 不取完整历史。记分卡里有几条变异直接改 "
+            "tests/test_no_job_wording.py，而那道门禁要扫「全部历史版本的"
+            "文件内容」—— 浅克隆会让它退化成只看当前那一个版本。"
+            "那正是「扫了 0 个文件却报通过」那个形状的翻版",
+        target=".github/workflows/ci.yml",
+        old="          # 版本 —— 那正是「扫了 0 个文件却报通过」那个形状的翻版。\n"
+            "          fetch-depth: 0",
+        new="          # 版本 —— 那正是「扫了 0 个文件却报通过」那个形状的翻版。",
+        tests=["tests/test_ci_long_pole.py"],
+    ),
+    Mutation(
         id="ci/gate-marked-continue-on-error",
         why="给三道新门禁加 `continue-on-error`。门禁一旦可以失败后继续，"
             "它就不再是门禁 —— 而 CI 的 job 级结论仍然是 success，"

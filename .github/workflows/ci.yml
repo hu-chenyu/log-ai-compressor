@@ -25,7 +25,10 @@ jobs:
           - { os: ubuntu-latest, python: "3.12" }
           - { os: windows-latest, python: "3.12" }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20         # 核心层测试只要十几秒，卡住说明出了问题
+    # 核心层测试只要十几秒，卡住说明出了问题。
+    # 这一条**只**用来抓真正的卡死 —— 耗时差一个数量级的第七道门禁
+    # （变异记分卡）已经拆到独立的 `mutation` job 去了，见那里的说明。
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v7
@@ -284,17 +287,59 @@ jobs:
           path: coverage.xml
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------------
+  # 第七道门禁单独一个 job。
+  #
+  # 为什么不在 `test` job 里：它的耗时与其它十道差一个数量级 ——
+  # 95 条变异，每条都要重跑一组测试。实测（2026-10-21，ubuntu-3.12）：
+  # 它**单独**就跑了 11 分钟往上；而 `test` job 的 `timeout-minutes: 20`
+  # 是**整个 job** 的上限，不是那一步的。
+  #
+  # 于是长杆会吃光短杆的预算：2026-10-21 那次 `98378a3` 给措辞门禁加了
+  # 渲染口径断言，测试步从 3.1 min 涨到 4.5 min、记分卡从 11.0 min 涨到
+  # 14.7 min 还没跑完 —— job 在第 20 分钟被砍，run 结论是 **cancelled**，
+  # 而**前面十道门禁全都 success**。一个把「十道过了、一道超时」显示成
+  # 「整个 run 取消」的结论，比红本身更费时间：它让人先去猜是不是门禁坏了。
+  #
+  # 拆开之后：`test` job 回到 4~5 分钟，20 分钟的卡死预算**只**用来抓
+  # 真正的卡死（核心层测试只要十几秒）；记分卡按自己的成本拿预算。
+  # 两道门禁的结论也分开显示 —— 一道超时不会把另一道的结果一起吞掉。
+  # ---------------------------------------------------------------------
+  mutation:
+    runs-on: ubuntu-latest
+    # 只跑参考矩阵一条：变异测试量的是测试质量，与 OS / Python 版本无关，
+    # 三矩阵跑三遍纯属浪费（与「构建可复现」那步同理）。
+    # 放在独立 job 里就不需要 `if:` 条件了 —— 那一维由 job 本身声明。
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 同样必须取完整历史：记分卡里有几条变异直接改
+          # tests/test_no_job_wording.py，而那道门禁要扫「全部历史版本的
+          # 文件内容」与「全部提交信息」。浅克隆会让它退化成只看当前那一个
+          # 版本 —— 那正是「扫了 0 个文件却报通过」那个形状的翻版。
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
       - name: Mutation scorecard (do the tests still have teeth?)
         # 第七道门禁，也是唯一一道**关于测试本身**的门禁。
         #
         # 前面六道守的是「产品对不对」。这一道守的是「我们对不对的判断，
-        # 是不是真的有人在管」——它把每一处**曾经让门禁失明**的改动固化成
+        # 是不是真的有人在管」——它把每一处**曾经让门禁失明的改动**固化成
         # 变异，逐条施加回去，看负责它的那组测试会不会红。
         #
         # 它回答的是测试领域里最核心、也最容易被糊弄过去的问题：
         # **「你凭什么说这些测试有意义？」**
-        #
-        # 只跑参考矩阵一条：变异测试量的是测试质量，与 OS / Python 版本无关，
-        # 三矩阵跑三遍纯属浪费（与「构建可复现」那步同理）。
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: python scripts/mutation_scorecard.py

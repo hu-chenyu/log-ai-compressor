@@ -40,13 +40,20 @@ def _steps() -> list[tuple[str, dict]]:
     `clean_regex_content` 撞上了「为什么不管它」的说明、
     `continue-on-error` 撞上了 CI 注释。
     **判据要认结构，不是认文本。**
+
+    遍历的是**所有 job**，不是只有 `jobs.test` —— 第七道门禁（变异记分卡）
+    在 2026-10-21 被拆成了独立 job（它的耗时与其它十道差一个数量级，
+    塞在 `test` job 里会吃光那 20 分钟的卡死预算，见 ci.yml 里的说明）。
+    判据要问的是「ci.yml 里有没有真正执行它的步骤」，
+    **不是**「`test` job 里有没有」。
     """
     doc = yaml.safe_load(CI.read_text(encoding="utf-8"))
     out = []
-    for step in doc["jobs"]["test"]["steps"]:
-        if "run" not in step:
-            continue
-        out.append((str(step.get("name", "")).strip(), step))
+    for job in doc["jobs"].values():
+        for step in job.get("steps", []):
+            if "run" not in step:
+                continue
+            out.append((str(step.get("name", "")).strip(), step))
     return out
 
 

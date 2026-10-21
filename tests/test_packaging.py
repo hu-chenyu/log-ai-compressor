@@ -110,7 +110,10 @@ class TestPackaging:
 
         ci = (Path(__file__).resolve().parent.parent /
               ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        versions = set(re.findall(r'python:\s*"(\d+\.\d+)"', ci))
+        # `python-version:` 也要算进来 —— 2026-10-21 起变异记分卡那个
+        # 独立 job 用的就是 `python-version: "3.12"`，它同样是一条
+        # 「在 CI 上跑的 Python 版本」，漏掉它就等于少校一处。
+        versions = set(re.findall(r'python(?:-version)?:\s*"(\d+\.\d+)"', ci))
         assert floor in versions, (
             f"CI 矩阵 {sorted(versions)} 里没有 requires-python 的下限 {floor}")
         for v in versions:

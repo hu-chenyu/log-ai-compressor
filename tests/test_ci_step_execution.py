@@ -543,8 +543,12 @@ def _run_step_names() -> set:
     """只取**自己跑代码**（有 `run:`）的步骤 —— `uses:` 那类（checkout /
     setup-python / 传产物）是环境与搬运，不是门禁。"""
     doc = yaml.safe_load(_CI.read_text(encoding="utf-8"))
-    return {str(s.get("name", "")) for s in doc["jobs"]["test"]["steps"]
-            if "run" in s and str(s.get("name", "")).strip()}
+    names = set()
+    for job in doc["jobs"].values():
+        for s in job.get("steps", []):
+            if "run" in s and str(s.get("name", "")).strip():
+                names.add(str(s.get("name", "")))
+    return names
 
 
 class TestGateCountCannotDrift:
@@ -579,12 +583,25 @@ class TestGateCountCannotDrift:
             f"ci.yml 实际有 {actual} 道门禁，但文档没这么写：{wrong}\n"
             f"对外数字必须能被数出来，不能靠人记得同步。")
 
-    def test_the_mutation_step_runs_on_one_matrix_only(self):
-        """变异测试量的是测试质量，与 OS / Python 版本无关；跑三遍是浪费。"""
+    def test_the_mutation_gate_has_its_own_pinned_job(self):
+        """变异测试量的是测试质量，与 OS / Python 版本无关；跑三遍是浪费。
+
+        2026-10-21 起它不再挂在 `test` job 的某一格矩阵上，而是**自己一个
+        job**（耗时差一个数量级，见 ci.yml 里的说明）。于是「只跑一条矩阵」
+        这件事由 job 本身声明，而不是靠一个 `if:` 条件 ——
+        **条件写错会静默地跑到三格上，job 写错至少看得见。**
+        """
         doc = yaml.safe_load(_CI.read_text(encoding="utf-8"))
-        step = next(s for s in doc["jobs"]["test"]["steps"]
+        job = doc["jobs"]["mutation"]
+        assert job.get("runs-on") == "ubuntu-latest", (
+            f"变异记分卡那个 job 必须钉在 ubuntu：runs-on={job.get('runs-on')!r}")
+        setup = next(s for s in job["steps"]
+                     if str(s.get("name", "")).startswith("Set up Python"))
+        assert str(setup["with"]["python-version"]) == "3.12", (
+            "变异记分卡那个 job 必须钉在 3.12："
+            f"{setup['with']['python-version']!r}")
+        step = next(s for s in job["steps"]
                     if str(s.get("name", "")).startswith("Mutation scorecard"))
-        cond = str(step.get("if", ""))
-        assert "matrix.os" in cond and "matrix.python" in cond, (
-            f"变异记分卡那一步没有限制到单矩阵，会在三格上重复跑：if={cond!r}")
+        assert "if" not in step, (
+            "独立 job 里不该再有 if: 条件 —— 那一维已经由 job 本身声明了")
 
