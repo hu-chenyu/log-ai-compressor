@@ -391,14 +391,22 @@ _BLOCK_TAGS = ("p", "br", "div", "li", "ul", "ol", "tr", "td", "th",
 def _render_normalize(text: str) -> str:
     """去掉「读者看不见的语法与字符」，得到**渲染之后**的文本。
 
-    五件事：HTML 实体解码 → NFKC 归一化 → 块级 HTML 标签变空白、行内标签删掉
-    → Markdown 链接/强调/行内代码的语法删掉 → 零宽与软连字符删掉。
+    七件事：HTML 实体解码 → NFKC 归一化 → 块级 HTML 标签变空白、行内标签删掉
+    → Markdown 链接（含**引用式**）/ 强调 / 行内代码的语法删掉
+    → 零宽、软连字符与其它**不可见字符**删掉。
 
     **不做空白折叠** —— 那是「被拆开」那一条的判据（另外按 report-only 处理）。
     两套口径混在一起，就会既不是红线也不是报告。
 
-    2026-10-21 实测：工作区 177 个文本文件与全部 1,863 个历史对象，
-    渲染口径的**新增命中都是 0**（外部复核独立测出同一个数）。
+    **U+2028 / U+2029 归一化成换行、而不是删掉**：它们与 `\n` 是同一类东西
+    （硬换行），而 `\n` 是**保留**的 —— 早期版本把这两个删掉，于是
+    「面\u2028试」会被粘成一个词，而「面\n试」不会。**同一个换行两套规则**
+    —— 2026-10-21 的外部复核之后自己发现的，已改。
+
+    2026-10-21 实测：工作区 177 个文本文件（179 个跟踪文件里 1 个二进制、
+    1 个零字节）与全部 **1,870** 个历史文本对象，渲染口径的**新增命中都是 0**
+    （外部复核独立测出同一个数；那次的管线少了三种藏法，补上后基线**不变**，
+    说明仓库里本来就没有被那些藏法藏起来的词）。
     """
     import html
     import re
@@ -410,21 +418,42 @@ def _render_normalize(text: str) -> str:
     t = re.sub(r"(?s)<[^>]+>", "", t)
     t = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", t)
     t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
+    # 引用式链接 `[文字][ref]` 渲染出来是**链接文字**，`[ref]: url` 那一行
+    # 根本不渲染成正文 —— 早期版本两样都没处理，于是「[X][ref]Y」这种
+    # 写法整个看不见（读者看到的是那个完整的词）。
+    # **注意**：示例里只能写占位符 —— 写实字会被这条门禁自己拼成
+    # 一个完整的词，然后**先把自己判红**（2026-10-21 实测过一次）。
+    t = re.sub(r"(?m)^\s*\[[^\]]+\]:\s*\S+.*$", "", t)
+    t = re.sub(r"\[([^\]]*)\]\[[^\]]*\]", r"\1", t)
     t = re.sub(r"(?s)(`+)(.*?)\1", r"\2", t)
     for mark in ("***", "___", "**", "__", "~~", "*", "_"):
         t = t.replace(mark, "")
-    t = re.sub("[\u200b-\u200f\u2028\u2029\ufeff\u00ad]", "", t)
+    # 不可见字符：零宽、软连字符、双向控制、word joiner 与不可见运算符、
+    # 阿拉伯字母标记、蒙文元音分隔符、词间注记。读者一个都看不见。
+    t = re.sub("[\u200b-\u200f\ufeff\u00ad\u061c\u180e\u202a-\u202e"
+               "\u2060-\u2064\ufff9-\ufffb]", "", t)
     return t
 
 
 def _render_hidden_hits(text: str) -> list[tuple[str, int]]:
     """**渲染之后**才出现的词（原文里没有）—— 即「被语法藏起来」的。
 
-    判据：归一化后命中、而原文里**不**命中 —— 否则那只是普通的字面命中，
-    已经由面 1 / 面 3 报过了。
+    判据：归一化后的命中数**多于**原文 —— 多出来的那几次才是「被语法藏起来」的。
+    否则那只是普通的字面命中，已经由面 1 / 面 3 报过了。
+
+    **为什么按「次数差」而不是按「词集合差」**：早期版本比的是**词集合** ——
+    只要这个词在原文里出现过，渲染后的命中就整条不算。后果是：**一个文件里
+    既有字面命中、又有被藏起来的命中时，藏起来的那部分完全不可见。**
+    而工作区/历史的基线是 0，于是这条洞在报告里长得跟「一切正常」一模一样。
+    2026-10-21 的外部复核抓到的就是这一条。
     """
-    plain = {w for w, _n in _hits_in(text)}
-    return [(w, n) for w, n in _hits_in(_render_normalize(text)) if w not in plain]
+    plain = dict(_hits_in(text))
+    out = []
+    for w, n in _hits_in(_render_normalize(text)):
+        extra = n - plain.get(w, 0)
+        if extra > 0:
+            out.append((w, extra))
+    return out
 
 
 def _env() -> dict:
@@ -883,7 +912,16 @@ def test_history_has_no_render_hidden_word():
 
     与工作区同一条判据，同样是**上界**（当前基线 0）。
     历史里也可能有被语法藏起来的词 —— 上一轮的重写只按**字面**口径清过。
+
+    **这条自己也要有探针**：早期版本它只断言「没有命中」，于是单独跑这一条时
+    （`pytest -k history_has_no_render_hidden_word`）探测器恒返回空也照样绿
+    —— 而门禁一旦「能通过但不检查」，它就不算门禁了。探针用词表里的词
+    **自己拼**出来（这份文件里不能出现词面量）。
     """
+    probe = next(w for w in FORBIDDEN if len(w) >= 2)
+    assert _render_hidden_hits("**%s**%s" % (probe[0], probe[1:])), (
+        "渲染探测器什么都抓不到 —— 这条历史断言形同虚设，"
+        "「0 处」只是「恒返回空」")
     hits = []
     for sha, text in _all_blob_texts().items():
         for word, n in _render_hidden_hits(text):
@@ -891,6 +929,54 @@ def test_history_has_no_render_hidden_word():
     assert not hits, (
         "有词被渲染语法藏起来了（历史）：\n"
         + "\n".join("  %s —— %d 处" % (sha, n) for sha, word, n in hits[:20]))
+
+
+def test_render_hidden_count_is_a_difference_not_a_word_set_difference():
+    """同一个词「字面出现一次 + 被语法藏起来一次」时，**藏起来的那次不能被吞掉**。
+
+    早期实现按**词集合**做差：只要这个词在原文里出现过，渲染后的命中就整条
+    不算。后果是 —— 一个文件里既有字面命中、又有被藏起来的命中时，
+    **藏起来的那部分完全不可见**，而基线是 0，于是这条洞在报告里长得
+    跟「一切正常」一模一样。
+
+    2026-10-21 的外部复核抓到的就是这一条。
+    """
+    probe = next(w for w in FORBIDDEN if len(w) >= 2)
+    hidden = "**%s**%s" % (probe[0], probe[1:])
+    assert _render_hidden_hits(hidden), "探测器抓不到单独出现的隐藏词"
+    both = "这里有 %s 一次字面\n另一行有 %s 一次隐藏\n" % (probe, hidden)
+    assert _render_hidden_hits(both), (
+        "字面出现一次就把藏起来的那次吞掉了 —— 判据按**词集合**做差，"
+        "于是「既有字面又有隐藏」时，隐藏那部分完全不可见")
+
+
+def test_render_pipeline_sees_the_hiding_vectors_it_claims_to_see():
+    """每一种「被语法藏起来」都要能被抓到。
+
+    基线 0 只说明**这一批**词没被藏起来，不说明管线**看得见**这种藏法。
+    每种藏法都要有一份能被抓到的样本，否则「0 处」与「什么都没看见」
+    在输出里长得一模一样。
+    """
+    probe = next(w for w in FORBIDDEN if len(w) >= 2)
+    head, tail = probe[0], probe[1:]
+    vectors = [
+        ("零宽字符", head + "\u200b" + tail),
+        ("软连字符", head + "\u00ad" + tail),
+        ("双向控制", head + "\u202e" + tail),
+        ("word joiner", head + "\u2060" + tail),
+        ("引用式链接", "[%s][ref]%s\n\n[ref]: /x" % (head, tail)),
+        ("行内标签", "<b>%s</b>%s" % (head, tail)),
+        ("十进制实体", "%s&#%d;" % (head, ord(tail))),
+        ("Markdown 强调", "**%s**%s" % (head, tail)),
+    ]
+    for label, text in vectors:
+        assert _render_hidden_hits(text), (
+            "渲染管线看不见「%s」这种藏法 —— 基线 0 只说明**这一批**词"
+            "没被藏起来，不说明这一类藏法看得见" % label)
+    # 反例对照：块级标签之间是**分段**，不是空格粘起来 —— 不该算命中。
+    assert not _render_hidden_hits("<p>%s</p><p>%s</p>" % (head, tail)), (
+        "块级标签被当成了可删掉的行内标签 —— 那会把两段本来不相邻的文字"
+        "粘成一个词，造出读者根本没看见的命中")
 
 
 def test_commit_messages_have_no_forbidden_wording():

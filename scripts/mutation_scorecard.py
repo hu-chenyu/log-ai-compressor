@@ -786,6 +786,35 @@ MUTATIONS: List[Mutation] = [
         tests=["tests/test_ci_gate_wiring.py"],
     ),
     Mutation(
+        id="wording/render-count-differs-from-word-set",
+        why="把渲染口径的判据从「次数差」改回「词集合差」 —— 于是同一个词"
+            "「字面出现一次 + 被语法藏起来一次」时，藏起来的那次**被整条吞掉**。"
+            "而工作区/历史的基线是 0，这条洞在报告里长得跟「一切正常」一模一样。"
+            "2026-10-21 的外部复核抓到的就是这一条",
+        target="tests/test_no_job_wording.py",
+        old=("    plain = dict(_hits_in(text))\n"
+             "    out = []\n"
+             "    for w, n in _hits_in(_render_normalize(text)):\n"
+             "        extra = n - plain.get(w, 0)\n"
+             "        if extra > 0:\n"
+             "            out.append((w, extra))\n"
+             "    return out"),
+        new=("    plain = {w for w, _n in _hits_in(text)}\n"
+             "    return [(w, n) for w, n in _hits_in(_render_normalize(text))\n"
+             "            if w not in plain]"),
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/render-reference-link-removed",
+        why="去掉渲染口径里对**引用式链接**的处理 —— 于是 `[X][ref]Y` 这种写法"
+            "整个看不见，而读者看到的是那个完整的词。基线 0 只说明**这一批**词"
+            "没被藏起来，不说明这种藏法看得见",
+        target="tests/test_no_job_wording.py",
+        old='    t = re.sub(r"\\[([^\\]]*)\\]\\[[^\\]]*\\]", r"\\1", t)',
+        new="    t = t",
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
         id="ci/long-pole-budget-shrunk-to-shared",
         why="把变异记分卡那个独立 job 的 timeout 调回跟 `test` job 一样 —— "
             "预算于是变回共享的，长杆照样把短杆挤爆。2026-10-21 那次"
