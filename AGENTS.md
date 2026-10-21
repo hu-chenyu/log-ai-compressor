@@ -291,6 +291,13 @@ python scripts/eval_logparser_pa_ga.py --csv docs/logparser_pa_ga.csv
 python scripts/eval_logparser_pa_ga.py --self-check   # 只验口径，不碰数据
 ```
 
+**「全跑一遍」用 python scripts/run_local_gates.py** —— 它**直接从
+.github/workflows/ci.yml 派生**要跑哪些步骤（结构上不可能漏），
+	ests/test_local_gate_runner_covers_ci.py 盯着它。
+2026-10-21 那次把 main 推成红的事故，根因就是当时那份清单**只列了 10 道**、
+漏掉了 pytest 全量与变异记分卡 —— **最重的两道**，也恰恰是能抓住事故的那两道，
+而它照样报「全绿」。
+
 **全量 10 数据集基准很慢。** 单是 Hadoop 一个数据集，`run_one` 就要对
 18 万行做 4 次完整分析（实测单次约 194 秒）。迭代时用 `--datasets HPC`
 之类的子集，判胜负用 `--budgets 32000`。

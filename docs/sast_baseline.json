@@ -342,6 +342,18 @@
       "path": "tests/test_subprocess_encoding_contract.py",
       "count": 1,
       "reason": "复核过：跑的是本项目的控制台脚本 `log-ai-compressor`（由 `python -m pip install -e .` 装进 Scripts/），它就是被测对象 —— 换成绝对路径反而测不到「用户 PATH 里那个入口」。"
+    },
+    {
+      "test_id": "B404",
+      "path": "scripts/run_local_gates.py",
+      "count": 1,
+      "reason": "复核过：这个脚本**要**起子进程 —— 它的活就是跑门禁。命令逐词拆开成 argv，来源只有本仓库自己的 `.github/workflows/ci.yml`（不是用户输入，也不是日志内容），并且刻意**不**用 shell=True。import 本身无法消除。"
+    },
+    {
+      "test_id": "B603",
+      "path": "scripts/run_local_gates.py",
+      "count": 2,
+      "reason": "复核过：两处都是列表传参 + shell=False。一处跑门禁本身（argv 由 ci.yml 的 run 正文逐词拆出，外加两个固定的本地别名：python -> 当前解释器、ruff -> python -m ruff），另一处用 git credential fill 取 GitHub token —— **不打印、不落盘**（面 6 走匿名额度每 IP 每小时 60 次，连续自测很容易撞上限，那时门禁红的原因与仓库无关）。**不接收任何外部输入作为命令行片段。**"
     }
   ]
 }

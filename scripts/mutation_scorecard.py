@@ -577,8 +577,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 55 条才是真该留下的。",
-        new="剩下 56 条才是真该留下的。",
+        old="剩下 57 条才是真该留下的。",
+        new="剩下 58 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
@@ -1218,6 +1218,59 @@ MUTATIONS: List[Mutation] = [
         new=('    for rel in [p for p in paths if p.startswith("docs/")]:\n'
              "        raw = (ROOT / rel).read_bytes()"),
         tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
+        id="wording/multi-matcher-boundary-check-dropped",
+        why="把多模式匹配器的 ASCII 边界判定去掉 —— 于是英文缩写会出现在"
+            "**更长的单词内部**。逐词口径下那不是命中："
+            "`(?<![A-Za-z0-9_])` / `(?![A-Za-z0-9_])` 是红线的一部分。"
+            "换实现之后这条边界一度是**另写一遍**的 —— 两份实现只要有一处不同，"
+            "「门禁看见的」与「门禁应该看见的」就不再是同一件事。"
+            "这条守的是那个分叉：改坏边界，等价性测试必须变红。",
+        target="tests/test_no_job_wording.py",
+        old=('_ASCII_WORDCHARS = frozenset(\n'
+             '    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")'),
+        new="_ASCII_WORDCHARS = frozenset()",
+        tests=["tests/test_wording_matcher_equivalence.py"],
+    ),
+    Mutation(
+        id="wording/multi-matcher-non-overlap-check-dropped",
+        why="把多模式匹配器的「非重叠」判定去掉 —— 于是同一个词在**部分重叠**的"
+            "两次出现会被数成两次（逐词口径只数一次）。"
+            "真实词表里 200 个词只有 **1 个**带非空 border，而只有这种词"
+            "才可能与自身重叠 ⇒ **在真实语料上这条规则几乎从不触发**，"
+            "删掉它，结果一模一样，测试也就不会红。"
+            "规则要靠**构造出来的**用例守着，不能靠「恰好没人踩到」。",
+        target="tests/test_no_job_wording.py",
+        old="            if s < last_end[wi]:\n                continue\n",
+        new="",
+        tests=["tests/test_wording_matcher_equivalence.py"],
+    ),
+    Mutation(
+        id="wording/multi-matcher-returns-nothing",
+        why="让多模式匹配器恒返回空 —— 于是门禁**一个词都没查**却仍然全绿。"
+            "这与 `wording/forbidden-list-emptied` 是同一族："
+            "**报数为 0 的计数器等于没装**。"
+            "2026-10-21 换匹配器的那一次，这条路径一度完全没有守卫 —— "
+            "而换实现正是最容易「让门禁变瞎」的时刻。",
+        target="tests/test_no_job_wording.py",
+        old="    return [(w, n) for w, n in zip(FORBIDDEN, _MATCHER.counts(text)) if n]",
+        new="    return []",
+        tests=["tests/test_wording_matcher_equivalence.py"],
+    ),
+    Mutation(
+        id="local-gates/runner-skips-a-gate-step",
+        why="让本地门禁运行器**跳过**一条真正的门禁步骤 —— 于是它照样打印「全绿」，"
+            "而那道门禁一次都没跑。2026-10-21 的事故就是这个形状：本地那份清单漏了"
+            "pytest 全量与变异记分卡两道（最重的两道，也恰恰是能抓住那次事故的那两道），"
+            "而 `main` 被推成了红的。**报「检查通过」但其实什么都没跑**的门禁，"
+            "比没有门禁更糟 —— 没有门禁，你知道那里没检查。"
+            "这条守的是那份清单自己的牙齿。",
+        target="scripts/run_local_gates.py",
+        old="            if name.lower().startswith(_SETUP_STEP):\n                continue\n",
+        new=("            if name.lower().startswith(_SETUP_STEP)"
+             " or \"coverage\" in name.lower():\n                continue\n"),
+        tests=["tests/test_local_gate_runner_covers_ci.py"],
     ),
 ]
 
