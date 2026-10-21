@@ -230,6 +230,10 @@ def audit(repo: Path, gate) -> dict:
     pattern = gate._pattern         # 匹配正则取自门禁
     decode = gate._decode_text      # 解码也取自门禁（含 GB18030 兜底）
     hits = []
+    #: 每面**扫了多少个对象**。没有它，「扫了 0 个」与「扫了 1400 个但没命中」
+    #: 在输出里长得一模一样 —— 而「报数为 0 的计数器等于没装」这条教训
+    #: 说过：**必须能分辨「没扫到」与「扫了但干净」**。
+    scanned = Counter()
 
     def add(surface, word, where, snippet):
         hits.append({"surface": surface, "word": word, "where": where,
@@ -248,6 +252,7 @@ def audit(repo: Path, gate) -> dict:
         if _is_binary(raw):
             continue
         text = decode(raw)
+        scanned["worktree"] += 1
         for w, lineno, snippet in _matches(text, words, pattern):
             add("worktree", w, "%s:%d" % (rel, lineno), snippet)
 
@@ -261,6 +266,7 @@ def audit(repo: Path, gate) -> dict:
             continue
         sha = parts[0].strip()
         text = "\n".join(parts[1:])
+        scanned["commit_msg"] += 1
         for w, lineno, snippet in _matches(text, words, pattern):
             add("commit_msg", w, sha[:10], snippet)
 
@@ -268,26 +274,31 @@ def audit(repo: Path, gate) -> dict:
     reach = gate._reachable_blobs(repo=repo)
     texts = gate._read_blobs(sorted(reach), repo=repo)
     for sha, text in texts.items():
+        scanned["history"] += 1
         for w, lineno, snippet in _matches(text, words, pattern):
             add("history", w, sha[:10], snippet)
 
     # ---- 面 4：tag 说明（**整条**，不是第一行）----
     for name, text in gate._tag_messages(repo=repo):
+        scanned["tag_msg"] += 1
         for w, lineno, snippet in _matches(text, words, pattern):
             add("tag_msg", w, name, snippet)
 
     # ---- 面 5：ref 名 ----
     for name in _git(repo, "for-each-ref", "--format=%(refname)").splitlines():
+        scanned["ref_name"] += 1
         for w, lineno, snippet in _matches(name, words, pattern):
             add("ref_name", w, name, snippet)
 
     # ---- 面 6：GitHub 上的 Release 标题与正文（不在 git 里）----
     for name, text in _releases(repo, gate._api_headers()):
+        scanned["release"] += 1
         for w, lineno, snippet in _matches(text, words, pattern):
             add("release", w, name, snippet)
 
     # ---- 面 7：不可达对象（reflog 持有、被强推替换掉的那批）----
     for name, text in _unreachable(repo, decode):
+        scanned["unreachable"] += 1
         for w, lineno, snippet in _matches(text, words, pattern):
             add("unreachable", w, name, snippet)
 
@@ -301,6 +312,7 @@ def audit(repo: Path, gate) -> dict:
              "release", "unreachable")
     return {"repo": str(repo), "word_count": len(words),
             "by_surface": {f: by_surface.get(f, 0) for f in faces},
+            "scanned": {f: scanned.get(f, 0) for f in faces},
             "by_word": dict(by_word),
             "total": len(hits), "hits": hits}
 
@@ -309,7 +321,10 @@ def _print_report(result: dict, max_report: int) -> None:
     print("仓库：%s" % result["repo"])
     print("词表：%d 条" % result["word_count"])
     print()
-    print("%-22s %8s" % ("扫描面", "命中条目"))
+    # 「扫了多少对象」这一列是**故意加的**：「扫了 0 个」与「扫了 1400 个
+    # 但一个没命中」在输出里必须能分辨开 —— 前者是「没装计数器」，后者是
+    # 「真的干净」。
+    print("%-22s %12s %8s" % ("扫描面", "扫了多少对象", "命中条目"))
     for face, label in (("worktree", "工作区文件内容"),
                         ("commit_msg", "提交信息"),
                         ("history", "历史版本文件内容"),
@@ -317,8 +332,9 @@ def _print_report(result: dict, max_report: int) -> None:
                         ("ref_name", "ref 名字"),
                         ("release", "Release 标题与正文"),
                         ("unreachable", "不可达对象")):
-        print("%-22s %8d" % (label, result["by_surface"].get(face, 0)))
-    print("%-22s %8d" % ("合计", result["total"]))
+        print("%-22s %12d %8d" % (label, result["scanned"].get(face, 0),
+                                  result["by_surface"].get(face, 0)))
+    print("%-22s %12s %8d" % ("合计", "", result["total"]))
     if result["by_word"]:
         print()
         print("按词分布（%d 个词有命中）：" % len(result["by_word"]))

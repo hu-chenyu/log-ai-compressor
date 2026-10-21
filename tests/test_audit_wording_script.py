@@ -125,6 +125,44 @@ def test_word_list_is_loaded_from_the_gate() -> None:
     assert _PLANTED, "埋词是空串"
 
 
+def test_report_sees_how_many_objects_each_face_scanned(tmp_path: Path) -> None:
+    """「扫了 0 个」与「扫了 N 个但没命中」**必须能分辨开**。
+
+    报告里只有「命中条目」这一列时，「0 命中」就**既可能是**「扫过了、
+    确实干净」，**也可能是**「一个都没扫到」—— 而输出里长得一模一样。
+    这正是「报数为 0 的计数器等于没装」那条教训的上一级。
+
+    2026-10-21 的第六轮外部复核抓到的就是这一条（门禁的 docstring 指向一个
+    **根本不打印**的测试，于是「要数字看那里」指向了空气）。
+    """
+    repo = _init_repo(tmp_path)
+    (repo / "README.md").write_text("这里没有任何命中词。\n", encoding="utf-8")
+    _commit(repo, "初始提交")
+    out = _run_audit(repo)
+    assert out["rc"] == 0, "干净仓库不该返回 1"
+    scanned = out["data"]["scanned"]
+    assert set(scanned) == set(out["data"]["by_surface"]), "两列的面不对齐"
+    assert scanned["worktree"] >= 1, "工作区明明有文件，却报「扫了 0 个」"
+    assert scanned["commit_msg"] >= 1, "明明有提交信息，却报「扫了 0 个」"
+    assert scanned["history"] >= 1, "明明有历史内容，却报「扫了 0 个」"
+    assert out["data"]["by_surface"]["worktree"] == 0, "干净仓库不该有命中"
+
+
+def test_text_report_prints_the_scale(tmp_path: Path) -> None:
+    """人看的表格里也要有这一列 —— JSON 里有而表格里没有，等于没有。"""
+    repo = _init_repo(tmp_path)
+    (repo / "README.md").write_text("这里没有任何命中词。\n", encoding="utf-8")
+    _commit(repo, "初始提交")
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    proc = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--repo", str(repo), "--words-from", str(_GATE)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, check=False, timeout=300)
+    assert proc.returncode in (0, 1), proc.stderr[-400:]
+    assert "扫了多少对象" in proc.stdout, "表格里没有「扫了多少对象」这一列"
+
+
 def test_clean_repo_reports_zero_hits(tmp_path: Path) -> None:
     """**正常路径没被写坏**的对照：干净的仓库必须 0 命中、退出 0。
 
