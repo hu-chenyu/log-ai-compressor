@@ -403,10 +403,13 @@ def _render_normalize(text: str) -> str:
     「面\u2028试」会被粘成一个词，而「面\n试」不会。**同一个换行两套规则**
     —— 2026-10-21 的外部复核之后自己发现的，已改。
 
-    2026-10-21 实测：工作区 177 个文本文件（179 个跟踪文件里 1 个二进制、
-    1 个零字节）与全部 **1,870** 个历史文本对象，渲染口径的**新增命中都是 0**
-    （外部复核独立测出同一个数；那次的管线少了三种藏法，补上后基线**不变**，
-    说明仓库里本来就没有被那些藏法藏起来的词）。
+    渲染口径的**新增命中是 0**（外部复核独立测出同一个数；那次的管线少了
+    几种藏法，补上后基线**不变**，说明仓库里本来就没有被那些藏法藏起来的词）。
+
+    **规模（工作区文本文件数、历史文本对象数）刻意不写在这里** —— 这两个数
+    **每次提交都会变**，写死就是下一个过期陈述（2026-10-21 的一次实测分别是
+    178 与 1,895）。`test_scans_are_not_vacuous` 每次运行都会打印实测值并
+    对门限断言 —— **要数字请看那里。**
     """
     import html
     import re
@@ -430,8 +433,12 @@ def _render_normalize(text: str) -> str:
         t = t.replace(mark, "")
     # 不可见字符：零宽、软连字符、双向控制、word joiner 与不可见运算符、
     # 阿拉伯字母标记、蒙文元音分隔符、词间注记。读者一个都看不见。
+    # 不可见字符：零宽、软连字符、双向控制、word joiner 与不可见运算符、
+    # 定向隔离符（U+2066-U+2069）、阿拉伯字母标记、蒙文元音分隔符、
+    # 组合用记号（U+034F）、词间注记、变体选择符（U+FE00-U+FE0F）。
+    # 读者一个都看不见 —— 而「看不见」正是「藏起来」的定义。
     t = re.sub("[\u200b-\u200f\ufeff\u00ad\u061c\u180e\u202a-\u202e"
-               "\u2060-\u2064\ufff9-\ufffb]", "", t)
+               "\u2060-\u2064\u2066-\u2069\ufff9-\ufffb\u034f\ufe00-\ufe0f]", "", t)
     return t
 
 
@@ -964,6 +971,9 @@ def test_render_pipeline_sees_the_hiding_vectors_it_claims_to_see():
         ("软连字符", head + "\u00ad" + tail),
         ("双向控制", head + "\u202e" + tail),
         ("word joiner", head + "\u2060" + tail),
+        ("定向隔离符", head + "\u2066" + tail),
+        ("组合用记号", head + "\u034f" + tail),
+        ("变体选择符", head + "\ufe00" + tail),
         ("引用式链接", "[%s][ref]%s\n\n[ref]: /x" % (head, tail)),
         ("行内标签", "<b>%s</b>%s" % (head, tail)),
         ("十进制实体", "%s&#%d;" % (head, ord(tail))),
@@ -1210,7 +1220,15 @@ def test_history_whitespace_split_hits_stay_within_baseline():
 
     基线 6 = 5 个 CHANGELOG.md 的旧版本 + 1 个门禁文件旧版本
     （那一版在 docstring 里引用了那句话；本版起不再引用，所以工作区已 0）。
+
+    **先证真**：这条断言自己也必须有牙齿 —— **单独跑它**时
+    （`pytest -k history_whitespace_split`），探测器恒返回空也照样绿，
+    而「不超过基线」与「一个都没看见」在输出里长得一模一样。
     """
+    probe = FORBIDDEN[0]
+    assert _whitespace_split_hits("x" + probe[0] + " " + probe[1:] + "y"), (
+        "「被拆开的词」这个探测器什么都抓不到 —— 这条历史断言形同虚设，"
+        "「不超过基线」只是「恒返回空」的另一种说法")
     hits = []
     for sha, text in _all_blob_texts().items():
         for w in _whitespace_split_hits(text):

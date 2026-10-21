@@ -815,6 +815,29 @@ MUTATIONS: List[Mutation] = [
         tests=["tests/test_no_job_wording.py"],
     ),
     Mutation(
+        id="ci/long-pole-job-gets-an-if-condition",
+        why="给记分卡那个独立 job 加 `if: false` —— 它就**整条不跑**，而外面看，"
+            "CI 照样是绿的（那个 job 被跳过，结论是 success）。"
+            "独立 job 的跑哪条矩阵由 job 自己声明（runs-on + setup-python），"
+            "所以这个 `if:` 只会是错的。2026-10-21 的第五轮外部复核补上的缺口",
+        target=".github/workflows/ci.yml",
+        old="  mutation:\n    runs-on: ubuntu-latest\n",
+        new="  mutation:\n    runs-on: ubuntu-latest\n    if: false\n",
+        tests=["tests/test_ci_long_pole.py"],
+    ),
+    Mutation(
+        id="wording/render-invisible-chars-narrowed",
+        why="把渲染口径的不可见字符表缩回旧版（去掉定向隔离符、组合用记号、"
+            "变体选择符）—— 读者看不见它们，而「看不见」正是「藏起来」的定义。"
+            "2026-10-21 的第五轮外部复核指出这三种漏了",
+        target="tests/test_no_job_wording.py",
+        old=("    t = re.sub(\"[\\u200b-\\u200f\\ufeff\\u00ad\\u061c\\u180e\\u202a-\\u202e\"\n"
+             "               \"\\u2060-\\u2064\\u2066-\\u2069\\ufff9-\\ufffb\\u034f\\ufe00-\\ufe0f]\", \"\", t)"),
+        new=("    t = re.sub(\"[\\u200b-\\u200f\\ufeff\\u00ad\\u061c\\u180e\\u202a-\\u202e\"\n"
+             "               \"\\u2060-\\u2064\\ufff9-\\ufffb]\", \"\", t)"),
+        tests=["tests/test_no_job_wording.py"],
+    ),
+    Mutation(
         id="ci/long-pole-budget-shrunk-to-shared",
         why="把变异记分卡那个独立 job 的 timeout 调回跟 `test` job 一样 —— "
             "预算于是变回共享的，长杆照样把短杆挤爆。2026-10-21 那次"

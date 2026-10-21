@@ -5,7 +5,7 @@
 ----------
 `test` job 的 `timeout-minutes: 20` 是**整个 job** 的上限。第七道门禁
 （变异记分卡）原来挂在 `test` job 的最后一步，而它的耗时与其它十道差一个
-数量级：97 条变异，每条都要重跑一组测试。
+数量级：99 条变异，每条都要重跑一组测试。
 
 实测（2026-10-21，ubuntu-3.12，run `39548713439` → `39559092094`）：
 
@@ -125,6 +125,27 @@ def _check(doc: dict) -> None:
     assert "|| true" not in body and "|| exit 0" not in body, (
         "变异记分卡允许失败后继续（run 正文里有 || true / || exit 0）")
 
+    # ⑥ 那个 job 不许有 `if:` 条件
+    #
+    # **这一条是 2026-10-21 的第五轮外部复核补上的**：给记分卡那个 job 加
+    # `if: false`，它就**整条不跑** —— 而外面看，CI 照样是绿的（那个 job
+    # 被跳过，结论是 success）。门禁「能通过但不检查」，就不算门禁。
+    # 独立 job 的好处正在于**它不需要 `if:`**：跑哪条矩阵由 job 自己声明
+    # （`runs-on` + `setup-python`），所以这个 `if:` 只会是错的。
+    assert "if" not in doc["jobs"][job_name], (
+        f"{job_name} job 上带 `if:` 条件 —— 它可能整条不跑，而外面看是绿的。"
+        "独立 job 的跑哪条矩阵由 job 自己声明，不需要 `if:`")
+
+    # ⑦ 必须跑在 GitHub 托管的 runner 上
+    #
+    # 同上：改成自托管 runner，而这个仓库并没有自托管 runner ⇒ 那个 job 会
+    # **永远排队**，CI 挂在那里等 —— 同样是「门禁没跑，但看不出」。
+    runs_on = str(doc["jobs"][job_name].get("runs-on", ""))
+    assert runs_on.startswith("ubuntu-"), (
+        f"{job_name} job 的 runs-on={runs_on!r} 不是 GitHub 托管的 ubuntu —— "
+        "自托管 runner 未必存在，那个 job 会永远排队，"
+        "而外面看这个门禁只是「没红」")
+
 
 class TestLongPoleIsNotInTheHangDetectorBudget:
     def test_the_real_ci_satisfies_the_invariant(self):
@@ -177,4 +198,32 @@ class TestLongPoleIsNotInTheHangDetectorBudget:
         job_name, step = _scorecard_steps(doc)[0]
         doc["jobs"][job_name]["steps"].append(copy.deepcopy(step))
         with pytest.raises(AssertionError, match="被执行了"):
+            _check(doc)
+
+    def test_a_fail_open_shell_body_is_rejected(self):
+        """`|| true` / `|| exit 0` 也要有负向测试。
+
+        判据本来就在（`_check` 的第 ⑤ 条），但它**没有配套的负向测试** ——
+        判据存在 ≠ 它被验过。2026-10-21 的第五轮外部复核指出这个缺口。
+        """
+        doc = _doc()
+        job_name, step = _scorecard_steps(doc)[0]
+        step["run"] = str(step["run"]) + " || true"
+        with pytest.raises(AssertionError, match=r"\|\| true"):
+            _check(doc)
+
+    def test_an_if_condition_on_the_job_is_rejected(self):
+        """给记分卡那个 job 加 `if:` → 它整条不跑，而外面看是绿的。"""
+        doc = _doc()
+        job_name, _ = _scorecard_steps(doc)[0]
+        doc["jobs"][job_name]["if"] = "false"
+        with pytest.raises(AssertionError, match="if:"):
+            _check(doc)
+
+    def test_a_self_hosted_runner_is_rejected(self):
+        """改成自托管 runner → 那个 job 永远排队，而外面看这个门禁只是「没红」。"""
+        doc = _doc()
+        job_name, _ = _scorecard_steps(doc)[0]
+        doc["jobs"][job_name]["runs-on"] = "self-hosted"
+        with pytest.raises(AssertionError, match="runs-on"):
             _check(doc)
