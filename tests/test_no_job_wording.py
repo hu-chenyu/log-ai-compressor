@@ -27,6 +27,19 @@
 **豁免**：`_EXEMPTED` 里的词**不在**禁用表内 —— 豁免只有「一个词整体
 不进表」这一种形态，没有「按文件放行」（那等于开一个洞）。
 
+**保留表的兜底判据**（2026-10 的外部复核指出这里有个两头落空的缝：README 里
+出现的客户端名**不在禁用表里**，于是下一轮换个工具名又变成同一类问题）：
+
+  凡是本仓库里以**接入对象**出现的 Agent / IDE / CLI / 模型服务专名
+  （README 的接入矩阵、`ai/config.py` 的 provider 表、CLI 的 provider 选项、
+  SKILL 的宿主说明）—— **包括清单里尚未列出的新增名称** —— 按「支持的客户端」
+  保留；同一个名字若出现在「谁写的 / 谁改的 / 谁审的」这类**开发过程**语境里，
+  仍须清除。判据是**这一处的谓语指向接入，而不是指向开发过程**，**不自动放行**。
+
+**渲染口径**（面 1 与面 3 各加一条）：原文里没有、**渲染之后**才出现的词
+（被 HTML 实体 / 标签 / Markdown 强调 / 行内代码 / 零宽字符藏起来的）也算命中。
+它**不进红线**，是独立的一条「上界断言」，当前基线 **0**。
+
 **匹配口径**：纯 ASCII 的词按**整词**匹配（含中文的按子串），且区分大小写。
   · 边界用 ASCII 字符集而不是 `\\b`：中文紧挨英文时仍然要命中
     （「8 年经验 + 一个英文词」这种混排是最典型的形态，而 `\\b` 把汉字当单词字符）。
@@ -365,6 +378,53 @@ def _count(text: str, word: str) -> int:
 
 def _hits_in(text: str) -> list[tuple[str, int]]:
     return [(w, n) for w in FORBIDDEN if (n := _count(text, w))]
+
+
+#: 块级 HTML 标签 —— 它们的**作用是分隔**（段落、换行、列表项），
+#: 归一化时变成**空白**而不是被删掉。删掉它会把两段本来不相邻的文字
+#: **粘成一个词** —— 那不是「读者看到的」，那是我们自己造出来的命中。
+_BLOCK_TAGS = ("p", "br", "div", "li", "ul", "ol", "tr", "td", "th",
+               "h1", "h2", "h3", "h4", "h5", "h6", "pre", "blockquote",
+               "hr", "table", "section", "article", "header", "footer")
+
+
+def _render_normalize(text: str) -> str:
+    """去掉「读者看不见的语法与字符」，得到**渲染之后**的文本。
+
+    五件事：HTML 实体解码 → NFKC 归一化 → 块级 HTML 标签变空白、行内标签删掉
+    → Markdown 链接/强调/行内代码的语法删掉 → 零宽与软连字符删掉。
+
+    **不做空白折叠** —— 那是「被拆开」那一条的判据（另外按 report-only 处理）。
+    两套口径混在一起，就会既不是红线也不是报告。
+
+    2026-10-21 实测：工作区 177 个文本文件与全部 1,863 个历史对象，
+    渲染口径的**新增命中都是 0**（外部复核独立测出同一个数）。
+    """
+    import html
+    import re
+    import unicodedata
+
+    t = html.unescape(text)
+    t = unicodedata.normalize("NFKC", t)
+    t = re.sub(r"(?is)</?(?:%s)\b[^>]*>" % "|".join(_BLOCK_TAGS), " ", t)
+    t = re.sub(r"(?s)<[^>]+>", "", t)
+    t = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", t)
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", t)
+    t = re.sub(r"(?s)(`+)(.*?)\1", r"\2", t)
+    for mark in ("***", "___", "**", "__", "~~", "*", "_"):
+        t = t.replace(mark, "")
+    t = re.sub("[\u200b-\u200f\u2028\u2029\ufeff\u00ad]", "", t)
+    return t
+
+
+def _render_hidden_hits(text: str) -> list[tuple[str, int]]:
+    """**渲染之后**才出现的词（原文里没有）—— 即「被语法藏起来」的。
+
+    判据：归一化后命中、而原文里**不**命中 —— 否则那只是普通的字面命中，
+    已经由面 1 / 面 3 报过了。
+    """
+    plain = {w for w, _n in _hits_in(text)}
+    return [(w, n) for w, n in _hits_in(_render_normalize(text)) if w not in plain]
 
 
 def _env() -> dict:
@@ -789,6 +849,48 @@ def test_head_tree_has_no_forbidden_wording():
             hits.append((rel, word, n))
     assert not hits, "跟踪文件里出现了禁用词：\n" + "\n".join(
         "  %s —— %d 处" % (rel, n) for rel, word, n in hits)
+
+
+def test_worktree_has_no_render_hidden_word():
+    """面 1 的**渲染口径**：原文里没有、渲染之后才出现的词。
+
+    「被语法藏起来」的那一类（HTML 实体 / 标签 / Markdown 强调 / 行内代码 /
+    零宽字符）。它**不进红线** —— 字面口径才是红线 —— 但它**是一条独立的
+    上界断言**：当前基线 **0**，涨了要红。
+
+    **先证真**：探测器必须真的抓得到东西，否则「0 处」只是「恒返回空」。
+    探针用词表里的词**自己拼**出来（这份文件里不能出现词面量）。
+    """
+    probe = next(w for w in FORBIDDEN if len(w) >= 2)
+    hidden = "**%s**%s" % (probe[0], probe[1:])
+    assert _render_hidden_hits(hidden), (
+        "渲染探测器什么都抓不到 —— 它形同虚设，"
+        "下面那条「0 处」也就没有意义了")
+    assert not _render_hidden_hits("一句没有禁用词的话"), (
+        "渲染探测器把干净的文本判成了有 —— 它的判据反了")
+
+    hits = []
+    for rel in _tracked_paths():
+        for word, n in _render_hidden_hits(_read_text(rel)):
+            hits.append((rel, word, n))
+    assert not hits, (
+        "有词被渲染语法藏起来了（工作区）：\n"
+        + "\n".join("  %s —— %d 处" % (rel, n) for rel, word, n in hits[:20]))
+
+
+def test_history_has_no_render_hidden_word():
+    """面 3 的**渲染口径**：全部历史版本的文件内容。
+
+    与工作区同一条判据，同样是**上界**（当前基线 0）。
+    历史里也可能有被语法藏起来的词 —— 上一轮的重写只按**字面**口径清过。
+    """
+    hits = []
+    for sha, text in _all_blob_texts().items():
+        for word, n in _render_hidden_hits(text):
+            hits.append((sha[:8], word, n))
+    assert not hits, (
+        "有词被渲染语法藏起来了（历史）：\n"
+        + "\n".join("  %s —— %d 处" % (sha, n) for sha, word, n in hits[:20]))
 
 
 def test_commit_messages_have_no_forbidden_wording():
