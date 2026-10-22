@@ -727,6 +727,26 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
     return d
 
 
+def _evidence_dict(result: AnalysisResult) -> dict:
+    """证据充分性评估 → dict（JSON 出口用）。
+
+    复用 core 层的 `EvidenceAssessment.to_dict()` —— **不重算一遍**：
+    重算会出现「人读的格式说缺 X、JSON 说缺 Y」的分叉，而那正是本项目
+    最不该有的错（同一条结论两处口径打架，2026-10-22 的 bug 1 就是它）。
+    """
+    ev = getattr(result, "evidence", None)
+    if ev is None:
+        return {}
+    if hasattr(ev, "to_dict"):
+        try:
+            return ev.to_dict()
+        except Exception:      # pragma: no cover - 防御性
+            return {}
+    if isinstance(ev, dict):
+        return ev
+    return {}
+
+
 def to_json(result: AnalysisResult, top_n: Optional[int] = None,
             full: bool = True) -> str:
     """导出 JSON 格式（结构化，适配脚本二次处理）。
@@ -757,6 +777,17 @@ def to_json(result: AnalysisResult, top_n: Optional[int] = None,
         # 或者那部分是用别的编码解出来的。
         # 「交付物说谎比交付物少一项严重得多」（见 top_n_truncated）。
         "notice": getattr(result, "notice", "") or "",
+        # 证据充分性评估（verdict / 缺什么 / 用上了什么）也必须进 JSON。
+        #
+        # 为什么：它**限定了这份结论能用到什么程度**。人读的格式里写着
+        # 「缺：日志里没有任何关联键」，而 JSON 消费方（脚本 / CI / 另一个
+        # Agent）拿到的是一份看不出这个限定的结论 —— 看起来与「证据齐全」
+        # 的报告一模一样。于是它可能把一个 `INSUFFICIENT` 的结论当成
+        # 定论用。
+        #
+        # 本项目的核心承诺是「拿不出因果链就说证据不足」—— 那这句话
+        # 必须**也**出现在机器读的出口上，否则承诺只对一半的读者成立。
+        "evidence": _evidence_dict(result),
         "root_cause_summary": _root_summary(result),
         "error_kinds": len(result.clusters),
         # 截断诚实字段 —— 与 service.result_to_dict 的三个字段对齐。

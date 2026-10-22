@@ -484,6 +484,32 @@ class TestJsonToStdout:
         data = json.loads(proc.stdout)
         assert data.get("fingerprint"), "JSON 报告里没有指纹"
 
+    def test_the_json_carries_the_evidence_assessment(self, tmp_path):
+        """JSON 必须带**证据充分性评估**（verdict / 缺什么 / 用上了什么）。
+
+        为什么：它**限定了这份结论能用到什么程度**。人读的格式里写着
+        「缺：日志里没有任何关联键」，而 JSON 消费方（脚本 / CI / 另一个
+        Agent）拿到的却是一份看不出这个限定的结论 —— 它会把一个
+        `INSUFFICIENT` 的结论当成定论用。本项目的核心承诺是
+        「拿不出因果链就说证据不足」，那句话必须**也**出现在机器读的出口上。
+
+        **改坏会红吗**：把 `to_json` 里的 `"evidence": _evidence_dict(result)`
+        删掉，本断言红。
+        """
+        p = tmp_path / "notrace.log"
+        p.write_text(
+            "2024-01-01 10:00:00 ERROR some failure without correlation key\n",
+            encoding="utf-8")
+        proc = _cli("run", str(p), "-f", "json")
+        data = json.loads(proc.stdout)
+        ev = data.get("evidence") or {}
+        assert ev, "JSON 里没有 evidence"
+        assert ev.get("verdict"), "evidence 里没有 verdict"
+        assert "gaps" in ev, "evidence 里没有 gaps"
+        # 「缺什么」要说人话，且要真的提到关联键（这份日志确实没有）
+        gaps_text = json.dumps(ev.get("gaps"), ensure_ascii=False)
+        assert "关联键" in gaps_text, gaps_text[:200]
+
     def test_the_json_carries_the_notice(self, tmp_path):
         """JSON 必须带 notice（限定结论适用范围的那句话）。
 

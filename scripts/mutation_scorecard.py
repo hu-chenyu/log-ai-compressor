@@ -1462,6 +1462,17 @@ MUTATIONS: List[Mutation] = [
         tests=["tests/test_ninth_round_fixes.py"],
     ),
     Mutation(
+        id="ninth/json-evidence-removed",
+        why="JSON 报告里没有**证据充分性评估** —— 机器消费方拿到的结论"
+            "看不出它有多可信，会把一个 INSUFFICIENT 的结论当成定论用。"
+            "本项目的核心承诺「拿不出因果链就说证据不足」必须**也**"
+            "出现在机器读的出口上，否则承诺只对一半的读者成立",
+        target="log_ai_compressor/export/reporters.py",
+        old='        "evidence": _evidence_dict(result),',
+        new='        "evidence": {},',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
         id="ninth/tail-line-offset-ignored",
         why="`--tail` 的行号不再偏移 —— 报告里的「第 1 行」在原文件里是第 96 行，"
             "证据引用指向无关的内容，「可复核」当场失效",
