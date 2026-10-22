@@ -626,6 +626,49 @@ class TestCompareAlignsByTrace:
         assert len(cmp.gone_items) == 1
         assert len(cmp.common_items) == 0
 
+    def test_a_cluster_is_never_paired_twice(self, tmp_path):
+        """一个簇只能被配上一次（trace 兜底不能把同一个簇重复利用）。
+
+        场景：同一个 trace 出现在**两个**不同的簇里（一次请求里冒出两种
+        错误）。若兜底不记「已配上」，第二个簇会拿同一个 trace 再去配，
+        于是两份文件各有 2 个簇时，对比结果会多出配对。
+
+        **改坏会红吗**：把 `matched_b` / `matched_a` 的两处守卫
+        （`if id(bc) in matched_b: continue` / `if id(ac) in matched_a: continue`）
+        去掉，本断言红。
+        """
+        a = tmp_path / "a.log"
+        b = tmp_path / "b.log"
+        # 每个文件两个簇，共享同一个 trace
+        a.write_text(
+            '{"timestamp":"2024-01-01T10:00:00Z","level":"ERROR",'
+            '"message":"alpha failed","trace_id":"shared"}\n'
+            '{"timestamp":"2024-01-01T10:00:01Z","level":"ERROR",'
+            '"message":"beta failed","trace_id":"shared"}\n',
+            encoding="utf-8")
+        b.write_text(
+            '{"timestamp":"2024-01-01T10:00:00Z","level":"ERROR",'
+            '"message":"gamma failed","trace_id":"shared"}\n'
+            '{"timestamp":"2024-01-01T10:00:01Z","level":"ERROR",'
+            '"message":"delta failed","trace_id":"shared"}\n',
+            encoding="utf-8")
+        results = S.compare([str(a), str(b)])
+        cmp = results[0]
+        # 配对数不超过两边的簇数，且每个簇只出现一次
+        assert len(cmp.common_items) <= 2, (
+            "配对数超过了簇数：%d" % len(cmp.common_items))
+        # 两边各有 2 个簇 ⇒ 配对后剩 0 个新增、0 个消失
+        assert len(cmp.new_items) == 0, (
+            "仍有未配上的新增：%s" % [i.summary for i in cmp.new_items])
+        assert len(cmp.gone_items) == 0, (
+            "仍有未配上的消失：%s" % [i.summary for i in cmp.gone_items])
+        # **同一个簇不能被配上两次** —— 这是 `matched_b` 守卫的作用。
+        # 断言用「配对的摘要互不相同」：同一个 B 簇被配两次时，
+        # common_items 里会出现**两条**一样的摘要。
+        summaries = [i.summary for i in cmp.common_items]
+        assert len(summaries) == len(set(summaries)), (
+            "同一个簇被配上多次：%s" % summaries)
+
 
 # ---------------------------------------------------------------------------
 # 11. 空文件明说「0 行」

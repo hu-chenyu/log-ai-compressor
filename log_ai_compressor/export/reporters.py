@@ -727,24 +727,37 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
     return d
 
 
-def _evidence_dict(result: AnalysisResult) -> dict:
+def _evidence_dict(result: AnalysisResult, full: bool = True) -> dict:
     """证据充分性评估 → dict（JSON 出口用）。
 
     复用 core 层的 `EvidenceAssessment.to_dict()` —— **不重算一遍**：
     重算会出现「人读的格式说缺 X、JSON 说缺 Y」的分叉，而那正是本项目
     最不该有的错（同一条结论两处口径打架，2026-10-22 的 bug 1 就是它）。
+
+    `full=False`（精简模式）时去掉 `candidates` —— 那是候选根因的**完整**
+    描述（每条都带 id / 档位 / 理由），体量与簇数同阶。精简版的意义是
+    「省体积」，而 `evidence` 是**顶层**字段（两种模式都有）—— 不削它，
+    它就成了精简版的固定开销，把「精简 vs 完整」的比值顶高
+    （实测：0.55 的上限被顶到 0.61）。
+
+    保留的是**限定结论可信度**的那部分：verdict / gaps / inputs_used。
+    候选清单属于「结论明细」，不是「结论的限定条件」。
     """
     ev = getattr(result, "evidence", None)
     if ev is None:
         return {}
     if hasattr(ev, "to_dict"):
         try:
-            return ev.to_dict()
+            data = ev.to_dict()
         except Exception:      # pragma: no cover - 防御性
             return {}
-    if isinstance(ev, dict):
-        return ev
-    return {}
+    elif isinstance(ev, dict):
+        data = ev
+    else:
+        return {}
+    if not full:
+        data = {k: v for k, v in data.items() if k != "candidates"}
+    return data
 
 
 def to_json(result: AnalysisResult, top_n: Optional[int] = None,
@@ -787,7 +800,7 @@ def to_json(result: AnalysisResult, top_n: Optional[int] = None,
         #
         # 本项目的核心承诺是「拿不出因果链就说证据不足」—— 那这句话
         # 必须**也**出现在机器读的出口上，否则承诺只对一半的读者成立。
-        "evidence": _evidence_dict(result),
+        "evidence": _evidence_dict(result, full=full),
         "root_cause_summary": _root_summary(result),
         "error_kinds": len(result.clusters),
         # 截断诚实字段 —— 与 service.result_to_dict 的三个字段对齐。

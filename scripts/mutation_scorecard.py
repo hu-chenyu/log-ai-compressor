@@ -577,8 +577,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 57 条才是真该留下的。",
-        new="剩下 58 条才是真该留下的。",
+        old="剩下 59 条才是真该留下的。",
+        new="剩下 60 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
@@ -1468,8 +1468,25 @@ MUTATIONS: List[Mutation] = [
             "本项目的核心承诺「拿不出因果链就说证据不足」必须**也**"
             "出现在机器读的出口上，否则承诺只对一半的读者成立",
         target="log_ai_compressor/export/reporters.py",
-        old='        "evidence": _evidence_dict(result),',
+        old='        "evidence": _evidence_dict(result, full=full),',
         new='        "evidence": {},',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/compare-cluster-paired-twice",
+        why="trace 兜底**不记「基准簇已配上」** —— 同一个基准簇会被两个对比簇"
+            "同时配走，于是「消失」列表里留下一条其实配过了的错误。"
+            "（注：只去掉 `matched_b` 那一处守卫是**无效变异** —— 措辞不同的"
+            "两个文件里模板级配对一条也没成，matched_b 本来就是空的，"
+            "去掉它行为不变。这样的条目不进记分卡：一条杀不掉的变异"
+            "只会在表里占一行，让人误以为那里有检查。）",
+        target="log_ai_compressor/core/comparator.py",
+        old=("            for ac in a_clusters:\n"
+             "                if id(ac) in matched_a:\n"
+             "                    continue"),
+        new=("            for ac in a_clusters:\n"
+             "                if False:\n"
+             "                    continue"),
         tests=["tests/test_ninth_round_fixes.py"],
     ),
     Mutation(
