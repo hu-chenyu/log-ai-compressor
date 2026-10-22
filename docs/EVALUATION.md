@@ -63,9 +63,9 @@ $ python scripts/prove.py
   PASS  分层：接入层只经 service 触达 core/export
         实际扫描 10 个文件（ai=4 cli=1 mcp=2 web=3）AST 核验通过
   PASS  README 工程指标与仓库一致
-        README 写 8608 行 / 32 个模块；实测 8608 行 / 32 个模块；README 写自证主张
-[11] 条，本文件实际登记 11 条；测试/主代码行数比实测 2.11；覆盖率分母写 7807，
-实测 7807（8608 − 801，omit=['log_ai_compressor/cli.py']）
+        README 写 8611 行 / 32 个模块；实测 8611 行 / 32 个模块；README 写自证主张
+[11] 条，本文件实际登记 11 条；测试/主代码行数比实测 2.11；覆盖率分母写 7810，
+实测 7810（8611 − 801，omit=['log_ai_compressor/cli.py']）
   PASS  架构树列全包内模块
         24 个模块全部在架构树里
   PASS  基准表与实测一致

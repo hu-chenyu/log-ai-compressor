@@ -66,6 +66,9 @@ log-ai-compressor run app.log -f json              # stdout 就是 JSON
 
 ## `compare` —— 多文件对比
 
+**2~3 个文件**（第一个为基准；少于 2 个或多于 3 个会被明确拒绝并给出
+人话错误，不是 argparse 的 usage 堆栈）。
+
 ```bash
 log-ai-compressor compare v1.log v2.log                 # 写 compare_report.md
 log-ai-compressor compare v1.log v2.log -f json         # stdout 是 JSON
