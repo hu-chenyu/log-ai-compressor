@@ -85,7 +85,9 @@ log-ai-compressor compare v1.log v2.log -o diff.md -q    # 静默
 错误，按 trace 看是**同一件事**。没有第二级的话，这一次事故会被算成
 「新增 1 种 + 消失 1 种」，读起来像「出了新问题、同时修好了老问题」。
 
-报告里带 🔗 的行就是按 trace 对上的。
+报告里带 🔗 的行就是按 trace 对上的。`compare -f json` 的每一项还带
+`matched_by` 字段（`template` / `trace`）—— MCP 的 `compare_log_files`
+工具也带它，所以 Agent 看到的是**同一份**对齐依据。
 
 ## `verify` —— 重读原文自校验
 

@@ -33,6 +33,46 @@ def _load():
 MS = _load()
 
 
+def test_every_doc_claiming_a_current_card_size_agrees():
+    """凡是宣称**当前**记分卡条数的文档，那个数必须等于实际长度。
+
+    为什么要从「只校 AUDIT.md」扩到「所有文档」：
+    `CONTRIBUTING.md` 里那行「17 条已知危险变异」躺了很久 —— 实际早就
+    100 多条了，而它**不在任何对账名单里**。这正是本仓库反复记过的形状：
+    **一个没人看守的对外数字**，读的人会拿一个旧数字当现状。
+
+    只校**现在时**的措辞（「当前 N 条变异」「N 条已知危险变异」、
+    「记分卡从 X 增到 N」），**不动历史记录** —— CHANGELOG 里
+    「v2.9.5 当时记分卡 43 条」那是**关于那次发布**的记录，
+    按 AGENTS.md §2.4「撤回的记录不要删」不该被现在时的判据改掉。
+    """
+    want = len(MS.MUTATIONS)
+    patterns = (
+        r"当前\s*(\d+)\s*条变异",
+        r"(\d+)\s*条已知危险变异",
+        r"记分卡从\s*\d+\s*条增到\s*\*\*(\d+)\s*条\*\*",
+        r"\*\*本地实跑：(\d+)\s*条，存活 0，击杀率 100%\*\*",
+    )
+    docs = ("README.md", "AGENTS.md", "CONTRIBUTING.md", "AUDIT.md",
+            "CHANGELOG.md", "docs/DEVELOPMENT.md")
+    bad = []
+    for name in docs:
+        path = _ROOT / name
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for pat in patterns:
+            for m in re.finditer(pat, text):
+                claimed = int(m.group(1))
+                if claimed != want:
+                    bad.append("%s 写 %d 条，实际 %d 条"
+                               % (name, claimed, want))
+    assert not bad, (
+        "这些文档宣称了过期的记分卡条数：\n"
+        + "\n".join("  " + b for b in bad)
+        + "\n（加了几条变异就要回头改这些地方 —— 与 AUDIT.md 那条门禁同源）")
+
+
 def test_audit_doc_agrees_with_the_card_size():
     """`AUDIT.md` 写的变异条数必须等于这张卡的实际长度。
 

@@ -626,6 +626,10 @@ def compare_to_dicts(results: List[CompareResult]) -> List[Dict[str, Any]]:
                 "summary": getattr(it, "summary", ""),
                 "level": getattr(it, "level", ""),
                 "count": getattr(it, "count", 0),
+                # 对齐依据（'template' / 'trace'）—— Agent 与人看到的是
+                # 同一份信息。缺了它，Agent 会把「按 trace 对上的同一件事」
+                # 当成「两边恰好长得像」，而那正是 compare 最容易被误读的地方。
+                "matched_by": getattr(it, "matched_by", ""),
             }
             for it in seq
         ]
