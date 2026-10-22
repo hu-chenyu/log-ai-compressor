@@ -240,6 +240,14 @@ jobs:
                   print(f"README 写覆盖率 {claimed.group(1)}%，"
                         f"ubuntu-3.12 实测 {pct}% —— README 的覆盖率口径就是"
                         f" ubuntu-3.12，二者必须相等")
+                  # `::error::` 会生成一条 **annotation** —— 它能被
+                  # `GET /repos/{owner}/{repo}/check-runs/{id}/annotations`
+                  # 读到，而 **job 日志读不到**（日志端点要 actions:read scope，
+                  # 匿名/普通 token 拿不到）。所以对账失败时**除了 stdout，
+                  # 再发一条 annotation** —— 否则「实测值是多少」只能靠人去
+                  # 翻网页日志，而那正是「没人校过的对外数字」的由来。
+                  print(f"::error title=覆盖率对账失败::README 写 {claimed.group(1)}%，"
+                        f"ubuntu-3.12 实测 {pct}%")
                   sys.exit(1)
               print(f"覆盖率对账通过：README 与 ubuntu-3.12 实测均为 {pct}%")
 
@@ -268,6 +276,8 @@ jobs:
                   print(f"README 写漏行 {c_missing} / {c_valid} 语句，"
                         f"ubuntu-3.12 实测 {n_valid - n_cov} / {n_valid} —— "
                         f"口径同样是 ubuntu-3.12，二者必须相等")
+                  print(f"::error title=覆盖率明细对账失败::README 写漏行 {c_missing} / {c_valid} 语句，"
+                        f"ubuntu-3.12 实测 {n_valid - n_cov} / {n_valid}")
                   sys.exit(1)
               print(f"明细对账通过：漏行 {n_valid - n_cov} / {n_valid} 语句")
 
