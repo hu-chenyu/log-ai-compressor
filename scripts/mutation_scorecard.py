@@ -1546,6 +1546,74 @@ MUTATIONS: List[Mutation] = [
         new="        line_no = 0",
         tests=["tests/test_ninth_round_fixes.py"],
     ),
+    # ---- 第十轮（2026-10-22 外部复核）--------------------------------
+    Mutation(
+        id="r10/tail-cluster-line-uses-global",
+        why="簇的展示行号改回用**全局** line_no —— 而证据引用用的是文件内号。"
+            "于是同一份报告里两套行号并存：尾部窗口的簇区间整体 +1，"
+            "还能越过文件末尾（100 行的文件报「行 101」）。"
+            "2026-10-22 外部复核实测；`verify` 只查证据那套，所以照样报 VERIFIED",
+        target="log_ai_compressor/core/clustering.py",
+        old='            first_line=entry.file_line_no or entry.line_no,\n            last_line=entry.file_last_line_no or entry.file_line_no or entry.line_no,',
+        new='            first_line=entry.line_no,\n            last_line=entry.last_line_no or entry.line_no,',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/tail-parser-ignores-file-line",
+        why="解析器不再收到文件内行号 —— 条目的行号就退回全局口径，"
+            "与上面那条同源（证据那侧仍是对的，于是两套行号并存）",
+        target="log_ai_compressor/core/pipeline.py",
+        old="                completed = parser.feed(line, line_no, file_line_no)",
+        new="                completed = parser.feed(line, line_no)",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/wide-encoding-tail-splits-by-bytes",
+        why="宽编码的尾部窗口改回按**字节**切行 —— utf-16 的换行符是多字节的"
+            "（`0A 00`），字符被劈成两半 ⇒ 切碎的半行解析不出级别 ⇒ "
+            "**全部错误静默丢失**（实测 5 行的 UTF-16 报「6 行、0 个错误、"
+            "未发现明确根因」，而退出码仍是 0）。"
+            "这正是 AGENTS.md §4c 明令禁止的那件事",
+        target="log_ai_compressor/core/encoding.py",
+        old="    if is_wide_encoding(encoding):",
+        new="    if False:",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/stdin-tail-silently-ignored",
+        why="`run - --tail N` 不再报错 ⇒ --tail 被**静默忽略**："
+            "用户以为在看最后 N 行、其实看了全部。值班时会误判"
+            "「最近几行里没有新错误」",
+        target="log_ai_compressor/cli.py",
+        old='    if getattr(args, "tail", 0):\n'
+            '        print("错误：--tail 不能与标准输入（`-`）一起用 —— "',
+        new='    if False:\n'
+            '        print("错误：--tail 不能与标准输入（`-`）一起用 —— "',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/verify-skips-range-check",
+        why="`verify --report` 不再校验报告**展示出来**的行号区间 ⇒ "
+            "一份写着「行 2~101」而文件只有 100 行的报告照样报 VERIFIED。"
+            "「每条结论都能复核」这句话那时只对一半成立",
+        target="log_ai_compressor/cli.py",
+        old="        if first < 1 or last < first or last > total:",
+        new="        if False:",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/readme-sample-input-changed",
+        why="README 首屏那段示例所依赖的**输入文件**被改了 ⇒ "
+            "那段输出读者复现不出来（本项目最该能被复现的东西，"
+            "反而最不能）。2026-10-22 外部复核抓到：README 写「24 行」，"
+            "而 examples/ 里没有 24 行的那个文件；"
+            "新加的门禁 tests/test_readme_sample_is_reproducible.py "
+            "逐条核对行号区间 / 指纹 / 三个数",
+        target="examples/app.log",
+        old="2024-03-15 08:00:03 ERROR [auth] authorization failed: connection refused to db-primary:5432",
+        new="2024-03-15 08:00:03 ERROR [auth] authorization failed: connection refused to db-secondary:5432",
+        tests=["tests/test_readme_sample_is_reproducible.py"],
+    ),
     Mutation(
         id="ninth/tail-notice-removed",
         why="`--tail` 不再说明「这次只看的是尾部」—— 报告覆盖的不是全量，"
