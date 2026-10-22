@@ -339,6 +339,44 @@ MUTATIONS: List[Mutation] = [
         new="              c_valid = n_valid",
         tests=["tests/test_ci_step_execution.py"],
     ),
+    # ---- 「实测值」这个通道（2026-10-22 批9） ---------------------------
+    #
+    # 这一组守的是一条**元事故**：2026-10-22 我从 CI 的 annotation 里
+    # 读回「ubuntu-3.12 实测 96%」，**差点把它当成真值回填进 README** ——
+    # 而那个 96% 其实是**测试夹具里的假数**（真 CI 那一步压根没跑到对账段，
+    # 因为 pytest 一红就 `sys.exit(rc)` 了）。
+    Mutation(
+        id="measure/pytest-failure-skips-the-measurement",
+        why="pytest 一红就对账段提前退出 ⇒ 覆盖率**根本没被测**，"
+            "而外面只能看到一句「exit code 1」。"
+            "于是「实测覆盖率到底是多少」这个问题**再也问不出答案**，"
+            "只能去猜 —— 或者（更糟）去读测试夹具漏出来的假数",
+        target=".github/workflows/ci.yml",
+        old="          pytest_green = (rc == 0)",
+        new="          pytest_green = (rc == 0)\n          if rc:\n              sys.exit(rc)",
+        tests=["tests/test_ci_step_execution.py"],
+    ),
+    Mutation(
+        id="measure/matrix-name-hardcoded",
+        why="矩阵身份写死成「ubuntu-3.12」 ⇒ **3.11 那一格也自称 3.12**，"
+            "两格报出同一个数，读的人无从知道那个数是哪一格测的。"
+            "2026-10-22 实测：两条一模一样的 annotation 挂在两个 job 上",
+        target=".github/workflows/ci.yml",
+        old='          matrix_label = "${{ matrix.os }} ${{ matrix.python }}"',
+        new='          matrix_label = "ubuntu-3.12"',
+        tests=["tests/test_ci_step_execution.py"],
+    ),
+    Mutation(
+        id="measure/measurement-only-when-it-fails",
+        why="实测值只在**对账失败**时才报出来 ⇒ 「README 那个数现在对不对」"
+            "没法在**不失败**的情况下确认。job 日志端点要 actions:read scope，"
+            "普通 token 读不到 —— annotation 是唯一的通道",
+        target=".github/workflows/ci.yml",
+        old='              print(f"::notice title=覆盖率实测::{matrix_label} 实测覆盖率 {pct}%，"\n'
+            '                    f"漏行 {n_valid - n_cov} / {n_valid} 语句")',
+        new="              pass",
+        tests=["tests/test_ci_step_execution.py"],
+    ),
     # ---- Registry 发布工作流（v2.11.2 批7） ----------------------------
     Mutation(
         id="registry/oidc-permission-downgraded",

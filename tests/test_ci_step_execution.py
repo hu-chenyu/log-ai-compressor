@@ -46,7 +46,7 @@ def _step_source() -> str:
     return steps["run"]
 
 
-def _check_body() -> str:
+def _check_body(rc: int = 0) -> str:
     """切出「除 pytest 调用以外」的全部逻辑，供本地执行。
 
     为什么把 pytest 那几行摘掉：它要跑几分钟，与被测的对账逻辑无关。
@@ -55,6 +55,10 @@ def _check_body() -> str:
     pytest 调用**之前**，只切后面就等于**把要验的那道防线排除在测试外** ——
     而那正是 run #43 windows-3.12 栽跟头的地方。harness 自己漏掉防线，
     比没有 harness 更危险。
+
+    `rc` 是**注入的 pytest 退出码**：0 = pytest 全绿（默认），
+    非 0 = pytest 红了。2026-10-22 修的那条「pytest 红了也要报出实测值」
+    就靠它验 —— 而那条路径**只有 pytest 红了才走得到**。
     """
     lines = _step_source().splitlines()
     start = next((i for i, ln in enumerate(lines)
@@ -63,7 +67,7 @@ def _check_body() -> str:
     end = next((i for i in range(start, len(lines))
                 if lines[i].strip() == "])"), None)
     assert end is not None, "ci.yml 的 pytest 调用收尾写法变了，先更新本 harness"
-    body = textwrap.dedent("\n".join(lines[:start] + ["rc = 0"] + lines[end + 1:]))
+    body = textwrap.dedent("\n".join(lines[:start] + [f"rc = {rc}"] + lines[end + 1:]))
     assert "coverage.xml" in body, "切出来的不是覆盖率对账那段"
     return body
 
@@ -94,6 +98,190 @@ def _readme_detail(path: pathlib.Path) -> tuple[int, int]:
     assert m, f"{path.name} 里找不到「漏行 N / M 语句」—— CI 那段无从对账"
     return (int(m.group(2).replace(",", "")),
             int(m.group(1).replace(",", "")))
+
+
+def _readme_pct(path: pathlib.Path) -> int:
+    """从 README 取「覆盖率 **N%**」的 N —— **现读，绝不写死**。
+
+    为什么不能写死（2026-10-22 实测踩过）：这个文件里有 12 处写过
+    `**96%**` / `0.9598`。README 的覆盖率一改（它本来就该随代码变），
+    这些用例立刻红 4 条 —— 而**红的原因与被守的东西无关**：不是门禁在
+    报真问题，是**测试自己过期了**。
+
+    更糟的是它把真信号淹了：那次本机全量红 8 条，其中 4 条是这条噪声、
+    4 条才是真问题（GitHub API 额度耗尽）。**分不清哪条是信号、哪条是
+    噪声的门禁，等于没有门禁。**
+
+    所以期望值一律现读；只有**故意改坏 README** 的那条负向测试才写死
+    具体值 —— 而它写的必须是**改坏后的那个值**。
+    """
+    m = re.search(r"覆盖率\s*\*\*(\d+)%\*\*", path.read_text(encoding="utf-8"))
+    assert m, f"{path.name} 里找不到「覆盖率 **N%**」—— CI 那段无从对账"
+    return int(m.group(1))
+
+
+def _line_rate_for(pct: int) -> str:
+    """造一个能被 `round(line-rate * 100)` 还原成 pct 的 line-rate。
+
+    为什么用 `pct / 100` 而不是写死一个字符串：见 `_readme_pct` 的注释。
+    写死的 `0.9598` 只在 README 恰好写 96% 时才等于那个百分比。
+    """
+    return f"{pct / 100:.10f}"
+
+
+def test_this_file_never_hardcodes_the_readme_coverage_number():
+    """**元测试**：本文件的**代码**里不得出现写死的覆盖率数字。
+
+    2026-10-22 实测踩过：这个文件里有 12 处写过 `**96%**` / `0.9598`。
+    README 的覆盖率一改（它本来就该随代码变），这些用例立刻红 4 条 ——
+    而**红的原因与被守的东西无关**：不是门禁在报真问题，是**测试自己
+    过期了**。
+
+    更糟的是它把真信号淹了：那次本机全量红 8 条，其中 4 条是这条噪声、
+    4 条才是真问题。**分不清哪条是信号、哪条是噪声的门禁，等于没有门禁。**
+
+    所以期望值一律现读（`_readme_pct`），或由它算出来（`_line_rate_for`）。
+
+    **判据用 AST 而不是正则**：注释与 docstring 里**正当性地**会出现
+    这些字面量（讲清楚这件事本身就得写出「96%」），
+    而正则分不清「代码」与「散文」。AST 只看**常量**，
+    注释在 AST 里根本不存在。
+
+    **改坏会红吗**：把 `_readme_pct(real)` 换回写死的 `96`，本条立刻红。
+    """
+    tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+    # **docstring 要排除**：它讲清楚「为什么不能写死」时，
+    # 正当地写着 `**96%**` / `0.9598` 这几个字面量 ——
+    # 而 docstring 在 AST 里是「语句位置的第一个字符串常量」，
+    # 可以精确地认出来（不需要猜）。
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docstrings.add(id(body[0].value))
+    hard = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docstrings:
+                continue
+            # `**96%**` 形态：被包在 ** 里的百分数
+            if re.search(r"\*\*\d{2}%\*\*", node.value):
+                hard.append(node.value)
+            # `0.9598` 形态：四位小数的 line-rate
+            if re.search(r"0\.\d{4}\b", node.value):
+                hard.append(node.value)
+    assert not hard, (
+        "本文件的代码里出现了写死的覆盖率数字：%s\n"
+        "期望值必须**现读** README（_readme_pct），"
+        "或由它算出来（_line_rate_for）—— "
+        "写死的数字会随 README 更新而变成「测试自己过期了」的红，"
+        "把真信号淹掉。" % sorted(set(hard)))
+
+
+def test_the_ci_body_never_hardcodes_a_coverage_number():
+    """**元测试**：ci.yml 那段对账正文**不许自己报出矩阵名**。
+
+    同一条病在 ci.yml 上也犯过一次：那段本来就把「ubuntu-3.12 实测 X%」
+    写进了消息（见 ci.yml 里的注释），于是 **3.11 那一格也自称
+    ubuntu-3.12** —— 两格报出同一个数，而那个数来自测试夹具。
+
+    这条守住的是：**矩阵身份必须当次求值**（`${{ matrix.os }}`），
+    统一由 `matrix_label` 那个变量带出来。
+
+    判据不是「源码里不许出现 ubuntu-3.12 这个词」—— 错误消息里
+    **理应**说清口径是 ubuntu-3.12（那是给人看的解释）。
+    判据是：**凡是要出现在「实测覆盖率」/「实测」旁边的矩阵名，
+    必须来自 `matrix_label`**，不许是字面量。
+
+    所以这里查的是**打印语句的格式串**：它若含矩阵名，就必须
+    含 `{matrix_label}` 而不是写死的名字。
+
+    **改坏会红吗**：把 ci.yml 里的 `matrix_label` 换回写死的
+    「ubuntu-3.12」，本条立刻红。
+    """
+    tree = ast.parse(_check_body())
+    # docstring 里正当性地写着「ubuntu-3.12 实测 X%」——
+    # 正因为要讲清楚这个坑长什么样。docstring 在 AST 里是
+    # 「语句位置的第一个字符串常量」，可以精确认出来。
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docstrings.add(id(body[0].value))
+    hard = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "print"):
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.Constant):
+                if id(arg) in docstrings:
+                    continue
+                # 普通字符串常量：里面若写了矩阵名 + 「实测」⇒ 写死
+                if ("ubuntu-3.12" in arg.value or "windows-3.12" in arg.value) \
+                        and "实测" in arg.value:
+                    hard.append(arg.value)
+            elif isinstance(arg, ast.JoinedStr):
+                # f-string：把**词法单元**列出来（常量片段 / 插值），
+                # 再看「实测」前面那一个单元是不是**写死的矩阵名**。
+                #
+                # 为什么不用「整句拼起来再搜」：那句里「{matrix_label} 实测 X%」
+                # 与「—— README 的覆盖率口径就是 ubuntu-3.12」是**同一句**，
+                # 后半句正当性地提到 ubuntu-3.12（那是解释口径给人看的）。
+                # 真正要禁的是：**「实测」前面那个位置**写死了名字。
+                tokens = []
+                for v in arg.values:
+                    if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                        tokens.append(("const", v.value))
+                    elif isinstance(v, ast.FormattedValue):
+                        tokens.append(("var", v))
+                for i, (kind, val) in enumerate(tokens):
+                    if kind != "const" or "实测" not in val:
+                        continue
+                    # 往前找最近的那个「名字」单元
+                    prev = None
+                    for j in range(i - 1, -1, -1):
+                        if tokens[j][0] == "const" and tokens[j][1].strip():
+                            prev = tokens[j][1]
+                            break
+                        if tokens[j][0] == "var":
+                            prev = tokens[j][1]
+                            break
+                    if prev is None:
+                        continue
+                    if isinstance(prev, str) and (
+                            "ubuntu-3.12" in prev or "windows-3.12" in prev):
+                        hard.append(str(arg))
+    # **矩阵身份那个变量本身**也得是当次求值 ——
+    # 上一版只查了 print 那一侧，于是把 `matrix_label = "ubuntu-3.12"`
+    # 写回去时**一条都不红**（人工验红时逮到的装饰）。
+    # 所以这里再查一遍：`matrix_label` 的**赋值**必须是
+    # `${{ matrix.os }} ${{ matrix.python }}`。
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets
+                   if isinstance(t, ast.Name)]
+        if "matrix_label" not in targets:
+            continue
+        if not isinstance(node.value, ast.Constant):
+            continue
+        val = node.value.value
+        if "matrix.os" not in val or "matrix.python" not in val:
+            hard.append("matrix_label = %r" % val)
+    assert not hard, (
+        "ci.yml 的对账正文里，矩阵身份**没有当次求值**：%s\n"
+        "它必须来自 `${{ matrix.os }} ${{ matrix.python }}` —— "
+        "写死会让别的矩阵自称 3.12，于是读到的数无从知道是哪一格测的。" % hard)
 
 
 def _fixture(tmp: pathlib.Path, *, readme: pathlib.Path | None,
@@ -291,28 +479,114 @@ def test_check_body_parses_a_really_generated_coverage_xml(tmp_path):
     out = r.stdout + r.stderr
     assert "NameError" not in out, f"对账段引用了未定义的名字：\n{out}"
     assert "解析 coverage.xml 失败" not in out, f"正则吃不下真实 coverage 输出：\n{out}"
-    # 这份 probe 全部命中，所以 line-rate=1.0 → 100%，与 README 的 96% 不等，
+    # 这份 probe 全部命中，所以 line-rate=1.0 → 100%，与 README 写的那个值不等，
     # 那段必须因此红 —— 这才证明「它真的比了」，而不是只把数字打印出来。
     assert "实测覆盖率 100%" in r.stdout, r.stdout
     assert r.returncode == 1, r.stdout + r.stderr
-    assert "README 写覆盖率 96%" in r.stdout, r.stdout
+    assert f"README 写覆盖率 {_readme_pct(ROOT / 'README.md')}%" in r.stdout, r.stdout
 
 
 def test_ubuntu_enforces_readme_number(tmp_path):
     body = _check_body()
     real = ROOT / "README.md"
-    good = _fixture(tmp_path / "a", readme=real, cov_line_rate="0.9598")
+    claimed = _readme_pct(real)
+    good = _fixture(tmp_path / "a", readme=real,
+                    cov_line_rate=_line_rate_for(claimed))
     assert _run(body, "ubuntu-latest", good).returncode == 0
 
-    # 差一个百分点就必须红 —— 否则这条门禁是装饰
+    # 差一个百分点就必须红 —— 否则这条门禁是装饰。
+    # 注意「差一个」是**相对 README 现值**算出来的，不是写死的 95/97：
+    # 写死的话 README 一改，这条用例就变成「测试自己过期了」的红。
+    wrong = claimed - 1
     bad_readme = tmp_path / "bad.md"
     bad_readme.write_text(
-        real.read_text(encoding="utf-8").replace("**96%**", "**95%**"),
+        re.sub(r"(覆盖率\s*\*\*)\d+(%\*\*)", rf"\g<1>{wrong}\g<2>",
+               real.read_text(encoding="utf-8"), count=1),
         encoding="utf-8")
-    bad = _fixture(tmp_path / "b", readme=bad_readme, cov_line_rate="0.9598")
+    bad = _fixture(tmp_path / "b", readme=bad_readme,
+                   cov_line_rate=_line_rate_for(claimed))
     r = _run(body, "ubuntu-latest", bad)
     assert r.returncode == 1, f"README 写错就必须红，却 rc={r.returncode}"
-    assert "README 写覆盖率 95%" in r.stdout
+    assert f"README 写覆盖率 {wrong}%" in r.stdout
+
+
+def test_pytest_failure_still_reports_the_measured_value(tmp_path):
+    """**pytest 红了，实测值照样要报出来** —— 2026-10-22 修的那条。
+
+    原来这段在 pytest 之后是 `sys.exit(rc)`：pytest 一红，
+    **覆盖率根本没被测**，而外面只能看到一句「exit code 1」。
+    于是「ubuntu-3.12 的覆盖率到底是多少」这个问题**再也问不出答案**。
+
+    而这个问题**必须能问出来** —— README 里那个数就得靠它校。
+    （本轮就栽在这：pytest 红了 → 对账没跑 → 我从 annotation 里读到的
+    那个「96%」其实是**测试夹具里的假数**，差点被当成真值回填。）
+
+    所以：pytest 红时**跳过对账**（残缺的一遍测出来的数不可信），
+    但**实测值照样报出来**，且这一步**仍然要红**。
+
+    **改坏会红吗**：把 ci.yml 里的 `pytest_green` 判断去掉（恢复成
+    pytest 一红就 `sys.exit(rc)`），本条立刻红 —— 实测值不再被报出。
+    """
+    body = _check_body(rc=1)
+    real = ROOT / "README.md"
+    work = _fixture(tmp_path / "red", readme=real,
+                    cov_line_rate=_line_rate_for(_readme_pct(real)))
+    r = _run(body, "ubuntu-latest", work)
+    # pytest 红了 ⇒ 这一步必须红（否则最严重的信号被吞掉了）
+    assert r.returncode != 0, (
+        "pytest 全红，这一步却绿了 —— 最严重的信号被吞了：\n"
+        + r.stdout + r.stderr)
+    # 但实测值必须被报出来
+    assert f"实测覆盖率 {_readme_pct(real)}%" in r.stdout, (
+        "pytest 红了就不再报实测值 —— "
+        "那「实测覆盖率到底是多少」就再也问不出答案了：\n" + r.stdout)
+    # 并且要说明白「对账被跳过了」，别让人把残缺的一遍当成结论
+    assert "pytest 未全绿" in r.stdout, r.stdout
+
+
+def test_the_measured_value_is_reported_even_when_the_gate_passes(tmp_path):
+    """对账**通过**时，实测值也要报出来（不只在失败时报）。
+
+    为什么：job 日志端点要 `actions:read` scope，普通 token 读不到 ——
+    annotation 是**唯一**能让外面读到「实测值是多少」的通道。
+    而如果它只在失败时说话，那么「README 那个数现在对不对」就
+    **没法在不失败的情况下确认**。
+
+    **改坏会红吗**：把 ci.yml 里那条 `::notice::` 删掉，本条立刻红。
+    """
+    body = _check_body()
+    real = ROOT / "README.md"
+    work = _fixture(tmp_path / "green", readme=real,
+                    cov_line_rate=_line_rate_for(_readme_pct(real)))
+    r = _run(body, "ubuntu-latest", work)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "::notice title=覆盖率实测::" in r.stdout, (
+        "对账通过时不报实测值 —— 外面就无从知道 README 那个数"
+        "当前对不对：\n" + r.stdout)
+
+
+def test_the_measurement_names_its_own_matrix(tmp_path):
+    """实测值必须**自报家门** —— 消息里要写明是哪一格测的。
+
+    2026-10-22 实测踩过：那段正文里把「ubuntu-3.12 实测 X%」**写死**了，
+    而它会被 tests/test_ci_step_execution.py 抽出来在本地跑 ——
+    于是 **3.11 那一格也自称 ubuntu-3.12**，两格报出同一个数，
+    读的人无从知道那个数是哪一格测的（更糟：那个数来自测试夹具）。
+
+    **改坏会红吗**：把 ci.yml 里的 `matrix_label` 换回写死的
+    「ubuntu-3.12」，本条立刻红。
+    """
+    body = _check_body()
+    real = ROOT / "README.md"
+    work = _fixture(tmp_path / "who", readme=real,
+                    cov_line_rate=_line_rate_for(_readme_pct(real)))
+    for os_name, py_ver in (("ubuntu-latest", "3.11"),
+                             ("ubuntu-latest", "3.12"),
+                             ("windows-latest", "3.12")):
+        r = _run(body, os_name, work, python_version=py_ver)
+        label = f"[{os_name} {py_ver}] 实测覆盖率"
+        assert label in r.stdout, (
+            f"实测值没自报家门（应为 {label!r}）：\n" + r.stdout)
 
 
 def test_ubuntu_enforces_the_missing_lines_detail(tmp_path):
@@ -340,7 +614,8 @@ def test_ubuntu_enforces_the_missing_lines_detail(tmp_path):
     bad_readme = tmp_path / "bad-detail.md"
     bad_readme.write_text(bad, encoding="utf-8")
     work = _fixture(tmp_path / "detail", readme=bad_readme,
-                    cov_line_rate="0.9598", detail=detail)
+                    cov_line_rate=_line_rate_for(_readme_pct(real)),
+                    detail=detail)
     r = _run(body, "ubuntu-latest", work)
     assert r.returncode == 1, f"明细写错却 rc={r.returncode}：{r.stdout}"
     assert "README 写漏行 1 / 2 语句" in r.stdout, r.stdout
@@ -357,10 +632,11 @@ def test_the_detail_gate_is_reference_matrix_only(tmp_path):
     bad_readme = tmp_path / "bad-detail2.md"
     bad_readme.write_text(bad, encoding="utf-8")
     work = _fixture(tmp_path / "detail2", readme=bad_readme,
-                    cov_line_rate="0.9598", detail=detail)
+                    cov_line_rate=_line_rate_for(_readme_pct(real)),
+                    detail=detail)
     r = _run(body, "windows-latest", work, python_version="3.12")
     assert r.returncode == 0, f"非参考矩阵不该判红：\n{r.stdout}{r.stderr}"
-    assert "实测覆盖率 96%" in r.stdout, "数字必须照样报出来，否则等于没测"
+    assert f"实测覆盖率 {_readme_pct(real)}%" in r.stdout, "数字必须照样报出来，否则等于没测"
 
 
 def test_the_real_readme_detail_matches_a_real_coverage_run(tmp_path):
@@ -401,16 +677,19 @@ def test_non_reference_matrix_reports_but_does_not_judge(
     """
     body = _check_body()
     real = ROOT / "README.md"
+    claimed = _readme_pct(real)
+    wrong = claimed + 1
     bad_readme = tmp_path / "bad.md"
     bad_readme.write_text(
-        real.read_text(encoding="utf-8").replace("**96%**", "**97%**"),
+        re.sub(r"(覆盖率\s*\*\*)\d+(%\*\*)", rf"\g<1>{wrong}\g<2>",
+               real.read_text(encoding="utf-8"), count=1),
         encoding="utf-8")
     work = _fixture(tmp_path / f"{os_name}-{py_ver}", readme=bad_readme,
-                    cov_line_rate="0.9598")
+                    cov_line_rate=_line_rate_for(claimed))
     r = _run(body, os_name, work, python_version=py_ver)
     assert r.returncode == 0, (
         f"[{os_name} {py_ver}] 非参考矩阵不该判红：\n{r.stdout}{r.stderr}")
-    assert "实测覆盖率 96%" in r.stdout, "数字必须照样报出来，否则等于没测"
+    assert f"实测覆盖率 {claimed}%" in r.stdout, "数字必须照样报出来，否则等于没测"
 
 
 def test_reference_matrix_still_judges(tmp_path):
@@ -420,15 +699,19 @@ def test_reference_matrix_still_judges(tmp_path):
     """
     body = _check_body()
     real = ROOT / "README.md"
+    claimed = _readme_pct(real)
+    wrong = claimed + 1
     bad_readme = tmp_path / "bad.md"
     bad_readme.write_text(
-        real.read_text(encoding="utf-8").replace("**96%**", "**97%**"),
+        re.sub(r"(覆盖率\s*\*\*)\d+(%\*\*)", rf"\g<1>{wrong}\g<2>",
+               real.read_text(encoding="utf-8"), count=1),
         encoding="utf-8")
-    work = _fixture(tmp_path / "ref", readme=bad_readme, cov_line_rate="0.9598")
+    work = _fixture(tmp_path / "ref", readme=bad_readme,
+                    cov_line_rate=_line_rate_for(claimed))
     r = _run(body, "ubuntu-latest", work, python_version="3.12")
     assert r.returncode == 1, (
         f"ubuntu-3.12 是参考矩阵，README 写错就必须红，却 rc={r.returncode}")
-    assert "README 写覆盖率 97%" in r.stdout
+    assert f"README 写覆盖率 {wrong}%" in r.stdout
 
 
 def test_missing_coverage_file_fails_only_on_reference_matrix(tmp_path):
@@ -477,14 +760,14 @@ def test_survives_cp1252_console(tmp_path):
     """
     body = _check_body()
     work = _fixture(tmp_path / "cp", readme=ROOT / "README.md",
-                    cov_line_rate="0.9598")
+                    cov_line_rate=_line_rate_for(_readme_pct(ROOT / "README.md")))
     r = _run(body, "windows-latest", work, console_encoding="cp1252")
     out = r.stdout + r.stderr
     assert "UnicodeEncodeError" not in out, (
         f"cp1252 控制台下崩了，说明 stdout 没重配：\n{out}")
     assert "charmap" not in out, out
     assert r.returncode == 0, f"cp1252 控制台下必须跑完：\n{out}"
-    assert "实测覆盖率 96%" in r.stdout, out
+    assert f"实测覆盖率 {_readme_pct(ROOT / 'README.md')}%" in r.stdout, out
 
 
 def test_stdout_is_reconfigured_statically():
