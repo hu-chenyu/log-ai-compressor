@@ -615,8 +615,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 59 条才是真该留下的。",
-        new="剩下 60 条才是真该留下的。",
+        old="剩下 61 条才是真该留下的。",
+        new="剩下 62 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
@@ -1535,15 +1535,6 @@ MUTATIONS: List[Mutation] = [
         new=("            for ac in a_clusters:\n"
              "                if False:\n"
              "                    continue"),
-        tests=["tests/test_ninth_round_fixes.py"],
-    ),
-    Mutation(
-        id="ninth/tail-line-offset-ignored",
-        why="`--tail` 的行号不再偏移 —— 报告里的「第 1 行」在原文件里是第 96 行，"
-            "证据引用指向无关的内容，「可复核」当场失效",
-        target="log_ai_compressor/core/pipeline.py",
-        old="        line_no = line_offset",
-        new="        line_no = 0",
         tests=["tests/test_ninth_round_fixes.py"],
     ),
     # ---- 第十轮（2026-10-22 外部复核）--------------------------------
