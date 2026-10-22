@@ -317,22 +317,59 @@ class TestIngestAndReadbackShareTheDecoder:
 # 3. 「窗口内首发」必须与 first_seen 一致
 # ---------------------------------------------------------------------------
 class TestBurstWindowWording:
-    def test_only_the_earliest_cluster_may_claim_to_be_first(self):
-        """同一个突发窗口里，只有最早那个能叫「首发」。
+    def test_only_the_earliest_window_may_claim_to_be_first(self, tmp_path):
+        """同一个文件里**只有最早那个突发窗口**能叫「首发 / 源头」。
 
-        **改坏会红吗**：把「首发」判定去掉（每个窗口内的簇都标首发），
-        本断言立刻红。
+        2026-10-21 第九轮外部复核抓到：两个簇**都**自称「窗口内首发」，
+        而其中一个的 `first_seen` 明明更晚。读者看到「首发」会当成
+        「全局最早的那个」，于是追到了晚的那个错误上 —— 报告里
+        一个**假的时间起点**。
+
+        本条用**真实日志**造出两个相隔超过一个突发窗口的错误：
+        第一个窗口里的那个才配叫「首发/源头」，第二个窗口里的只能叫
+        「后续突发窗口」。
+
+        **改坏会红吗**：把 `analysis.py` 里的 `burst_done` 守卫去掉
+        （让每个窗口都能自称首发），本断言立刻红。
         """
-        from log_ai_compressor.core import analysis as A
-        clusters = _two_clusters_same_window()
-        A._mark_burst_windows(clusters) if hasattr(A, "_mark_burst_windows") \
-            else None
-        # 不依赖私有函数名：直接检查产物
-        firsts = [c for c in clusters
-                  if "首发" in (c.root_cause_reason or "")]
+        # 两个错误相隔 600 秒（突发窗口是 60 秒 ⇒ 落在不同窗口），
+        # 且措辞**明显不同** —— 否则它们会被聚成同一个簇，窗口就只有一个了。
+        p = tmp_path / "two_windows.log"
+        p.write_text(
+            "2024-01-01 10:00:00 ERROR connection refused to db-primary:5432\n"
+            "2024-01-01 10:10:00 ERROR disk quota exceeded on volume data01\n",
+            encoding="utf-8")
+        result = S.analyze(paths=[str(p)])
+        reasons = [c.root_cause_reason or "" for c in result.clusters]
+        # 「首发 / 源头」这一类措辞：最早那个窗口可以叫，
+        # 后续窗口只能叫「后续突发窗口…」。
+        first_words = ("首发", "源头")
+        firsts = [r for r in reasons if any(w in r for w in first_words)]
         assert len(firsts) <= 1, (
-            "同一个窗口里 %d 个簇都自称首发：%s"
-            % (len(firsts), [c.root_cause_reason for c in firsts]))
+            "有 %d 个簇自称首发/源头：%s" % (len(firsts), reasons))
+        # 更强的一条（也是能真正抓住「burst_done 守卫失效」的那条）：
+        # **最早那个簇必须**是那个自称首发/源头（或「窗口内唯一的错误」）
+        # 的簇。
+        # 只断言「≤1 个」是不够的 —— 守卫彻底失效时（burst_done 一开始
+        # 就是真）结果是 **0 个**自称首发，那条断言照样绿。
+        with_ts = [c for c in result.clusters if c.first_seen is not None]
+        assert with_ts, "没有带时间戳的簇"
+        earliest = min(with_ts, key=lambda c: c.first_seen)
+        # 最早那个窗口的说法有三种：唯一的错误 / 时间连锁源头 / 后续窗口
+        # （后者是守卫失效时才出现的措辞，此时断言会红）
+        assert "后续突发窗口" not in (earliest.root_cause_reason or ""), (
+            "最早那个簇被说成了「后续突发窗口」：%r"
+            % earliest.root_cause_reason)
+        assert (earliest.root_cause_reason or ""), (
+            "最早那个簇没有任何说法：%s" % reasons)
+        # 其余的簇若也提到「首发/源头」，必须说得清是**后续**窗口
+        for c in result.clusters:
+            if c is earliest:
+                continue
+            reason = c.root_cause_reason or ""
+            if any(w in reason for w in first_words):
+                assert "后续" in reason, (
+                    "非最早的那个簇也自称首发/源头：%r" % reason)
 
 
 def _two_clusters_same_window():

@@ -1473,6 +1473,16 @@ MUTATIONS: List[Mutation] = [
         tests=["tests/test_ninth_round_fixes.py"],
     ),
     Mutation(
+        id="ninth/burst-window-first-claim-guard-removed",
+        why="「只有最早那个突发窗口能叫首发/源头」的守卫失效 —— "
+            "每个窗口都自称首发，读者会当成「全局最早的那个」，"
+            "于是追到了晚的那个错误上（2026-10-21 第九轮外部复核抓到）",
+        target="log_ai_compressor/core/analysis.py",
+        old="    burst_done = False\n",
+        new="    burst_done = True\n",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
         id="ninth/compare-cluster-paired-twice",
         why="trace 兜底**不记「基准簇已配上」** —— 同一个基准簇会被两个对比簇"
             "同时配走，于是「消失」列表里留下一条其实配过了的错误。"
