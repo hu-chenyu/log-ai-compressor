@@ -371,6 +371,25 @@ def read_last_lines(path, n: int, encoding: str):
     """
     if n <= 0:
         raise ValueError("n 必须为正")
+    dec = LogDecoder(encoding)
+    if is_wide_encoding(encoding):
+        # **宽编码必须整块解码后再切行**（AGENTS.md §4c）——
+        # utf-16/utf-32 的换行符是**多字节**的（`0A 00`），按 `b"\n"` 切行
+        # 会把一个字符劈成两半：实测 5 行 UTF-16 的文件被报成「6 行」，
+        # 而切碎的半行**解析不出级别** ⇒ 报告说「0 个错误」——
+        # 一份全是 ERROR 的日志被报成没有错误，**且退出码仍是 0**。
+        #
+        # 所以宽编码走**文本流**那条路（与 `LogDecoder.iter_lines` 同一套
+        # 判定规则），窄编码才走字节环形缓冲。
+        lines: List[str] = []
+        total = 0
+        for text in dec.iter_lines(path):
+            total += 1
+            lines.append(text)
+            if len(lines) > n:
+                lines.pop(0)
+        start = max(1, total - len(lines) + 1)
+        return lines, start, total, dec
     tail = deque(maxlen=n)
     total = 0
     with open_binary_stream(path) as raw:
@@ -379,7 +398,6 @@ def read_last_lines(path, n: int, encoding: str):
             tail.append(line)
     lines = list(tail)
     start = max(1, total - len(lines) + 1)
-    dec = LogDecoder(encoding)
     return [dec.decode_bytes(b) for b in lines], start, total, dec
 
 

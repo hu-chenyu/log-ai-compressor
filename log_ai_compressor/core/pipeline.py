@@ -574,7 +574,13 @@ class LogPipeline:
                 line = _strip_ansi(stripped)
 
                 # 1) 新条目开始 -> 处理上一个完整条目
-                completed = parser.feed(line, line_no)
+                # `file_line_no` = 该行在**这个来源文件**里的行号 ——
+                # 报告里给人看的行号与证据引用都要用它（`line_no` 是全局
+                # 计数，只服务滚动窗口/待补/进度那些内部逻辑）。
+                # 两者不等时（`--tail` 的尾部窗口、轮转合并）用错的那套，
+                # 报告里的行号就会指向错的地方（2026-10-22 实测：
+                # `--tail 10` 的簇区间报成 92~101，而窗口首行是 91）。
+                completed = parser.feed(line, line_no, file_line_no)
                 if completed is not None:
                     completed.source_file = cur_source
                     self._handle_entry(completed, stats, clusterer,

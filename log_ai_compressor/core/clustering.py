@@ -444,8 +444,8 @@ class ErrorClusterer:
             module=entry.module,
             summary=self._summarize(entry),
             count=0,
-            first_line=entry.line_no,
-            last_line=entry.last_line_no or entry.line_no,
+            first_line=entry.file_line_no or entry.line_no,
+            last_line=entry.file_last_line_no or entry.file_line_no or entry.line_no,
             first_seen=entry.timestamp,
             last_seen=entry.timestamp,
             sample=ClusterSample(entry=entry, before=list(before_lines or [])),
@@ -463,7 +463,8 @@ class ErrorClusterer:
                 ) -> Tuple[bool, Optional[ClusterInstance]]:
         """更新簇计数/时间/样例；返回 (是否更换了样例, 本次记录的实例)。"""
         cluster.count += 1
-        cluster.last_line = entry.last_line_no or entry.line_no
+        cluster.last_line = (entry.file_last_line_no or entry.file_line_no
+                             or entry.line_no)
         # 修复：无时间戳的条目**不得**抹掉簇已有的时间信息。此前无条件
         # 赋值 last_seen = entry.timestamp，混合日志（部分行带戳、部分行
         # 不带）里只要最后一条不带戳，整个簇的 last_seen 就变 None ——
@@ -516,8 +517,9 @@ class ErrorClusterer:
         detailed = len(insts) < MAX_CLUSTER_INSTANCES_DETAILED
         inst = ClusterInstance(
             timestamp=entry.timestamp,
-            line_no=entry.line_no,
-            last_line_no=entry.last_line_no or entry.line_no,
+            line_no=entry.file_line_no or entry.line_no,
+            last_line_no=(entry.file_last_line_no or entry.file_line_no
+                          or entry.line_no),
             summary=self._summarize(entry),
             entry=entry if detailed else None,
             before=list(before_lines or []) if detailed else [],

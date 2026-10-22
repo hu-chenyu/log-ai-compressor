@@ -1,0 +1,24 @@
+2024-03-15 08:00:00 INFO  [main] app v1.0 starting
+2024-03-15 08:00:01 INFO  [db] pool initialized
+2024-03-15 08:00:02 INFO  [auth] session established
+2024-03-15 08:00:03 ERROR [auth] authorization failed: connection refused to db-primary:5432
+2024-03-15 08:00:04 ERROR [auth] authorization failed: connection refused to db-primary:5432
+2024-03-15 08:00:05 ERROR [net] request 8812 failed: upstream unavailable
+2024-03-15 08:00:06 ERROR [net] request 8812 failed: upstream unavailable
+2024-03-15 08:00:07 INFO  [net] retrying in 200ms
+2024-03-15 08:00:08 INFO  [net] retrying in 400ms
+2024-03-15 08:00:09 INFO  [net] retrying in 800ms
+2024-03-15 08:00:10 ERROR [api] request 8812 failed: upstream unavailable
+2024-03-15 08:00:11 INFO  [api] request 8812 retried
+2024-03-15 08:00:12 ERROR [auth] authorization failed: connection refused to db-primary:5432
+2024-03-15 08:00:13 INFO  [pool] connection pool drained
+2024-03-15 08:00:14 INFO  [pool] connection pool refilled
+2024-03-15 08:00:15 INFO  [cache] warmup done
+2024-03-15 08:00:16 INFO  [cache] keys loaded: 1024
+2024-03-15 08:00:17 ERROR [net] java.net.ConnectException: Connection refused
+	at com.example.db.Dialer.connect(Dialer.java:88)
+	at com.example.api.Upstream.call(Upstream.java:42)
+Caused by: java.net.ConnectException: Connection refused
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+2024-03-15 08:00:21 ERROR [stock] stock check timeout after 3000ms item=SKU-7781
+2024-03-15 08:00:25 INFO  [main] app v1.0 running

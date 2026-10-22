@@ -803,13 +803,21 @@ class TestTail:
         return p
 
     def test_tail_reports_the_real_line_numbers(self, tmp_path):
-        """`--tail` 的行号必须指向**原文件**。
+        """`--tail` 的行号必须指向**原文件**，且**逐条都对**。
 
         否则报告里的「行 1」在原文件里是第 96 行 —— 证据引用指向了
         无关的内容，「可复核」当场失效。
 
-        **改坏会红吗**：把 `_process_lines` 的 `line_offset` 忽略掉
-        （`line_no = 0`），本断言立刻红。
+        2026-10-22 外部复核抓到的更细一层的毛病：**整体 +1**。
+        簇区间与实例行号都偏了 1（窗口首行 91 报成 92，尾行 100 报成 101
+        —— 而 100 行的文件**没有第 101 行**）。原先这条断言只查
+        `first >= 90`，**恰好放过了 +1** —— 判据太松，门禁就形同虚设。
+
+        现在逐条核对：簇区间、每个实例的行号、证据样例的行号，
+        三者必须**完全一致**，且**都落在窗口内**。
+
+        **改坏会红吗**：把 `parser.feed(line, line_no)` 换回不传
+        `file_line_no`，本断言立刻红。
         """
         p = self._log(tmp_path)
         out = tmp_path / "t.json"
@@ -817,8 +825,139 @@ class TestTail:
         assert proc.returncode == 0, proc.stderr
         data = json.loads(out.read_text(encoding="utf-8"))
         assert data["clusters"], "尾部窗口一个错误都没识别出来"
-        first = data["clusters"][0]["first_line"]
-        assert first >= 90, "行号没有指向原文件（first_line=%s）" % first
+
+        # 窗口 = 第 96~100 行（文件共 100 行，取最后 5 行）
+        window = set(range(96, 101))
+        for c in data["clusters"]:
+            first = c["first_line"]
+            last = c["last_line"]
+            assert 96 <= first <= last <= 100, (
+                "簇区间 %s~%s 超出尾部窗口 96~100" % (first, last))
+            for inst in c.get("instances") or []:
+                ln = inst.get("line_no")
+                assert ln in window, (
+                    "实例行号 %s 不在尾部窗口 %s 里" % (ln, sorted(window)))
+            for e in c.get("evidence") or []:
+                assert e["line_start"] in window, (
+                    "证据行号 %s 不在尾部窗口里" % e["line_start"])
+
+    def test_tail_line_numbers_agree_with_the_evidence(self, tmp_path):
+        """簇的区间、实例行号、证据行号 —— **三者必须是同一套口径**。
+
+        2026-10-22 外部复核实测：修之前证据行号是 91（对），
+        而簇区间与实例行号是 92~101（错）—— 同一份报告里两套行号并存，
+        读者照着簇区间去翻会翻错行，而 `verify` 只查证据那套，
+        于是照样报 VERIFIED。
+
+        **改坏会红吗**：让簇区间用全局号、证据用文件内号（改回去），
+        本断言立刻红。
+        """
+        p = self._log(tmp_path)
+        out = tmp_path / "t.json"
+        proc = _cli("run", str(p), "--tail", "5", "-f", "json", "-o", str(out))
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads(out.read_text(encoding="utf-8"))
+        for c in data["clusters"]:
+            ev_starts = [e["line_start"] for e in (c.get("evidence") or [])]
+            if not ev_starts:
+                continue
+            assert c["first_line"] in ev_starts, (
+                "簇的首行 %s 与证据行号 %s 不是同一套口径"
+                % (c["first_line"], ev_starts))
+
+    def test_tail_on_utf16_does_not_lose_the_errors(self, tmp_path):
+        """**宽编码 + `--tail` 不能把错误丢掉**（2026-10-22 外部复核实测）。
+
+        宽编码的换行符是**多字节**的（`0A 00`），按字节切行会把字符劈成
+        两半 —— 实测 5 行的 UTF-16 文件被报成「6 行」，而切碎的半行
+        **解析不出级别** ⇒ 报告说「0 个错误」、根因「未发现明确根因」，
+        **而退出码仍是 0**。一份全是 ERROR 的日志被报成没有错误。
+
+        这正好违反 AGENTS.md §4c 写下的规矩（「宽编码必须整块解码后再
+        切行」）—— `--tail` 那条路绕过了统一的解码器。
+
+        **改坏会红吗**：把 `read_last_lines` 改回按字节切行（宽编码分支
+        去掉），本断言立刻红。
+        """
+        p = tmp_path / "u16.log"
+        p.write_bytes(("".join(
+            "2024-01-01 10:00:%02d ERROR 连接失败 %d\n" % (i, i)
+            for i in range(5))).encode("utf-16"))
+
+        full = tmp_path / "full.json"
+        proc = _cli("run", str(p), "-f", "json", "-o", str(full))
+        assert proc.returncode == 0, proc.stderr
+        full_data = json.loads(full.read_text(encoding="utf-8"))
+        assert full_data["meta"]["error_lines"] == 5, full_data["meta"]
+
+        tail = tmp_path / "tail.json"
+        proc = _cli("run", str(p), "--tail", "2", "-f", "json", "-o", str(tail))
+        assert proc.returncode == 0, proc.stderr
+        tail_data = json.loads(tail.read_text(encoding="utf-8"))
+        assert tail_data["meta"]["error_lines"] == 2, (
+            "UTF-16 的尾部窗口把错误丢了：%r" % tail_data["meta"])
+        # 文件总行数在 notice 里（meta.total_lines 是**本次处理**的行数）
+        notice = tail_data.get("notice") or ""
+        assert "文件共 5 行" in notice, (
+            "UTF-16 的总行数算错了（按字节切行会多切出一行）：%r" % notice)
+
+    def test_tail_rejects_stdin_instead_of_ignoring_it(self, tmp_path):
+        """`run - --tail N` 必须**报错**，不能静默忽略。
+
+        2026-10-22 外部复核实测：静默忽略时 `--tail 5` 照分析了全部 20 行，
+        报告里**没有任何提示** —— 用户以为在看最后 5 行、其实在看全部。
+        值班场景下会误判「最近 5 行里没有新错误」。
+
+        而且它**本来就不能支持**：tail 的意义是「行号指回原文件」，
+        管道没有原文件。
+
+        **改坏会红吗**：把 `cmd_run` 里那个 `--tail` 检查去掉，本断言立刻红。
+        """
+        payload = "".join(
+            "2024-01-01 10:00:%02d ERROR line %d\n" % (i % 60, i)
+            for i in range(20))
+        proc = _cli("run", "-", "--tail", "5", "-f", "json", stdin=payload)
+        assert proc.returncode != 0, (
+            "`--tail` 与标准输入一起用必须报错，却悄悄成功了：\n%s"
+            % proc.stdout)
+        assert "tail" in (proc.stderr or "").lower(), (
+            "报错要说清是 --tail 的问题：%r" % proc.stderr)
+
+    def test_verify_reports_a_display_range_that_exceeds_the_file(self, tmp_path):
+        """`verify --report` 要能抓到「报告标出来的区间越界」。
+
+        2026-10-22 外部复核实测：报告可以写着「行 2~101」而那个文件只有
+        100 行 —— **引用照样 VERIFIED**（引用那处行号是对的），
+        于是「每条结论都能复核」这句话只对一半成立。
+
+        判据是**独立**的一条详情，**不改 verdict、不改退出码** ——
+        「报告的行号越界」与「日志被改过」是两件事，混在一起会指控
+        一个没发生的事。
+
+        **改坏会红吗**：把 `_check_display_ranges` 里的范围判断去掉，
+        本断言立刻红。
+        """
+        src = tmp_path / "src.log"
+        src.write_text("2024-01-01 10:00:00 ERROR boom\n", encoding="utf-8")
+        out = tmp_path / "r.json"
+        proc = _cli("run", str(src), "-f", "json", "-o", str(out))
+        assert proc.returncode == 0, proc.stderr
+        data = json.loads(out.read_text(encoding="utf-8"))
+        for c in data["clusters"]:
+            c["first_line"] = 99
+            c["last_line"] = 101
+        out.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        proc = _cli("verify", "--report", str(out), "--json")
+        assert proc.returncode == 0, proc.stderr
+        v = json.loads(proc.stdout)
+        assert v.get("range_problems"), (
+            "报告标出的区间越界却没被报出来：%r" % v)
+        rp = v["range_problems"][0]
+        assert rp["status"] == "RANGE_OUT_OF_FILE", rp
+        # **不得**混进 verdict：那是「日志被改过」的指控
+        assert v["verdict"] == "VERIFIED", (
+            "区间越界不该改 verdict（那是 TAMPERED 的含义）：%r" % v["verdict"])
 
     def test_tail_says_it_is_a_partial_view(self, tmp_path):
         """用了 `--tail` 就必须说清「这次只看的是尾部」。

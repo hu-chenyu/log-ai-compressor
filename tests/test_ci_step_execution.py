@@ -284,6 +284,50 @@ def test_the_ci_body_never_hardcodes_a_coverage_number():
         "写死会让别的矩阵自称 3.12，于是读到的数无从知道是哪一格测的。" % hard)
 
 
+def test_the_measurement_channel_is_unconditional_and_identifies_its_matrix(
+        tmp_path):
+    """**测量通道**必须：无条件报出 + 带矩阵身份 + pytest 红了也报。
+
+    为什么这是基础设施（2026-10-22 实测踩过）：
+
+    * 「实测覆盖率到底是多少」这个问题，**只能**通过 annotation 问出来
+      —— job 日志端点要 `actions:read` scope，普通 token 读不到。
+    * 若那段只在**对账失败**时才说话，那么「README 那个数现在对不对」
+      就没法在**不失败**的情况下确认 ⇒ 回填时只能靠猜。
+    * 若 pytest 一红就提前退出（原先是 `sys.exit(rc)`），那么覆盖率
+      **根本没被测**，而外面只看到一句「exit code 1」⇒ 那个数**永远问不出来**。
+    * 若消息里写死矩阵名，另一格也会自称 3.12 ⇒ 读到的数无从知道
+      是哪一格测的（**伪造观测**）。
+
+    本条把这三条**一起**钉住：跑一遍真 body，看它有没有报、
+    报的时候带没带自己的名字、pytest 红了报不报。
+
+    **改坏会红吗**：
+    - 把 `::notice title=覆盖率实测::` 那行删掉 ⇒ 本条红；
+    - 把 `matrix_label` 换回写死 ⇒ 上一条红；
+    - 把 `sys.exit(rc)` 挪回 pytest 后面 ⇒ pytest 红的那次就不报了 ⇒ 本条红。
+    """
+    body = _check_body()
+    real = ROOT / "README.md"
+    good = _fixture(tmp_path / "m", readme=real,
+                    cov_line_rate=_line_rate_for(_readme_pct(real)))
+    r = _run(body, "ubuntu-latest", good, python_version="3.12")
+    assert "::notice title=覆盖率实测::" in r.stdout, (
+        "实测值没有被无条件报出来 —— 那「实测覆盖率是多少」就问不出来：\n"
+        + r.stdout)
+    assert "ubuntu-latest 3.12" in r.stdout, (
+        "实测值没有自报家门（矩阵身份）：\n" + r.stdout)
+
+    # pytest 红了 ⇒ 仍然要报出实测值（否则那个数永远问不出来）
+    body_red = _check_body(rc=1)
+    r2 = _run(body_red, "ubuntu-latest", good, python_version="3.12")
+    assert "::notice title=覆盖率实测::" in r2.stdout, (
+        "pytest 红了就不再报实测值 —— 那个数就永远问不出来了：\n" + r2.stdout)
+    # 且这一步**必须仍然红**（pytest 的失败不能被吞掉）
+    assert r2.returncode != 0, (
+        "pytest 全红，这一步却绿了 —— 最严重的信号被吞掉了：\n" + r2.stdout)
+
+
 def _fixture(tmp: pathlib.Path, *, readme: pathlib.Path | None,
              cov_line_rate: str | None,
              detail: tuple[int, int] | None = None) -> pathlib.Path:

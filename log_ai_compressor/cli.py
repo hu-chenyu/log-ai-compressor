@@ -25,7 +25,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from log_ai_compressor import __version__
 from log_ai_compressor.constants import (
@@ -405,6 +405,23 @@ def _run_stdin(args) -> int:
     与文件路径走**同一个**解码器（core.encoding.LogDecoder），
     所以「管道进来的 GBK 日志」和「文件里的 GBK 日志」解得一样。
     """
+    # `--tail` 与 stdin **不能共存** —— 而且**必须报错，不能静默忽略**。
+    #
+    # 为什么不能支持：tail 的整个意义是「只看最后 N 行，而**行号仍指回
+    # 原文件**」—— 没有原文件就没有行号可指。管道进来的内容没有
+    # 「原文件第几行」这回事，报告里的行号只能是管道里的第几行，
+    # 那与 tail 承诺的语义是两回事。
+    #
+    # 2026-10-22 外部复核实测：静默忽略时，`--tail 5` 照分析了全部 20 行，
+    # 报告里**没有任何提示**，用户以为在看最后 5 行、其实在看全部 ——
+    # 值班场景下会误判「最近 5 行里没有新错误」。
+    if getattr(args, "tail", 0):
+        print("错误：--tail 不能与标准输入（`-`）一起用 —— "
+              "tail 的行号要指回原文件，而管道没有原文件。\n"
+              "      要看最后 N 行，请把日志落盘后用："
+              "log-ai-compressor run <文件> --tail N",
+              file=sys.stderr)
+        return EXIT_ERROR
     raw = sys.stdin.buffer.read()
     if not raw:
         print("错误：标准输入是空的（没有读到任何日志）", file=sys.stderr)
@@ -641,6 +658,65 @@ def _verdict_exit(report: dict) -> int:
     return _VERDICT_EXIT.get(report.get("verdict"), ("", EXIT_ERROR))[1]
 
 
+def _check_display_ranges(clusters: List[dict]) -> List[dict]:
+    """查报告里**展示出来的行号区间**是否越界（源文件里没有那一行）。
+
+    为什么要有这一层：证据引用与簇的展示区间是**两处**行号
+    （证据那处由 `verify_refs` 逐条回读核对），而簇区间只是**印在报告里**
+    给读者看的。此前只有前者被校验，于是报告可以写着「第 101 行」而那个文件
+    只有 100 行 —— **引用照样 VERIFIED**，读的人照着去翻却什么也没有。
+    「每条结论都能复核」这句话那时只对一半成立。
+
+    2026-10-22 外部复核实测：`--tail 200` 的报告写着「起始行 1」却把区间
+    标成「行 2~101」，而文件只有 100 行，且 `verify` 报 VERIFIED。
+
+    **它不是「日志被改」** —— 那是 `TAMPERED` 的含义，而这里日志可能好得很。
+    所以这里只**单列**一条详情，不改 verdict、不改退出码：
+    指控一个没发生的事，比漏报更糟。
+
+    判据：区间必须落在**它自己那份证据引用的源文件**的行数内。
+    拿不到源文件行数（粘贴文本 / 源已删）就**不判** —— 验不了不是错。
+    """
+    problems: List[dict] = []
+    # 源文件 → 总行数（同一个文件只数一次）
+    line_counts: Dict[str, int] = {}
+    for c in clusters:
+        evs = c.get("evidence") or []
+        if not evs:
+            continue
+        source = evs[0].get("source") or ""
+        if not source or source.startswith("<"):
+            continue
+        if source not in line_counts:
+            path = Path(source)
+            if not path.is_file():
+                line_counts[source] = -1      # 源不可读 ⇒ 不判
+            else:
+                try:
+                    line_counts[source] = sum(
+                        1 for _ in path.open("rb"))
+                except OSError:
+                    line_counts[source] = -1
+        total = line_counts[source]
+        if total <= 0:
+            continue
+        first = int(c.get("first_line") or 0)
+        last = int(c.get("last_line") or 0)
+        if first <= 0 and last <= 0:
+            continue
+        if first < 1 or last < first or last > total:
+            problems.append({
+                "status": "RANGE_OUT_OF_FILE",
+                "source": source,
+                "first_line": first,
+                "last_line": last,
+                "file_lines": total,
+                "detail": ("报告写这个簇在第 %d~%d 行，而该文件只有 %d 行"
+                           % (first, last, total)),
+            })
+    return problems
+
+
 def cmd_verify(args) -> int:
     """证据自校验：把结论的出处拉回原始日志逐条核对。
 
@@ -661,6 +737,8 @@ def cmd_verify(args) -> int:
     refs: List = []
     fingerprint = ""
     source_label = ""
+    #: 报告里「簇的展示区间」是否越界（见 `_check_display_ranges`）。
+    range_problems: List[dict] = []
 
     if args.report:
         report_path = Path(args.report)
@@ -685,6 +763,7 @@ def cmd_verify(args) -> int:
                     # 字段则回退自动探测）
                     encoding=e.get("encoding", ""),
                     note=e.get("note", "")))
+        range_problems = _check_display_ranges(payload.get("clusters") or [])
         source_label = f"报告 {report_path.name}"
         if not refs:
             print(f"错误：{report_path} 里没有任何证据引用"
@@ -721,6 +800,10 @@ def cmd_verify(args) -> int:
     report["fingerprint"] = fingerprint
     report["source"] = source_label
     report["mode"] = "report" if args.report else "self-check"
+    if range_problems:
+        # **单列，不混进 verdict** —— 「报告写的行号越界」与「日志被改过」
+        # 是两件事（后者才是 TAMPERED）。混在一起会指控一个没发生的事。
+        report["range_problems"] = range_problems
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -740,6 +823,12 @@ def cmd_verify(args) -> int:
             print(f"  ✗ {d['status']} {d.get('evidence_id')} {d.get('source')}"
                   f" 期望 {d.get('expected', '-')} 实际 {d.get('actual', '-')}",
                   file=sys.stderr)
+    for rp in report.get("range_problems") or []:
+        # 措辞与 TAMPERED 刻意分开：这里说的是**报告的行号越界**，
+        # 不是「日志被改过」—— 指控一个没发生的事，比漏报更糟。
+        print(f"  ⚠ {rp['status']} {rp['source']} —— {rp['detail']}"
+                  f"（引用本身仍可复核；这是报告**标出来的区间**有问题）",
+              file=sys.stderr)
     print()
     print(f"自校验结论：{report['verdict']}")
     text, code = _VERDICT_EXIT.get(report["verdict"], ("", EXIT_ERROR))

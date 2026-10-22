@@ -278,14 +278,22 @@ class LogParser:
     # ------------------------------------------------------------------
     # 主入口
     # ------------------------------------------------------------------
-    def feed(self, line: str, line_no: int) -> Optional[LogEntry]:
+    def feed(self, line: str, line_no: int,
+             file_line_no: Optional[int] = None) -> Optional[LogEntry]:
         """喂入一行（不含换行符）。
 
         若该行开启了新条目，则返回上一个完整条目；否则返回 None
         （空行跳过 / 续行并入当前条目）。
+
+        `line_no` = **全局**行号（这批行里的第几行；轮转合并时跨文件连续计数）。
+        `file_line_no` = **文件内**行号（这个来源文件里的第几行）——
+        报告里给人看的行号与证据引用都要用它。不传就当与 `line_no` 相同
+        （单文件、非尾部窗口时两者确实相等）。
         """
         if not line or line.isspace():
             return None  # 空行不产出、不断裂续行
+        if file_line_no is None:
+            file_line_no = line_no
 
         # A0) 结构化日志（JSON Lines / logfmt）——原生字段优先于正则。
         #     2026 年主流框架默认输出 JSON，级别/服务/trace_id 都是**字段**
@@ -295,46 +303,48 @@ class LogParser:
         if structured is not None:
             prev = self._current
             self._current = self._build_structured_entry(structured, line,
-                                                         line_no)
+                                                         line_no, file_line_no)
             self._in_stack = False
             return prev
 
         # A/B) 缩进行：堆栈优先（Python 回溯的源码行等），否则消息折行
         if line[0] in " \t":
             if self._in_stack or self._rules.match_stack_indicator(line.strip()):
-                self._append_stack_line(line, line_no)
+                self._append_stack_line(line, line_no, file_line_no)
             elif self._current is not None:
                 self._current.message_extra.append(line.strip())
                 self._current.last_line_no = line_no
+                self._current.file_last_line_no = file_line_no
             else:
                 # 无当前条目的缩进行：按堆栈帧独立处理
-                self._append_stack_line(line, line_no)
+                self._append_stack_line(line, line_no, file_line_no)
             return None
 
         # C) 已知堆栈前缀 / 异常摘要行：先于规则匹配判定
         if (line.startswith(_FLUSH_STACK_PREFIXES)
                 or _EXCEPTION_LINE_RE.match(line)):
             if self._rules.match_stack_indicator(line.strip()):
-                self._append_stack_line(line, line_no)
+                self._append_stack_line(line, line_no, file_line_no)
                 return None
 
         # D) 规则匹配 -> 产出上一个条目，开启新条目
         match = self._rules.match_line(line)
         if match is not None:
             prev = self._current
-            self._current = self._build_entry(match, line, line_no)
+            self._current = self._build_entry(match, line, line_no, file_line_no)
             self._in_stack = False
             return prev
 
         # E) 完整堆栈特征扫描（兜底：未命中任何规则的堆栈形态）
         if self._rules.match_stack_indicator(line.strip()):
-            self._append_stack_line(line, line_no)
+            self._append_stack_line(line, line_no, file_line_no)
             return None
 
         # F) 无结构行：关键词推级别，独立成条目
         prev = self._current
         self._current = LogEntry(
             line_no=line_no, raw=line, last_line_no=line_no,
+            file_line_no=file_line_no, file_last_line_no=file_line_no,
             level=self._rules.infer_level_by_keyword(line) or "INFO",
             message=line.strip(),
         )
@@ -351,23 +361,27 @@ class LogParser:
     # ------------------------------------------------------------------
     # 内部实现
     # ------------------------------------------------------------------
-    def _append_stack_line(self, line: str, line_no: int) -> None:
+    def _append_stack_line(self, line: str, line_no: int,
+                           file_line_no: int) -> None:
         """将堆栈行并入当前条目（保留缩进便于阅读）。"""
         text = line.rstrip()
         if self._current is None:
             # 堆栈出现在条目之外：独立成条目（常见于截断日志）
             self._current = LogEntry(
                 line_no=line_no, raw=line, last_line_no=line_no,
+                file_line_no=file_line_no, file_last_line_no=file_line_no,
                 level=self._rules.infer_level_by_keyword(line) or "ERROR",
                 message="", stack=[text],
             )
         else:
             self._current.stack.append(text)
             self._current.last_line_no = line_no
+            self._current.file_last_line_no = file_line_no
         self._in_stack = True
 
     def _build_structured_entry(self, parsed, line: str,
-                                line_no: int) -> LogEntry:
+                                line_no: int,
+                                file_line_no: int) -> LogEntry:
         """从结构化字段构建 LogEntry。
 
         级别仍走 normalize_level（把 severity=FATAL 之类的写法归一），
@@ -396,6 +410,7 @@ class LogParser:
             stack.append(parsed.error)
         return LogEntry(
             line_no=line_no, raw=line, last_line_no=line_no,
+            file_line_no=file_line_no, file_last_line_no=file_line_no,
             timestamp=self._ts.parse(parsed.timestamp),
             level=level, module=module, message=message,
             stack=stack,
@@ -404,7 +419,8 @@ class LogParser:
             fields=dict(parsed.fields),
         )
 
-    def _build_entry(self, match: re.Match, line: str, line_no: int) -> LogEntry:
+    def _build_entry(self, match: re.Match, line: str, line_no: int,
+                     file_line_no: int) -> LogEntry:
         """从规则匹配结果构建 LogEntry（含级别/模块/时间戳后处理）。"""
         groups = match.groupdict()
         ts_raw = groups.get("timestamp")
@@ -434,6 +450,7 @@ class LogParser:
 
         return LogEntry(
             line_no=line_no, raw=line, last_line_no=line_no,
+            file_line_no=file_line_no, file_last_line_no=file_line_no,
             timestamp=self._ts.parse(ts_raw),
             level=level, module=module, message=message,
         )

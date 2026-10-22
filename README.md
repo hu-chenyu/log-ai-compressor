@@ -15,26 +15,27 @@
 
 ## 你会拿到什么
 
-24 行日志（8 条错误、4 种错误类型），**0.24 秒**：
+`examples/app.log`（24 行、8 条错误、4 种类型）跑出来是这样 —— **下面这段就是它的真实输出**，
+你可以自己跑一遍对上：
 
 ```console
-$ log-ai-compressor run app.log
-【日志分析摘要】app.log
-原始日志 ≈410 tokens → 压缩后 ≈184 tokens（压缩 55%）
-确定性指纹 `da56f7e12089d2…`（同一份日志跑两遍必须完全一致）
-总行数 24，错误 8 行，去重后 4 种，时间范围 2026-10-22 10:14:03 ~ 10:14:18。
+$ log-ai-compressor run examples/app.log
+【日志分析摘要】examples/app.log
+原始日志 ≈379 tokens → 压缩后 ≈186 tokens（压缩 51%）
+确定性指纹 `32f71d7a3c0acf3f4c7522b0942d6a11e67c50fdd9085b99bb2dbc828e759a3f`（同一份日志跑两遍必须完全一致）
+总行数 24，错误 8 行，去重后 4 种，时间范围 2024-03-15 08:00:00 ~ 08:00:25。
 已定位根因：java.net.ConnectException: Connection refused（另有 1 个根因候选）
 
-1. [P0 | ERROR | ×3 | 行 11~23] request 8812 failed: upstream unavailable
-2. [P0 | ERROR | ×2 | 根因 | 行 4~13] authorization failed: connection refused to db-primary:5432
+1. [P0 | ERROR | ×3 | 根因 | 行 4~13] authorization failed: connection refused to db-primary:5432
    -> 因果链源头（1 个错误由其衍生）
-3. [P0 | ERROR | ×2 | 根因 | 行 5~19] java.net.ConnectException: Connection refused
+2. [P0 | ERROR | ×3 | 行 6~11] request 8812 failed: upstream unavailable
+3. [P0 | ERROR | ×1 | 根因 | 行 18~22] java.net.ConnectException: Connection refused
    -> Caused-by 因果链直连，根因：java.net.ConnectException: Connection refused
-4. [P0 | ERROR | ×1 | 行 22~22] stock check timeout after 3000ms item=SKU-7781
+4. [P0 | ERROR | ×1 | 行 23~23] stock check timeout after 3000ms item=SKU-7781
 ```
 
 注意第 3 行：标题点名的**不是**「外层症状」而是**链尾真因**。
-这条结论指向日志的**第 5~19 行**，那段原文的 sha256 一并写进报告 ——
+这条结论指向日志的**第 18~22 行**，那段原文的 sha256 一并写进报告 ——
 
 ```console
 $ log-ai-compressor verify --report report.json
@@ -46,12 +47,14 @@ $ log-ai-compressor verify --report report.json
 每条结论都能在原始日志里逐行复核。
 ```
 
-**有人事后改了日志主机名？** 立刻报出来，退出码 1：
+**有人事后改了日志主机名？** 立刻报出来，退出码 1
+（下面这段是**真的跑出来的**：把 `examples/app.log` 里的 `db-primary` 改成
+`db-primarY` 之后重跑 `verify`）：
 
 ```console
 $ log-ai-compressor verify --report report.json
 证据：共 5 条引用，匹配 4 条，失配 1 条
-  ✗ MISMATCH ca0e981df461 app.log 期望 c33aeb824ce67aaf 实际 4a1689f3780880ae
+  ✗ MISMATCH 899a06e12b52 app.log 期望 bc5b93cec7cde01c 实际 1b8242c1671f1e29
 自校验结论：TAMPERED        # 退出码 1
 ```
 
@@ -159,8 +162,9 @@ log-ai-compressor compare examples/app_v1.log examples/app_v2.log -f json
 | **混合编码的日志** | 同一文件里 UTF-8 行与 GBK 行混着 | 修复前 GBK 行静默变成一串替换符（实测 8 个 U+FFFD，数据被改了而报告里看不出异常）；现在逐行兜底解码，并在报告里写明「有 N 行不是主编码」 |
 | **超长单行** | 一行日志 5 MB（实测） | 报告里的样例会截断到 2000 字符；**证据的行号与 sha256 仍按原文算**，可核对性不受影响 |
 | **UTF-16 无 BOM** | 编码探测走 NUL 密度启发式 | 已支持；但 utf-16 与 utf-8 混排的**那一行解不出来**（实测：标为「按任何候选编码都解不出来」，并按替换符保留、不丢行）。原因：宽编码的换行符是多字节的，必须整块解码，没有「逐行换编码」的余地 |
-| **跨文件的同一个 trace** | 两个文件各有同一次请求 | `compare` 现在按 `trace_id` 兜底对齐，不再算成「新增 + 消失」两份 |
+| **跨文件的同一个 trace** | 两个文件各有同一次请求 | `compare` 现在按 `trace_id` 兜底对齐，不再算成「新增 + 消失」两份 —— **但只对结构化日志（JSON Lines / logfmt）成立**：`trace_id` 是从结构化字段里认领的，纯文本里写着的 `trace_id=t1` **认不出来**（不猜），那种情况仍会算成「新增 + 消失」 |
 | **没有 trace_id 的多服务日志** | 日志不带关联键 | 跨服务链路重建不出来 —— 工具会**明说**「缺调用链关联」，不假装能重建 |
+| **`--tail` 配管道** | `log-ai-compressor run - --tail 500` | 管道没有「原文件」，行号无处可指 ⇒ **直接报错**。此前它**静默忽略** `--tail`（以为在看最后 500 行、其实看了全部），值班时会误判「最近没有新错误」 |
 | **打乱行序的日志** | 行序被打乱过 | 折行/堆栈的邻接聚合会被破坏，结论与原文件不同。**这是设计如此**，不是缺陷 |
 
 > 顺带一句**已经修好**的：脚本只读 JSON 时（`-f json` 接进 CI），
@@ -327,8 +331,8 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 
 | 指标 | 实测值 |
 | --- | --- |
-| 生产代码 | 8,611 行（32 个模块），硬依赖只有 PyYAML |
-| 测试 | **1744 用例**，覆盖率 **95%**（漏行 202 / 4,261 语句），`ruff` 全绿 |
+| 生产代码 | 8,708 行（32 个模块），硬依赖只有 PyYAML |
+| 测试 | **1754 用例**，覆盖率 **95%**（漏行 202 / 4,261 语句），`ruff` 全绿 |
 | CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**十一道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **变异存活率记分卡**（只跑参考矩阵一条）/ **SAST** / **依赖漏洞扫描** / **性能回归** / **产物审计**（产物本身，不是源码树） |
 | 自证脚本 | 现已断言 **11 条**主张，含「README 工程指标与架构树必须与仓库一致」「README 写的条数不许漂」「**每一处基准表逐格对账实测基线（含胜负场次与合计行）**」 |
 | 构建 | 可复现 —— 同源码两次构建字节相同，本地/PyPI/GitHub 三方 sha256 对账 |
@@ -346,21 +350,29 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 
 > **覆盖率的分母比上面那行代码量小**：`pyproject.toml` 的
 > `[tool.coverage.run] omit` 排除了 `cli.py`（薄适配层，637 行，
-> 只做参数解析与格式分发）。所以 95% 是在 7,810 行上算的，
-> 而「8,611 行生产代码」**含**它 —— 两个数字口径不同，别拿它们互推。
+> 只做参数解析与格式分发）。所以 95% 是在 7,840 行上算的，
+> 而「8,708 行生产代码」**含**它 —— 两个数字口径不同，别拿它们互推。
 > 这个排除列表由 `tests/test_coverage_omit_watchdog.py` 钉住：
 > 增删任何一项都会红；分母这个数本身由 `prove.py` 重算。
 >
 > **百分比与那句明细的口径都是 ubuntu-3.12 的实测值**，CI 只在参考矩阵上
 > 对账。其余矩阵照打不误地报出自己那份数字，不参与判定。
 > 其中「4,261 语句」跨平台**必然相同**（它由源码静态解析决定），
-> 而「漏行」**会差几行** —— 语句数相同而覆盖数不同，只可能是平台条件分支
+> 而「漏行」**会差几行** —— 语句数相同而覆盖数不同，只可能是条件分支
 > 在另一套上没被执行到。
 >
-> 实测（同一 commit、同一次 CI run 43，三条矩阵的 pytest 全绿）：
-> ubuntu-3.12 **202** / windows-3.12 **198**，差 4 行；
-> 本机 Windows + Python 3.11 是 **168** —— 差的不只是平台，
-> **Python 版本也参与**（条件分支按版本走；同为 Windows，3.12 与 3.11 差 30 行）。
+> 实测（**同一 commit**、同一个分母 4,261、四次测量各自 pytest 全绿）：
+>
+> | 在哪测的 | 漏行 |
+> | --- | --- |
+> | **ubuntu-3.12**（CI 参考矩阵，README 采信这个） | **202** |
+> | ubuntu-3.11（CI） | 202 |
+> | windows-3.12（CI） | 198 |
+> | windows-3.11（本机） | 168 |
+>
+> ⇒ **平台参与**（202 vs 198，差 4 行）；
+> ⇒ **Python 版本也参与**，但**只在 Windows 上**（同为 Windows，3.12 与 3.11
+> 差 30 行；而 ubuntu 的 3.11 与 3.12 **完全相同**，都是 202）。
 > ⇒ 所以本地跑出来的漏行数**不能**拿来填这个位置，**只有参考矩阵的实测值算数**。
 > 两个数都被 CI 逐个比对，与参考矩阵对不上就红。
 
