@@ -33,6 +33,18 @@ allowed-tools: Read, Bash, Grep
 `can_conclude=false` 时，结论**不可**作为根因输出。
 一个自信的错误根因比没有答案更糟——用户会照着它去排查。
 
+## 读 compare 的结果时看 `matched_by`
+
+`compare_log_files` 的每一项都带 `matched_by`：
+
+| 值 | 含义 | 你该怎么读 |
+| --- | --- | --- |
+| `template` | 两边消息模板相同 | 确实是同一类错误 |
+| `trace` | **同一个 trace_id**，但措辞不同 | **同一次事故**在两个服务里的不同说法 —— 上游报「连接拒绝」、下游报「上游不可用」就是这种 |
+
+`trace` 对上的项**不是**「新增 + 消失」两份，而是一件事。
+把它当成两件事转述给用户，等于告诉用户「既出了新问题、同时修好了老问题」。
+
 ## 引用结论时必须带行号
 
 每条结论都有 `evidence`：`{evidence_id, source, line_start, line_end, digest}`。
