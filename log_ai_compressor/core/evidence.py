@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from log_ai_compressor.core.encoding import detect_encoding, open_text_stream
+from log_ai_compressor.core.encoding import LogDecoder, detect_encoding
 
 # 证据类型（决定报告与 UI 怎么呈现）
 # 说明：此前这里还有一条 KIND_INSTANCE = "instance"，定义后全项目零使用
@@ -248,17 +248,22 @@ def _read_range(path: Path, line_start: int, line_end: int,
     encoding（用户强制编码时自动探测会猜错），未记录（旧版报告）则
     自动探测；open_text_stream 同时覆盖 .gz/.zip 透明解压。此前硬编码
     utf-8，GBK/UTF-16/压缩日志一复核就全军覆没式误报 TAMPERED。
+
+    修复缺陷#2（2026-10-22）：回读必须与摄入走**同一个解码器**
+    （core.encoding.LogDecoder），不只是「同一个编码」。
+
+    为什么要升级到这个要求：混合编码文件（同一文件里 UTF-8 行与 GBK
+    行混着）在摄入时被**逐行兜底**解码 —— GBK 行按 gb18030 解出来，
+    文字是对的；而旧的回读用「整文件单编码」重解一遍，那一行会变成
+    40 个 U+FFFD ⇒ 摘要对不上 ⇒ **误报 TAMPERED**。
+
+    误报 TAMPERED 是本工具最不该出的错：它指控了一个没有发生的事，
+    而照着这个退出码写 CI 的人会把排查结果判成失败。实测（修复前）：
+    2 条引用里 1 条失配，verdict=TAMPERED，退出码 1。
     """
     try:
         enc = encoding or detect_encoding(path)
-        with open_text_stream(path, enc) as fh:
-            out: List[str] = []
-            for i, line in enumerate(fh, 1):
-                if i < line_start:
-                    continue
-                if i > line_end:
-                    break
-                out.append(line)
+        out = LogDecoder(enc).read_range(path, line_start, line_end)
     except OSError:
         # 独占锁 / 权限 / 临时 IO 错误。这说明**验不了**，不是「对不上」。
         return _READ_UNREADABLE, None

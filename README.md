@@ -1,9 +1,8 @@
 # log-ai-compressor · 本机日志取证层
 
-> **我们不把日志交给大模型。我们用确定性算法把日志变成可复核的证据，大模型只读证据。**
-> 拿不出因果链就说证据不足，并精确列出还缺什么才能定论 —— 而且会对这些缺口负责：补上了就把缺口划掉。
-> **全部计算在本机完成，日志不出网。**
-> （谁能让这个工具说错话、我们明确**不防**什么，见 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)。）
+> **把一份日志变成「别人能自己核对」的结论包。**
+> 每条结论带原文的**行号区间**和那段原文的 **sha256**；拿不出因果链就说
+> **证据不足**，并精确列出还缺什么才能定论。**全部计算在本机完成，日志不出网。**
 
 [![CI](https://github.com/hu-chenyu/log-ai-compressor/actions/workflows/ci.yml/badge.svg)](https://github.com/hu-chenyu/log-ai-compressor/actions)
 [![PyPI](https://img.shields.io/pypi/v/log-ai-compressor.svg)](https://pypi.org/project/log-ai-compressor/)
@@ -14,27 +13,119 @@
 
 ---
 
-## 🧾 立场：你不必相信这个工具
+## 你会拿到什么
 
-大多数日志工具要你**相信**它的结论。这个工具给的是你可以**自己复核**的东西 ——
-每条结论都带原文的**行号区间**和那段原文的 **sha256**。
+24 行日志（8 条错误、4 种错误类型），**0.24 秒**：
 
 ```console
-$ log-ai-compressor run app.log -f json -o report.json
-$ log-ai-compressor verify --report report.json
-证据：共 8 条引用，匹配 8 条，失配 0 条，源不可读 0 条
+$ log-ai-compressor run app.log
+【日志分析摘要】app.log
+原始日志 ≈410 tokens → 压缩后 ≈184 tokens（压缩 55%）
+确定性指纹 `da56f7e12089d2…`（同一份日志跑两遍必须完全一致）
+总行数 24，错误 8 行，去重后 4 种，时间范围 2026-10-22 10:14:03 ~ 10:14:18。
+已定位根因：java.net.ConnectException: Connection refused（另有 1 个根因候选）
+
+1. [P0 | ERROR | ×3 | 行 11~23] request 8812 failed: upstream unavailable
+2. [P0 | ERROR | ×2 | 根因 | 行 4~13] authorization failed: connection refused to db-primary:5432
+   -> 因果链源头（1 个错误由其衍生）
+3. [P0 | ERROR | ×2 | 根因 | 行 5~19] java.net.ConnectException: Connection refused
+   -> Caused-by 因果链直连，根因：java.net.ConnectException: Connection refused
+4. [P0 | ERROR | ×1 | 行 22~22] stock check timeout after 3000ms item=SKU-7781
 ```
 
-事故复盘时，有人把日志里的主机名改了：
+注意第 3 行：标题点名的**不是**「外层症状」而是**链尾真因**。
+这条结论指向日志的**第 5~19 行**，那段原文的 sha256 一并写进报告 ——
 
 ```console
 $ log-ai-compressor verify --report report.json
-证据：共 8 条引用，匹配 7 条，失配 1 条
+模式：复核已导出报告
+对象：报告 report.json
+证据：共 5 条引用，匹配 5 条，失配 0 条，源不可读 0 条
+
+自校验结论：VERIFIED
+每条结论都能在原始日志里逐行复核。
+```
+
+**有人事后改了日志主机名？** 立刻报出来，退出码 1：
+
+```console
+$ log-ai-compressor verify --report report.json
+证据：共 5 条引用，匹配 4 条，失配 1 条
   ✗ MISMATCH ca0e981df461 app.log 期望 c33aeb824ce67aaf 实际 4a1689f3780880ae
 自校验结论：TAMPERED        # 退出码 1
 ```
 
-判定只有三档，**没有「大部分通过」** —— 一份掺了假证据的报告，不该因为大部分为真就放行。
+判定只有三档，**没有「大部分通过」** —— 一份掺了假证据的报告，
+不该因为大部分为真就放行。
+
+---
+
+## 装上就用
+
+```bash
+pip install log-ai-compressor          # 硬依赖只有 PyYAML 一个
+```
+
+| 你要做的事 | 命令 |
+| --- | --- |
+| 分析一份日志 | `log-ai-compressor run app.log -o report.md` |
+| **接管道**（不用先落盘） | `kubectl logs -f deploy/api \| log-ai-compressor run - -f json` |
+| **只看最近几千行**（行号仍指回原文件） | `log-ai-compressor run app.log --tail 5000` |
+| **拿机器可读的 JSON**（stdout 就是 JSON） | `log-ai-compressor run app.log -f json` |
+| 比对发版前后 | `log-ai-compressor compare v1.log v2.log -f json` |
+| 复核一份报告的出处 | `log-ai-compressor verify --report report.json` |
+| 要图形界面 | `pip install "log-ai-compressor[web]" && log-ai-compressor web` |
+| 让 AI Agent 调本机日志 | `pip install "log-ai-compressor[mcp]" && log-ai-compressor mcp --install claude-code` |
+
+**首次运行要多久**：装依赖约 20~40 秒（取决于网络），之后每份日志
+**0.15~0.3 秒**。149 MB / 210 万行的日志实测 45 秒，峰值内存 31.6 MB
+（流式处理，与文件大小无关）。
+
+Windows 可双击 `start.bat` 自动定位 Python、装依赖、启动并打开浏览器。
+
+### 常见报错（都是实测出来的真实输出）
+
+| 你会看到 | 什么意思 | 怎么办 |
+| --- | --- | --- |
+| `错误：xxx 不是文本日志（10 行含 NUL 字节…）—— 已中止分析` | 喂进去的不是文本日志 | 检查路径。**退出码 2**（不是 1）—— 「文件选错了」与「分析失败」是两回事 |
+| `错误：报告写不出去 —— 目录不存在（报告路径里的父目录还没建）` | `-o` 的父目录不存在 | 先建目录。工具**故意不替你建** —— 那个目录名多半是你打错的 |
+| `错误：解析规则有问题 —— YAML 解析失败: …` | `--rule` 指向的 YAML 写错了 | 改 YAML |
+| `错误：日志文件不存在 xxx` | 路径错了 | 用绝对路径试试 |
+| `⚠ 有 N 行不是主编码 utf-8，已逐行按实际编码解码` | 这份日志**混着两种编码** | 已自动解好；这条提示只是告诉你「有 N 行不是主编码」 |
+| `⚠ 只看最后 N 行（文件共 M 行，起始行 K）` | 用了 `--tail` | 报告**只覆盖尾部**，不是全量。行号仍指向原文件 |
+| `⚠ 这份文件是空的（0 行）` | 文件是空的 | — |
+
+### 升级 / 卸载
+
+```bash
+pip install -U log-ai-compressor     # 升级
+pip uninstall log-ai-compressor       # 卸载（不删你的日志与报告）
+```
+
+### 拿一份示例日志试试
+
+仓库的 [`examples/`](examples/) 目录里直接可跑：
+
+```bash
+log-ai-compressor run examples/sample_system.log -f json | head -20
+log-ai-compressor compare examples/app_v1.log examples/app_v2.log -f json
+```
+
+`sample_system.log` 是带完整 `Caused by:` 链的服务端日志（能走到
+`CONFIRMED`），`sample_gbk.log` 是 GBK 编码的（用来试编码适配）。
+
+### 谁在用
+
+**目前没有外部用户** —— 仓库 2026-10-19 建，第一个版本 2026-10-20 发布，
+到今天 3 天，1 star / 0 fork / 0 issue，全部数字都是作者自测的。
+这一栏会随实际情况更新；没有就是没有，不拿「有人在用」这种话占位。
+
+---
+
+## 🧾 立场：你不必相信这个工具
+
+大多数日志工具要你**相信**它的结论。这个工具给的是你可以**自己复核**的东西 ——
+每条结论都带原文的**行号区间**和那段原文的 **sha256**。
 
 **同一套立场长成了四件具体的事：**
 
@@ -50,7 +141,27 @@ $ log-ai-compressor verify --report report.json
 
 ---
 
-## 📌 先读这一节：这些数字不能证明什么
+## 🚫 它会漏什么（先看这个，再决定要不要用）
+
+一个只会报好数字的项目不值得信。下面是**实测确认的失效场景** ——
+不是「理论上可能」，是拿它跑一遍就能复现的。
+
+| 它会漏 / 会错 | 什么时候 | 怎么办 |
+| --- | --- | --- |
+| **二进制文件** | 拿 `.bin` / 图片当日志喂进来 | 修复前它会当文本「成功分析」并写下「压缩 95%」；现在直接拒绝并退出码 2 |
+| **混合编码的日志** | 同一文件里 UTF-8 行与 GBK 行混着 | 修复前 GBK 行静默变成 一串替换符（实测 8 个 U+FFFD）；现在逐行兜底解码，并在报告里写明「有 N 行不是主编码」 |
+| **超长单行** | 一行日志 5 MB（实测） | 报告里的样例会截断到 2000 字符；**证据的行号与 sha256 仍按原文算**，可核对性不受影响 |
+| **UTF-16 无 BOM** | 编码探测走 NUL 密度启发式 | 已支持；但 utf-16 与 utf-8 混排的文件不支持（那一族必须整块解码） |
+| **跨文件的同一个 trace** | 两个文件各有同一次请求 | `compare` 现在按 `trace_id` 兜底对齐，不再算成「新增 + 消失」两份 |
+| **没有 trace_id 的多服务日志** | 日志不带关联键 | 跨服务链路重建不出来 —— 工具会**明说**「缺调用链关联」，不假装能重建 |
+| **打乱行序的日志** | 行序被打乱过 | 折行/堆栈的邻接聚合会被破坏，结论与原文件不同。**这是设计如此**，不是缺陷 |
+
+> 这一节是**输入形态的坑**，与下面那节「不能证明什么」是两回事：
+> 前者告诉你**什么时候会失灵**，后者告诉你**能力边界在哪**。
+
+---
+
+## 📌 这些数字不能证明什么
 
 一个只会报好数字的项目不值得信。下面是**所有实测结论都覆盖不到**的地方。
 
@@ -64,6 +175,9 @@ $ log-ai-compressor verify --report report.json
 
 > 一个云平台说「我不知道」，在产品上读起来像故障。本工具说「我不知道」，
 > 在方法论上读起来像专业。**但如果你要的是全天候告警，本工具给不了，别选它。**
+
+> 想知道「谁能让这个工具说错话、我们明确**不防**什么」，
+> 见 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)。
 
 ---
 
@@ -201,8 +315,8 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 
 | 指标 | 实测值 |
 | --- | --- |
-| 生产代码 | 7,951 行（32 个模块），硬依赖只有 PyYAML |
-| 测试 | **1699 用例**，覆盖率 **96%**（漏行 158 / 3,995 语句），`ruff` 全绿 |
+| 生产代码 | 8,575 行（32 个模块），硬依赖只有 PyYAML |
+| 测试 | **1732 用例**，覆盖率 **96%**（漏行 158 / 4,247 语句），`ruff` 全绿 |
 | CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**十一道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **变异存活率记分卡**（只跑参考矩阵一条）/ **SAST** / **依赖漏洞扫描** / **性能回归** / **产物审计**（产物本身，不是源码树） |
 | 自证脚本 | 现已断言 **11 条**主张，含「README 工程指标与架构树必须与仓库一致」「README 写的条数不许漂」「**每一处基准表逐格对账实测基线（含胜负场次与合计行）**」 |
 | 构建 | 可复现 —— 同源码两次构建字节相同，本地/PyPI/GitHub 三方 sha256 对账 |
@@ -220,38 +334,21 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 
 > **覆盖率的分母比上面那行代码量小**：`pyproject.toml` 的
 > `[tool.coverage.run] omit` 排除了 `cli.py`（薄适配层，637 行，
-> 只做参数解析与格式分发）。所以 96% 是在 7,314 行上算的，
-> 而「7,951 行生产代码」**含**它 —— 两个数字口径不同，别拿它们互推。
+> 只做参数解析与格式分发）。所以 96% 是在 7,774 行上算的，
+> 而「8,575 行生产代码」**含**它 —— 两个数字口径不同，别拿它们互推。
 > 这个排除列表由 `tests/test_coverage_omit_watchdog.py` 钉住：
 > 增删任何一项都会红；分母这个数本身由 `prove.py` 重算。
 >
 > **百分比与那句明细的口径都是 ubuntu-3.12 的实测值**，CI 只在参考矩阵上
 > 对账。其余矩阵照打不误地报出自己那份数字，不参与判定。
-> 其中「3,995 语句」跨平台**必然相同**（它由源码静态解析决定），
+> 其中「4,247 语句」跨平台**必然相同**（它由源码静态解析决定），
 > 而「漏行」**会差几行** —— 语句数相同而覆盖数不同，只可能是平台条件分支
 > 在另一套上没被执行到（实测 Windows 144 / ubuntu-3.12 158，差 14 行）。
 > 两个数都被 CI 逐个比对，与参考矩阵对不上就红。
 
 ---
 
-## 🚀 90 秒上手
-
-```bash
-# 本地 Web 界面（自动开浏览器，端口 8765 起，被占用自动顺延）
-pip install "log-ai-compressor[web]"
-log-ai-compressor web
-
-# 只在命令行里压缩日志：硬依赖只有 PyYAML
-pip install log-ai-compressor
-log-ai-compressor run app.log --top 20 -o report.md
-
-# 复核一份报告的结论出处（报告发出去后日志可能已被改动或轮转清理）
-log-ai-compressor verify --report report.json
-
-# 让 AI Agent 直接调用本机日志（MCP Server）
-pip install "log-ai-compressor[mcp]"
-log-ai-compressor mcp --install claude-code
-```
+## 🤖 MCP Registry（给 AI Agent 用的入口）
 
 仓库根目录的 [`server.json`](server.json) 就是官方 Registry 的清单格式，
 登记名 `io.github.hu-chenyu/log-ai-compressor` **已于 2026-10-18 提交**，
@@ -301,19 +398,19 @@ Windows 可双击 `start.bat` 自动定位 Python、装依赖、启动并打开�
 | 领域 | 能做什么 |
 | --- | --- |
 | **取证** | 每条结论绑定 `evidence_id` + 文件 + 行号区间 + 原文 sha256；`verify` 重读原文逐条核对，被改动报 `TAMPERED` |
-| **确定性** | 报告带「确定性指纹」，同一份日志两次分析结论逐字节相同（耗时与速率已排除） |
+| **确定性** | 报告带「确定性指纹」，同一份日志两次分析的**指纹逐字节相同**（耗时与速率已排除）。**注意口径**：指纹相同 ≠ 报告文件逐字节相同 —— 报告里还有 `generated_at` / 耗时 / 速率这类运行期字段（实测 4 个字段会变），要归档请存指纹 |
 | **置信三档** | `CONFIRMED` / `LIKELY` / `INSUFFICIENT`。只有条目内 `Caused by:` 链才算 `CONFIRMED`；证据不足时**不输出「根因」措辞**，改为列出还缺什么 |
 | **缺口自闭环** | 缺口清单由日志里实际有什么驱动。日志带 `trace_id` → 调用链重建成功 → 「缺少调用链关联」自动关闭；一条都没有就如实申报 |
-| **解析** | ISO / syslog / logcat / logfmt / JSON Lines / 中式堆栈；可插拔 YAML 规则改配置不改代码；编码自动适配 UTF-8/GBK/UTF-16/32 + `.gz`/`.zip` |
+| **解析** | ISO / syslog / logcat / logfmt / JSON Lines / 中式堆栈；可插拔 YAML 规则改配置不改代码；编码自动适配 UTF-8/GBK/UTF-16/32 + `.gz`/`.zip`。**同一文件里混着两种编码也能解**（逐行兜底），并会在报告里写明有几行不是主编码 |
 | **调用链** | 结构化日志里存在 `trace_id` 时重建跨服务链路与首个失败点，不需要装 agent、不需要接拓扑 |
-| **Web 界面** | 零构建零 CDN，离线可用；文件浏览器直选本机文件（不走网络）；SSE 实时进度 + 可取消 |
+| **Web 界面** | 主界面零构建零 CDN、**完全离线可用**（实测：页面只引用一个内联 SVG 图标）；文件浏览器直选本机文件（不走网络）；SSE 实时进度 + 可取消。**唯一例外**：`/api/docs` 是 FastAPI 自带的 Swagger 页，它从 `cdn.jsdelivr.net` 拉样式表 —— 断网时那一个页面是空白（主界面不受影响） |
 | **AI 解读**（可选） | 在压缩结果之上生成人话解读。**不配 API Key 也能完整用**，AI 只是额外一层 |
 
 完整清单与边界见 [`docs/FEATURES.md`](docs/FEATURES.md)。
 
 ---
 
-## 🚫 它做不到什么
+## 🧱 能力边界（做不了的事，与谁行）
 
 | 它做不到 | 为什么 | 谁行 |
 | --- | --- | --- |

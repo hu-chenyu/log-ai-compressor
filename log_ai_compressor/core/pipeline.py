@@ -43,9 +43,11 @@ from log_ai_compressor.core.analysis import (
 from log_ai_compressor.core.causal import deepest_caused_by
 from log_ai_compressor.core.clustering import ErrorClusterer
 from log_ai_compressor.core.encoding import (
+    LogDecoder,
     detect_encoding,
     is_compressed,
     open_text_stream,
+    read_last_lines,
 )
 from log_ai_compressor.core.evidence import (
     KIND_CAUSED_BY,
@@ -329,6 +331,38 @@ def _build_filter_notice(stats, clusters) -> Optional[str]:
     )
 
 
+def _apply_decode_notes(result, stats, decoder) -> None:
+    """把「这份文件解得有多干净」**如实**写进统计与提示。
+
+    三种情况都要显式说出来（2026-10-21 第九轮外部复核抓到）：
+
+    * **混合编码**：有 N 行不是主编码 —— 已逐行兜底**修好**，但要说出来；
+    * **非文本**：有 N 行含 NUL 字节 —— 这多半不是日志文件，却会被当成
+      日志分析一遍并**退出码 0**（实测二进制文件还写了「压缩 95%」）；
+    * **空文件**：0 行 —— 要明说「这份文件是空的」，而不是「未发现明确根因」
+      （空文件与「有日志但没定论」是两回事，混成一句话就是**报数为 0 与
+      报不出数分不开**）。
+    """
+    stats.mixed_encoding_lines = decoder.repaired
+    stats.undecodable_lines = decoder.undecodable
+    stats.nul_lines = decoder.nul_lines
+    notes = []
+    if decoder.repaired:
+        notes.append("有 %d 行不是主编码 %s，已逐行按实际编码解码"
+                     % (decoder.repaired, decoder.encoding))
+    if decoder.nul_lines:
+        notes.append("有 %d 行含 NUL 字节 —— 这份文件可能不是文本日志"
+                     % decoder.nul_lines)
+    if decoder.undecodable:
+        notes.append("有 %d 行按任何候选编码都解不出来"
+                     "（已按替换符保留，没有丢行）" % decoder.undecodable)
+    if not stats.total_lines:
+        notes.append("这份文件是空的（0 行）")
+    if notes:
+        joined = "；".join(notes)
+        result.notice = (result.notice + "；" if result.notice else "") + joined
+
+
 class LogPipeline:
     """单文件 / 单文本的流式分析管线（可复用，线程安全边界由调用方保证）。"""
 
@@ -364,8 +398,10 @@ class LogPipeline:
         auto = self._resolve_ruleset(_sample_log_file(path, encoding))
         stats = RunStats(source=str(path), encoding=encoding,
                          rule_name=self._ruleset.name + ("（自动）" if auto else ""))
-        with open_text_stream(path, encoding) as stream:
-            return self._process_lines(stream, stats)
+        decoder = LogDecoder(encoding)
+        result = self._process_lines(decoder.iter_lines(path), stats)
+        _apply_decode_notes(result, stats, decoder)
+        return result
 
     def run_files(self, paths) -> AnalysisResult:
         """轮转文件合并分析（优化缺陷R89：多文件按序串流，跨轮转
@@ -388,13 +424,19 @@ class LogPipeline:
         # 每行带上来源文件名：轮转合并后「第 42 行」在几个文件里都有，
         # 证据引用必须精确到文件才复核得了（core/evidence.py）
 
-        def chained():
-            for p in paths:
-                with open_text_stream(p, encoding) as stream:
-                    for line in stream:
-                        yield line, str(p)
+        decoder = LogDecoder(encoding)
 
-        return self._process_lines(chained(), stats)
+        def chained():
+            # 共用同一个 decoder 实例 ⇒ 混合编码 / 非文本的计数跨文件累加。
+            # BOM 是**逐行**剥离的（不依赖「这是第几行」），所以轮转文件
+            # 各自的首行都能正确处理。
+            for p in paths:
+                for line in decoder.iter_lines(p):
+                    yield line, str(p)
+
+        result = self._process_lines(chained(), stats)
+        _apply_decode_notes(result, stats, decoder)
+        return result
 
     def run_text(self, text: str, source: str = "<粘贴文本>") -> AnalysisResult:
         """分析粘贴的日志文本。"""
@@ -403,6 +445,44 @@ class LogPipeline:
         stats = RunStats(source=source, encoding="utf-8",
                          rule_name=self._ruleset.name + ("（自动）" if auto else ""))
         return self._process_lines(lines, stats)
+
+    def run_tail(self, path, tail_lines: int) -> AnalysisResult:
+        """只分析文件的**最后 tail_lines 行**（行号仍指向原文件）。
+
+        为什么要它：值班时最常问的是「**刚才**发生了什么」，而日志
+        可能有几十 GB —— 全量分析一遍是几十秒到几分钟，等不起。
+
+        关键约束一：行号必须**指向原文件**。尾部窗口的第一行在原文件里
+        可能是第 999 万行，报告里写「第 1 行」就等于指错了地方 ——
+        证据引用会指向无关的内容，「可复核」当场失效。
+
+        关键约束二：规则识别必须用**整个文件**的采样，不能用尾部窗口。
+        尾部 5 行长一个样，规则识别会选错（日志格式千差万别，5 行根本
+        不足以认出格式）—— 实测：尾部采样选中 embedded 规则，
+        「ERROR line 96」这种通用格式**一条都识别不出来**，
+        报告里显示「错误 0 行」。规则识别用全文件采样（与 run_file 一致），
+        只有**分析范围**是尾部。
+        """
+        path = Path(path)
+        if not path.is_file():
+            raise FileNotFoundError(f"日志文件不存在: {path}")
+        encoding = self._config.encoding or detect_encoding(path)
+        lines, start, total, decoder = read_last_lines(path, tail_lines, encoding)
+        # 规则识别用**全文件**的分层采样（与 run_file 同一条路径）
+        auto = self._resolve_ruleset(_sample_log_file(path, encoding))
+        stats = RunStats(source=str(path), encoding=encoding,
+                         rule_name=self._ruleset.name + ("（自动）" if auto else ""))
+        result = self._process_lines(lines, stats, line_offset=start)
+        # 混合编码 / 非文本的记账也要有（尾部窗口同样可能落在混编文件里）
+        _apply_decode_notes(result, stats, decoder)
+        # 如实说明「这次只看的是尾部」：报告覆盖的不是全量，用户必须知道。
+        note = (f"只看最后 {len(lines)} 行（文件共 {total:,} 行，"
+                f"起始行 {start:,}）")
+        result.notice = (result.notice + "；" if result.notice else "") + note
+        # 注意：**不改** stats.total_lines —— 它的口径是「本次处理了多少行」，
+        # 改了会让按它算的压缩率、速率全部失真（拿窗口行数当文件行数）。
+        # 文件总行数由 notice 说明（并可从 start + 窗口行数算出）。
+        return result
 
     def _resolve_ruleset(self, sample: List[str]) -> bool:
         """auto 模式：按分层采样打分选规则并加载（返回是否自动识别）。
@@ -418,7 +498,15 @@ class LogPipeline:
     # ------------------------------------------------------------------
     # 核心流式处理
     # ------------------------------------------------------------------
-    def _process_lines(self, lines: Iterable[str], stats: RunStats) -> AnalysisResult:
+    def _process_lines(self, lines: Iterable[str], stats: RunStats,
+                       line_offset: int = 0) -> AnalysisResult:
+        """处理日志行。
+
+        `line_offset` = 这批行在**原文件**里的起始行号（1-based）。
+        为什么要它：`--tail N` 只喂最后 N 行进来，但那 N 行在原文件里
+        是第 9,999,991~10,000,000 行 —— 行号不偏移，证据引用就指向
+        错误的行，「可复核」这个核心承诺当场失效。
+        """
         t0 = time.perf_counter()
         parser = LogParser(self._ruleset)
         # 优化缺陷R84：相似度档位映射阈值（未知键回退标准，配置兼容）
@@ -440,7 +528,12 @@ class LogPipeline:
         # 后上下文待补队列：id(样例/实例) -> {"target", "start_line", "lines"}
         pending: Dict[int, dict] = {}
 
-        line_no = 0
+        # line_no = 这批行在**原文件**里的行号（尾部窗口时从 line_offset
+        # 起算）—— 条目与证据的行号都要指向原文件。
+        # processed = 本次处理了多少行（与原文件行号无关，用于进度、
+        # 行数上限、速率统计）。
+        line_no = line_offset
+        processed = 0
         cancelled = False
         limit_hit = False     # 优化缺陷R85：行数上限采样命中标记
         cur_source = str(stats.source)
@@ -450,13 +543,16 @@ class LogPipeline:
         # 全局 line_no 只服务窗口/待补/进度等内部逻辑）。按来源名计数而非
         # 切换即清零，是为了同一文件在合并序列里出现多次/交错时也不串号。
         src_line_no: Dict[str, int] = {}
+        if line_offset > 0:
+            # 尾部窗口：文件内行号从 line_offset 起算（证据要指回原文件）
+            src_line_no[cur_source] = line_offset - 1
 
         def notify(phase: str) -> None:
             if self._progress_cb:
                 elapsed = time.perf_counter() - t0
                 self._progress_cb({
-                    "lines": line_no,
-                    "lps": line_no / elapsed if elapsed > 0 else 0.0,
+                    "lines": processed,
+                    "lps": processed / elapsed if elapsed > 0 else 0.0,
                     "clusters": len(clusterer),
                     "elapsed": elapsed,
                     "phase": phase,
@@ -469,6 +565,7 @@ class LogPipeline:
                 else:
                     raw_line = item
                 line_no += 1
+                processed += 1
                 file_line_no = src_line_no.get(cur_source, 0) + 1
                 src_line_no[cur_source] = file_line_no
                 # 优化缺陷R99：原始字符数逐行累计（Token 压缩率原始侧）
@@ -500,7 +597,7 @@ class LogPipeline:
 
                 # 4) 取消轮询（独立间隔，开销极低）
                 if (self._cancel_event is not None
-                        and line_no % CANCEL_CHECK_EVERY_LINES == 0
+                        and processed % CANCEL_CHECK_EVERY_LINES == 0
                         and self._cancel_event.is_set()):
                     cancelled = True
                     break
@@ -509,14 +606,17 @@ class LogPipeline:
                 # 标记 limit_hit（与取消中断区分，非用户取消）
                 # （max_lines ≤ 0 视为不限，与 service 层「0 = 全部」
                 # 的口径一致；此前 0 会让第一行就命中上限，只读 1 行）
+                # 用 processed 而不是 line_no：后者带尾部窗口的偏移，
+                # 会让「上限 1000 行」在第 1000 行**原文件行号**处命中，
+                # 于是实际只处理了 1000-offset 行。
                 if (self._config.max_lines is not None
                         and self._config.max_lines > 0
-                        and line_no >= self._config.max_lines):
+                        and processed >= self._config.max_lines):
                     limit_hit = True
                     break
 
                 # 5) 进度上报（按行数间隔）
-                if line_no % PROGRESS_EVERY_LINES == 0:
+                if processed % PROGRESS_EVERY_LINES == 0:
                     notify("parsing")
 
             # 流结束：产出最后一个条目
@@ -532,11 +632,15 @@ class LogPipeline:
         for item in list(pending.values()):
             self._close_pending(item, pending)
 
-        stats.total_lines = line_no
+        # total_lines = 本次**处理**了多少行。
+        # 不能直接用 line_no：尾部窗口（--tail）时 line_no 从 line_offset
+        # 起算，直接赋值会得到「偏移 + 窗口行数」这种既不是文件行数
+        # 也不是处理行数的怪数字。
+        stats.total_lines = processed
         stats.truncated = cancelled
         stats.limit_hit = limit_hit       # 优化缺陷R85：上限采样命中
         stats.duration = time.perf_counter() - t0
-        stats.lines_per_second = (line_no / stats.duration
+        stats.lines_per_second = (processed / stats.duration
                                   if stats.duration > 0 else 0.0)
 
         result = AnalysisResult(
@@ -697,6 +801,14 @@ def _build_config(levels, include, exclude, top_n, context_lines, rule,
                   time_start=None, time_end=None, tod_start=None,
                   tod_end=None, max_lines=None,
                   encoding=None, use_regex=False) -> PipelineConfig:
+    """构造管线配置。
+
+    **所有调用方必须用关键字传参**（下面已全部改成名参）。
+    原因：这里有 16 个位置参数，历史上已经因为少传一个 None 而让
+    `use_regex` 落到 `tod_end` 上 —— 关键词被当正则解释，报告里的
+    错误行数悄悄变成 0，而**没有任何报错**。位置参数在这种长度下
+    本身就是缺陷源，靠调用者数参数个数不可能可靠。
+    """
     cfg = FilterConfig(
         levels=list(levels) if levels else list(DEFAULT_SELECTED_LEVELS),
         include=list(include or []),
@@ -727,13 +839,14 @@ def analyze_file(path, *, levels=None, include=None, exclude=None,
                  progress_cb: Optional[ProgressCallback] = None,
                  cancel_event: Optional[Event] = None) -> AnalysisResult:
     """分析单个日志文件（详见 LogPipeline.run_file）。"""
-    pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
-                                         context_lines, rule, analyze,
-                                         analysis_mode, similarity,
-                                         time_start, time_end, tod_start,
-                                         tod_end, max_lines, encoding,
-                                         use_regex),
-                           progress_cb=progress_cb, cancel_event=cancel_event)
+    pipeline = LogPipeline(_build_config(
+        levels=levels, include=include, exclude=exclude, top_n=top_n,
+        context_lines=context_lines, rule=rule, analyze=analyze,
+        analysis_mode=analysis_mode, similarity=similarity,
+        time_start=time_start, time_end=time_end, tod_start=tod_start,
+        tod_end=tod_end, max_lines=max_lines, encoding=encoding,
+        use_regex=use_regex),
+        progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_file(path)
 
 
@@ -750,14 +863,34 @@ def analyze_files(paths, *, levels=None, include=None, exclude=None,
 
     调用方负责 paths 排序（最旧在前）；单文件时等效 analyze_file。
     """
-    pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
-                                         context_lines, rule, analyze,
-                                         analysis_mode, similarity,
-                                         time_start, time_end, tod_start,
-                                         tod_end, max_lines, encoding,
-                                         use_regex),
-                           progress_cb=progress_cb, cancel_event=cancel_event)
+    pipeline = LogPipeline(_build_config(
+        levels=levels, include=include, exclude=exclude, top_n=top_n,
+        context_lines=context_lines, rule=rule, analyze=analyze,
+        analysis_mode=analysis_mode, similarity=similarity,
+        time_start=time_start, time_end=time_end, tod_start=tod_start,
+        tod_end=tod_end, max_lines=max_lines, encoding=encoding,
+        use_regex=use_regex),
+        progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_files(paths)
+
+
+def analyze_tail(path, tail_lines: int, *, levels=None, include=None,
+                 exclude=None, top_n=None, context_lines=None, rule=None,
+                 analyze=True, analysis_mode: str = "full",
+                 similarity: str = "standard", encoding=None,
+                 use_regex: bool = False, progress_cb=None,
+                 cancel_event=None) -> AnalysisResult:
+    """只分析文件最后 tail_lines 行（详见 LogPipeline.run_tail）。"""
+    # 全部用**关键字**传参：_build_config 有 16 个位置参数，历史上
+    # 因为少传一个 None 而让 use_regex 落到 tod_end 上 —— 关键词被当
+    # 正则解释，报告里的错误行数悄悄变成 0，而**没有任何报错**。
+    pipeline = LogPipeline(_build_config(
+        levels=levels, include=include, exclude=exclude, top_n=top_n,
+        context_lines=context_lines, rule=rule, analyze=analyze,
+        analysis_mode=analysis_mode, similarity=similarity,
+        encoding=encoding, use_regex=use_regex),
+        progress_cb=progress_cb, cancel_event=cancel_event)
+    return pipeline.run_tail(path, tail_lines)
 
 
 def analyze_text(text: str, *, source: str = "<粘贴文本>", levels=None,
@@ -769,11 +902,11 @@ def analyze_text(text: str, *, source: str = "<粘贴文本>", levels=None,
                  progress_cb: Optional[ProgressCallback] = None,
                  cancel_event: Optional[Event] = None) -> AnalysisResult:
     """分析粘贴文本（详见 LogPipeline.run_text）。"""
-    pipeline = LogPipeline(_build_config(levels, include, exclude, top_n,
-                                         context_lines, rule, analyze,
-                                         analysis_mode, similarity,
-                                         time_start, time_end, tod_start,
-                                         tod_end, max_lines, None,
-                                         use_regex),
-                           progress_cb=progress_cb, cancel_event=cancel_event)
+    pipeline = LogPipeline(_build_config(
+        levels=levels, include=include, exclude=exclude, top_n=top_n,
+        context_lines=context_lines, rule=rule, analyze=analyze,
+        analysis_mode=analysis_mode, similarity=similarity,
+        time_start=time_start, time_end=time_end, tod_start=tod_start,
+        tod_end=tod_end, max_lines=max_lines, use_regex=use_regex),
+        progress_cb=progress_cb, cancel_event=cancel_event)
     return pipeline.run_text(text, source=source)

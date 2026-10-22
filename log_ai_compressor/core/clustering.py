@@ -33,6 +33,7 @@ from log_ai_compressor.constants import (
     CLUSTER_SIMILARITY_THRESHOLD,
     MAX_CLUSTER_INSTANCES_DETAILED,
     MAX_CLUSTER_INSTANCES_META,
+    MAX_CLUSTER_TRACE_IDS,
     MAX_SIMILARITY_COMPARE,
     MAX_TOTAL_INSTANCES,
 )
@@ -480,6 +481,14 @@ class ErrorClusterer:
             replaced = True
         if not cluster.module and entry.module:
             cluster.module = entry.module
+        # 关联键（request_id / trace_id）流式记进簇：对比分析要靠它
+        # 把「同一次请求」在两个文件里的不同措辞对齐到同一项上
+        # （core/comparator.py）。摄入期就记 ⇒ 不依赖 analysis 层，
+        # 对比模式（analyze=False）也拿得到。
+        cid = entry.correlation_id
+        if cid and cid not in cluster.trace_ids:
+            if len(cluster.trace_ids) < MAX_CLUSTER_TRACE_IDS:
+                cluster.trace_ids.append(cid)
         return replaced, inst
 
     def _record_instance(self, cluster: ErrorCluster, entry: LogEntry,

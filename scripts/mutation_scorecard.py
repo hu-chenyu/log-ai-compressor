@@ -1272,6 +1272,214 @@ MUTATIONS: List[Mutation] = [
              " or \"coverage\" in name.lower():\n                continue\n"),
         tests=["tests/test_local_gate_runner_covers_ci.py"],
     ),
+    # ---- 第九轮外部复核的修复（2026-10-22 批） -------------------------
+    # 这一批的共同点：每一条都对应一个**真实被外部复核抓到的问题**，
+    # 或者一个**我自己引入又自己抓到的回归**。其中三条（回读路径、
+    # UTF-16、BOM）是「修 bug 2 时自己踩的坑」——
+    # 混合编码的逐行兜底让摄入与回读走了两条路，于是同一份没被改过的
+    # 文件被报成 TAMPERED（指控了一个没有发生的事）。
+    Mutation(
+        id="ninth/root-headline-uses-cluster-summary",
+        why="根因标题改回用**簇摘要**（外层症状）而不是链尾真因 —— "
+            "标题与簇的 reason 两处口径分叉，而标题那一处正是读者唯一会记住的",
+        target="log_ai_compressor/export/reporters.py",
+        old='    return f"{root_cause_name(top)[:120]}{others}"',
+        new='    return f"{top.summary[:120]}{others}"',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/root-headline-prefers-plain-cluster",
+        why="标题不再优先点名**有 Caused-by 链**的簇 —— 证据最硬的那个被换成了"
+            "「优先级最高但没有因果链」的那个",
+        target="log_ai_compressor/export/reporters.py",
+        old="    pool = with_chain or roots",
+        new="    pool = roots",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/mixed-encoding-fallback-removed",
+        why="混合编码的逐行兜底被去掉 —— GBK 行静默变成一堆 U+FFFD，"
+            "而报告里看不出任何异常（**数据被改了**）",
+        target="log_ai_compressor/core/encoding.py",
+        old=('        alt = self._try(raw, "gb18030")\n'
+            "            if alt is not None:\n"
+            "                self.repaired += 1\n"
+            "                return alt"),
+        new=("        alt = None\n"
+             "            if alt is not None:\n"
+             "                self.repaired += 1\n"
+             "                return alt"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/mixed-encoding-notice-removed",
+        why="混合编码的提示被去掉 —— 「报不出数」与「报数为 0」又分不开了，"
+            "读者以为这份日志是干净的",
+        target="log_ai_compressor/core/pipeline.py",
+        old="    if decoder.repaired:\n        notes.append",
+        new="    if False and decoder.repaired:\n        notes.append",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/readback-uses-whole-file-decode",
+        why="**回读改回「整文件单编码」** —— 摄入逐行兜底、回读整文件解，"
+            "同一份没被改过的文件算出两个摘要 ⇒ 误报 TAMPERED ⇒ "
+            "指控了一个没有发生的事（本轮自己引入、自己抓到的坑）",
+        target="log_ai_compressor/core/evidence.py",
+        old="        out = LogDecoder(enc).read_range(path, line_start, line_end)",
+        new=("        import log_ai_compressor.core.encoding as _E\n"
+             "        with _E.open_text_stream(path, enc) as _fh:\n"
+             "            out = []\n"
+             "            for _i, _l in enumerate(_fh, 1):\n"
+             "                if _i < line_start:\n"
+             "                    continue\n"
+             "                if _i > line_end:\n"
+             "                    break\n"
+             "                out.append(_l)"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/wide-encoding-disabled",
+        why="UTF-16/UTF-32 也按字节切行 —— 换行符本身是多字节的，"
+            "一个字符被劈成两半（实测：2 行变 3 行、行尾多一个 NUL、"
+            "出现 4 个 U+FFFD）",
+        target="log_ai_compressor/core/encoding.py",
+        old="        self._wide = is_wide_encoding(self.encoding)",
+        new="        self._wide = False",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/bom-strip-removed",
+        why="UTF-8 BOM 不再剥离 —— U+FEFF 留在首行文本里，"
+            "用户看到的第一行会多一个看不见的字符",
+        target="log_ai_compressor/core/encoding.py",
+        old=("                if line.startswith(_UTF8_BOM):\n"
+             "                    line = line[len(_UTF8_BOM):]"),
+        new=("                if False:\n"
+             "                    line = line[len(_UTF8_BOM):]"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/report-size-cap-removed",
+        why="超长字段不再截断 —— 5 MB 的单行让报告膨胀到 10 MB，"
+            "而报告是给人读的",
+        target="log_ai_compressor/export/reporters.py",
+        old="    if not isinstance(text, str) or len(text) <= MAX_SAMPLE_FIELD_CHARS:",
+        new="    if True:",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/binary-refusal-disabled",
+        why="二进制输入不再被拒绝 —— 拿 .bin 当日志喂进来会被「成功分析」一遍，"
+            "报告写着「压缩 95%」，退出码 0",
+        target="log_ai_compressor/cli.py",
+        old="    if stats.nul_lines:\n        return True",
+        new="    if False:\n        return True",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/output-error-swallowed",
+        why="写报告失败时不再转成人话错误 —— 栈回溯糊一屏，"
+            "而且是在「成功摘要」之后炸的，滚屏里两者混在一起",
+        target="log_ai_compressor/cli.py",
+        old=("    except OSError as exc:\n"
+             "        raise _OutputError(str(exc), output, code=exc.errno) from exc"),
+        new=("    except OSError as exc:\n"
+             "        raise RuntimeError(str(exc)) from exc"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/json-to-stdout-removed",
+        why="`-f json` 不带 `-o` 时 stdout 不再是 JSON —— "
+            "接 jq 直接失败，而 `-f json` 看上去像是生效了的",
+        target="log_ai_compressor/cli.py",
+        old=('    if args.output is None and fmt == "json":\n'
+             "        sys.stdout.write(content)"),
+        new=('    if False:\n'
+             "        sys.stdout.write(content)"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/json-fingerprint-removed",
+        why="JSON 报告里没有指纹 —— 机器侧没法核对「这两份 JSON 是不是同一份结论」",
+        target="log_ai_compressor/export/reporters.py",
+        old='        "fingerprint": result_fingerprint(result),',
+        new='        "fingerprint": "",',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/json-notice-removed",
+        why="JSON 报告里没有 notice —— 混合编码 / 只看尾部这些**限定了结论适用范围**"
+            "的话只写给人看的格式，机器侧拿到的结论看起来与全量分析一模一样",
+        target="log_ai_compressor/export/reporters.py",
+        old='        "notice": getattr(result, "notice", "") or "",',
+        new='        "notice": "",',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/compare-quiet-removed",
+        why="compare 不再认 --quiet —— 只有 run 认，argparse 直接退出码 2，"
+            "两个子命令的行为不一致",
+        target="log_ai_compressor/cli.py",
+        old='    p_cmp.add_argument("--quiet", "-q", action="store_true",',
+        new='    p_cmp.add_argument("--quiet-x", "-q", action="store_true",',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/compare-trace-alignment-removed",
+        why="compare 不再按 trace_id 兜底对齐 —— 同一次请求在两个文件里措辞不同"
+            "时被算成「新增 1 种 + 消失 1 种」，读起来像「出了新问题、"
+            "同时修好了老问题」",
+        target="log_ai_compressor/core/comparator.py",
+        old="    for tid, b_clusters in sorted(b_traces.items()):",
+        new="    for tid, b_clusters in sorted(b_traces.items()):\n        continue",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/compare-matched-by-hardcoded",
+        why="对齐依据恒写成「模板」—— 按 trace 对上的那一项看不出来了，"
+            "读的人无法判断「共同」到底是怎么对上的",
+        target="log_ai_compressor/core/comparator.py",
+        old='                    change_rate=change, matched_by="trace",',
+        new='                    change_rate=change, matched_by="template",',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/empty-file-notice-removed",
+        why="空文件不再明说「0 行」—— 空文件与「有日志但没定论」被混成同一句话",
+        target="log_ai_compressor/core/pipeline.py",
+        old="    if not stats.total_lines:\n        notes.append",
+        new="    if False:\n        notes.append",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/stdin-dispatch-removed",
+        why="`run -` 不再走 stdin —— 管道接不进来，"
+            "用户必须先落盘才能分析（日常排障的动线被切断）",
+        target="log_ai_compressor/cli.py",
+        old='    if args.file == "-":\n        return _run_stdin(args)',
+        new='    if False:\n        return _run_stdin(args)',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/tail-line-offset-ignored",
+        why="`--tail` 的行号不再偏移 —— 报告里的「第 1 行」在原文件里是第 96 行，"
+            "证据引用指向无关的内容，「可复核」当场失效",
+        target="log_ai_compressor/core/pipeline.py",
+        old="        line_no = line_offset",
+        new="        line_no = 0",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/tail-notice-removed",
+        why="`--tail` 不再说明「这次只看的是尾部」—— 报告覆盖的不是全量，"
+            "而读者以为它覆盖了全部",
+        target="log_ai_compressor/core/pipeline.py",
+        old='        note = (f"只看最后 {len(lines)} 行（文件共 {total:,} 行，"',
+        new=('        note = ("" if True else f"只看最后 {len(lines)} 行'
+             "（文件共 {total:,} 行，\""),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
 ]
 
 

@@ -308,6 +308,17 @@ class ErrorCluster:
     # 该簇出现过的调用链关联键（analysis 填充）。**不提升置信档位** ——
     # 链路只证明同一次请求的先后顺序，不证明因果。
     traces: List[str] = field(default_factory=list)
+    # 该簇出现过的**关联键**（request_id / trace_id），**摄入期**流式收集。
+    #
+    # 为什么要有它（与 `traces` 区分）：`traces` 由 analysis 层填充，而
+    # 对比分析走 `analyze=False`（不做智能标记，只要差异）—— 于是 compare
+    # 此前**拿不到任何关联键**，同一个 trace 跨两个文件时只能按消息文本
+    # 匹配，同一次请求在两边措辞不同就会被算成「新增 + 消失」两份。
+    # 这个字段在聚类期就记好，与分析层无关，compare 因此能按 trace 对齐。
+    #
+    # 上限：每簇最多记 MAX_CLUSTER_TRACE_IDS 个（内存有界；超出只说明
+    # 「这个簇关联了很多次请求」，不影响对齐判定 —— 对齐只需要**有没有**）。
+    trace_ids: List[str] = field(default_factory=list)
     # 变更事件时间窗关联（analysis._attach_change_events 填充）："错误
     # 首发在「发版/重启」后 Ns" 的一行叙事。与 traces 同一语义边界 ——
     # **只作统计线索，绝不提升置信档位**（时间共现不证明因果）。
@@ -365,6 +376,11 @@ class RunStats:
     # 过滤近乎全灭的 notice 必须点破这一点，否则用户只知道「过滤很狠」，
     # 不知道「狠到把根因一起扔了」。
     causal_dropped: int = 0
+    # 混合编码：按**另一种**编码才解出来的行数（这份文件混着两种编码）
+    mixed_encoding_lines: int = 0
+    # 解不出来的行数（多半不是文本日志）+ 含 NUL 字节的行数
+    undecodable_lines: int = 0
+    nul_lines: int = 0
     duration: float = 0.0                # 处理耗时（秒）
     lines_per_second: float = 0.0
     time_start: Optional[float] = None   # 日志时间范围
@@ -391,6 +407,11 @@ class RunStats:
             "error_entries": self.error_entries,
             "ts_entries": self.ts_entries,
             "level_counts": dict(self.level_counts),
+            # 混合编码 / 非文本：JSON 侧据此判断「这份输入解得干不干净」——
+            # 一份二进制文件被当成日志分析过，机器侧必须能自己看出来。
+            "mixed_encoding_lines": self.mixed_encoding_lines,
+            "undecodable_lines": self.undecodable_lines,
+            "nul_lines": self.nul_lines,
             # 因果线索被级别过滤掉的条数：JSON 侧据此判断「根因可能被扔了」，
             # 不落盘的话 Web/API 消费者就看不到这个诊断（缺陷#6 的同类：
             # 关键状态只存在于内存里，机器读不到）。

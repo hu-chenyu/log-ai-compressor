@@ -173,10 +173,30 @@ def _root_summary(result: AnalysisResult) -> str:
     roots = [c for c in result.clusters if c.is_root_cause]
     if not roots:
         return "未发现明确根因（无时间连锁 / Caused-by 链 / 强根因特征）"
-    top = roots[0]
+    # 取哪一个根因簇作标题：**优先有 Caused-by 链的那个**。
+    #
+    # 为什么要显式排：roots 是按优先级排的，而「有因果链」与「优先级高」
+    # 是两件事。实测（2026-10-21 第九轮那一轮的示例日志）：
+    #   簇 A「authorization failed: connection refused to db-primary:5432」
+    #       —— 优先级 88.2，但**没有** Caused-by 链
+    #   簇 B「java.net.ConnectException: Connection refused」
+    #       —— 优先级 80.0，**有** Caused-by 链（证据最硬）
+    # 取 roots[0] 会点名 A —— 也就是**外层症状**，而真正的因在 B。
+    # 而同一份报告里 headline（判定层）取的是 B，两处口径分叉，
+    # 标题那一处正是读者唯一会记住的。
+    #
+    # 所以：标题与判定层取**同一个**簇 —— 先按「有 Caused-by 链」筛，
+    # 筛不出再退回优先级最高的那个。
+    from log_ai_compressor.core.analysis import root_cause_name
+    with_chain = [c for c in roots
+                  if getattr(c, "root_cause_variants", ())]
+    pool = with_chain or roots
+    top = max(pool, key=lambda c: (c.priority, c.count))
     others = f"（另有 {len(roots) - 1} 个根因候选）" if len(roots) > 1 else ""
     # 标签由调用方统一加（_VERDICT_LABEL），这里只给内容，避免重复
-    return f"{top.summary[:120]}{others}"
+    # 名字取**链尾真因**而不是簇摘要（摘要常是外层症状）——
+    # 与 analysis.root_cause_name 同一处口径，标题与簇 reason 不再分叉。
+    return f"{root_cause_name(top)[:120]}{others}"
 
 
 def _evidence_gaps_md(result: AnalysisResult, limit: int = 5) -> List[str]:
@@ -613,6 +633,29 @@ def brief_summary(result: AnalysisResult, top_n: Optional[int] = None) -> str:
 # ---------------------------------------------------------------------------
 # JSON 导出
 # ---------------------------------------------------------------------------
+#: 报告里**展示**用的单字段长度上限。
+#:
+#: 超长的一行（实测有 5 MB 的单行日志）会把报告撑成**两倍**大 —— 而报告是
+#: 给人读的，5 MB 的一行没人读得下去。截断**不损可核对性**：证据引用里的
+#: 行号与 sha256 都按**原文**算，一字未改（2026-10-21 第九轮外部复核抓到）。
+MAX_SAMPLE_FIELD_CHARS = 2000
+
+
+def _cap_text(text: str) -> str:
+    """截断过长的展示字段（可核对性由证据引用承担，不受影响）。"""
+    if not isinstance(text, str) or len(text) <= MAX_SAMPLE_FIELD_CHARS:
+        return text
+    return ("%s…（本字段共 %d 字符，已截断；完整原文见日志对应行）"
+            % (text[:MAX_SAMPLE_FIELD_CHARS], len(text)))
+
+
+def _cap_lines(lines) -> list:
+    """逐行截断（一行超长时，整份报告都会跟着爆）。"""
+    if not isinstance(lines, (list, tuple)):
+        return _cap_text(lines)
+    return [_cap_text(x) for x in lines]
+
+
 def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
                   full: bool = True) -> dict:
     d = {
@@ -664,16 +707,16 @@ def _cluster_dict(c: ErrorCluster, with_sample: bool = True,
         simplified = simplify_stack(entry.stack) if entry.stack else None
         d["sample"] = {
             "line_no": entry.line_no,
-            "raw": entry.raw,
-            "message": entry.full_message,
+            "raw": _cap_text(entry.raw),
+            "message": _cap_text(entry.full_message),
             "level": entry.level,
             "module": entry.module,
             "timestamp": _iso_ts(entry.timestamp),
-            "stack": entry.stack,
+            "stack": _cap_lines(entry.stack),
             "stack_simplified": simplified.lines if simplified else [],
             "stack_noise_folded": simplified.noise_count if simplified else 0,
-            "context_before": c.sample.before,
-            "context_after": c.sample.after,
+            "context_before": _cap_lines(c.sample.before),
+            "context_after": _cap_lines(c.sample.after),
         }
     # 优化缺陷R58：实例行号索引（JSON 结构化全量携带，便于脚本定位）
     d["instances"] = [
@@ -698,10 +741,22 @@ def to_json(result: AnalysisResult, top_n: Optional[int] = None,
     meta = result.stats.as_dict()
     meta["time_start"] = _iso_ts(meta.get("time_start"))
     meta["time_end"] = _iso_ts(meta.get("time_end"))
+    from log_ai_compressor.core.evidence import result_fingerprint
     payload = {
         "generator": f"log-ai-compressor v{__version__}",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        # 指纹必须进 JSON：README 承诺「同一份日志跑两遍，结论指纹逐字节相同」，
+        # 而 JSON 是**机器侧**拿到结论的入口 —— 指纹只在 md 里，机器就没法
+        # 核对「这两份 JSON 是不是同一份结论」（2026-10-21 第九轮复核抓到）。
+        "fingerprint": result_fingerprint(result),
         "meta": meta,
+        # 提示也必须进 JSON：混合编码 / 非文本 / 空文件 / 只看尾部
+        # 这些**限定了结论的适用范围**，只写在人读的格式里的话，
+        # 机器消费方（脚本、CI、另一个 Agent）拿到的结论看起来
+        # 与全量分析的一模一样 —— 而它其实只覆盖了文件的一部分，
+        # 或者那部分是用别的编码解出来的。
+        # 「交付物说谎比交付物少一项严重得多」（见 top_n_truncated）。
+        "notice": getattr(result, "notice", "") or "",
         "root_cause_summary": _root_summary(result),
         "error_kinds": len(result.clusters),
         # 截断诚实字段 —— 与 service.result_to_dict 的三个字段对齐。
@@ -1123,11 +1178,30 @@ def compare_to_markdown(results: List[CompareResult]) -> str:
         if cmp.common_items:
             out.append("### 共同错误（数量变化）")
             out.append("")
-            out.append("| 级别 | 基准次数 | 对比次数 | 变化率 | 模块 | 错误摘要 |")
-            out.append("| --- | --- | --- | --- | --- | --- |")
+            # 「按 trace 对齐」的行要标出来：它与「消息模板相同」不是
+            # 一回事 —— 前者是**同一次请求**在两个文件里的不同措辞，
+            # 不标出来的话，读者会以为「共同」=「两边长得一样」。
+            has_trace = any(i.matched_by == "trace" for i in cmp.common_items)
+            if has_trace:
+                out.append("> 带 🔗 的行按 **trace_id** 对齐：同一次请求在两个"
+                           "文件里措辞不同（上游报 A、下游报 B），"
+                           "按消息模板看是两种错误，按 trace 看是同一件事。")
+                out.append("")
+            if has_trace:
+                out.append("| 级别 | 基准次数 | 对比次数 | 变化率 | 模块 | 错误摘要 | 对齐 |")
+                out.append("| --- | --- | --- | --- | --- | --- | --- |")
+            else:
+                out.append("| 级别 | 基准次数 | 对比次数 | 变化率 | 模块 | 错误摘要 |")
+                out.append("| --- | --- | --- | --- | --- | --- |")
             for i in cmp.common_items:
-                out.append(f"| {i.level} | {i.count_a} | {i.count_b} | "
-                           f"{i.change_text} | {_md_escape(i.module) or '-'} | "
-                           f"{_md_escape(i.summary)} |")
+                if has_trace:
+                    mark = "🔗 trace" if i.matched_by == "trace" else "模板"
+                    out.append(f"| {i.level} | {i.count_a} | {i.count_b} | "
+                               f"{i.change_text} | {_md_escape(i.module) or '-'} | "
+                               f"{_md_escape(i.summary)} | {mark} |")
+                else:
+                    out.append(f"| {i.level} | {i.count_a} | {i.count_b} | "
+                               f"{i.change_text} | {_md_escape(i.module) or '-'} | "
+                               f"{_md_escape(i.summary)} |")
             out.append("")
     return "\n".join(out) + "\n"
