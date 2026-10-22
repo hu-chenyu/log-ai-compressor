@@ -13,7 +13,7 @@
 > **尚未发版**。`pyproject.toml` 与 `log_ai_compressor/__init__.py` 现在仍是
 > **2.12.5** —— 发版是另一件事（要跑构建可复现性 + 三方 sha256 对账，见
 > [`CONTRIBUTING.md`](CONTRIBUTING.md)）。本节里的条数是**当前**的活数字：
-> 静态分析发现里**剩下 57 条**才是真该留下的豁免（`docs/sast_baseline.json`
+> 静态分析发现里**剩下 59 条**才是真该留下的豁免（`docs/sast_baseline.json`
 > 逐条对账，由 `scripts/sast_gate.py` 核对）。
 
 **这一版是「把它当产品用一遍」的结果**：外部复核跑完七个入口、造了 17 个

@@ -48,6 +48,9 @@ def _cli(*args, stdin: str = None, cwd: Path = None):
     """跑 CLI，返回 CompletedProcess（不经过 shell，编码可控）。"""
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
+    # sys.executable 是**当前解释器的绝对路径**（不是 PATH 查找）——
+    # bandit 的 B603 看不见这一点，它只认字面量，所以本行在
+    # docs/sast_baseline.json 里有豁免条目并写了理由。
     return subprocess.run(
         [sys.executable, "-m", "log_ai_compressor", *args],
         input=stdin, capture_output=True, text=True, encoding="utf-8",
