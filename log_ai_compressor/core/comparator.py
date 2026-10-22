@@ -129,7 +129,12 @@ def compare_results(base: AnalysisResult, other: AnalysisResult) -> CompareResul
         other_name=Path(other.stats.source).name,
     )
 
-    # 已配上的簇（用 id 记，因为同一簇可能有多条消息模板）
+    # 已配上的簇（用 id() 记）。
+    #
+    # 为什么用 id() 而不是簇对象：ErrorCluster 是 dataclass 且带 list 字段
+    # （instances / trace_ids / evidence）⇒ **不可哈希**，不能放进 set。
+    # 用 id() 是安全的：base.clusters / other.clusters 在整个 compare
+    # 期间都被 result 之外的对象持有着，簇不会被回收 ⇒ 地址不会被复用。
     matched_a: set = set()
     matched_b: set = set()
 

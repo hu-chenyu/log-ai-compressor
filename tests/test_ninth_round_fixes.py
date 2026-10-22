@@ -32,10 +32,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from log_ai_compressor import service as S
-from log_ai_compressor.core import comparator as C
 from log_ai_compressor.core import encoding as ENC
 from log_ai_compressor.core import evidence as E
 from log_ai_compressor.core.analysis import root_cause_name

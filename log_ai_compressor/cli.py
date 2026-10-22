@@ -110,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # run 子命令
     p_run = sub.add_parser("run", help="分析单个日志文件")
-    p_run.add_argument("file", help="日志文件路径")
+    p_run.add_argument("file", help="日志文件路径（`-` = 从标准输入读）")
     _add_filter_options(p_run)
     p_run.add_argument("-o", "--output", default=None,
                        help="输出报告路径（默认 <日志名>_report.md）")
