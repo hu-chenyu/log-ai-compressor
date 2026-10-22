@@ -55,8 +55,10 @@ $ log-ai-compressor verify --report report.json
 自校验结论：TAMPERED        # 退出码 1
 ```
 
-判定只有三档，**没有「大部分通过」** —— 一份掺了假证据的报告，
-不该因为大部分为真就放行。
+判定**没有「大部分通过」这一档** —— 一份掺了假证据的报告，
+不该因为大部分为真就放行。四档是 `VERIFIED` / `TAMPERED` /
+`UNVERIFIABLE`（**验不了**，不是「查出问题」）/ `NO_EVIDENCE`
+（本来就没证据），详见 [`docs/CLI.md`](docs/CLI.md)。
 
 ---
 
@@ -77,9 +79,13 @@ pip install log-ai-compressor          # 硬依赖只有 PyYAML 一个
 | 要图形界面 | `pip install "log-ai-compressor[web]" && log-ai-compressor web` |
 | 让 AI Agent 调本机日志 | `pip install "log-ai-compressor[mcp]" && log-ai-compressor mcp --install claude-code` |
 
-**首次运行要多久**：装依赖约 20~40 秒（取决于网络），之后每份日志
-**0.15~0.3 秒**。149 MB / 210 万行的日志实测 45 秒，峰值内存 31.6 MB
-（流式处理，与文件大小无关）。
+**首次运行要多久**（2026-10-22 本机实测，Windows / Python 3.11）：
+装依赖 **2.3 秒**（`pip install log-ai-compressor`，pip 有缓存；首次拉包会更久），
+之后**每份小日志 0.19~0.25 秒**。
+
+大文件同样实测过（**149.0 MB / 1,456,935 行**）：**58.9 秒**，
+峰值内存 **24.4 MB** —— 内存与文件大小无关，因为是**流式**处理。
+报告 457 KB。
 
 Windows 可双击 `start.bat` 自动定位 Python、装依赖、启动并打开浏览器。
 
