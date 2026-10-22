@@ -507,7 +507,7 @@ def serve(host: str = "127.0.0.1", port: int = 8765, *,
     # 已经过 CLI 的 --allow-remote 显式确认，这时再拦 Host 只会让用户够不着
     # 自己的服务，所以放行 —— 这一步的知情同意在 CLI 层，不在这里。
     bound = _host_name(host).lower()
-    is_loopback = bound in _LOOPBACK_HOSTS or bound.startswith("127.")
+    is_loopback = bound in _LOOPBACK_HOSTS
     allowed = None if is_loopback else (_ALLOW_ANY_HOST,)
 
     if open_browser:
