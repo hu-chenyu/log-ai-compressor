@@ -237,6 +237,47 @@ class TestMixedEncoding:
             "纯 UTF-8 文件被误报成混合编码：%r"
             % result.stats.mixed_encoding_lines)
 
+    def test_a_utf8_line_inside_a_gbk_file_is_decoded_as_utf8(self, tmp_path):
+        """**主编码是 GBK** 的文件里混进一行 UTF-8 中文，那行要按 utf-8 解。
+
+        这是混合编码的**另一个方向**：探测把整份文件判成 GBK（因为 GBK 行
+        居多），但有一行是 UTF-8。若不特判，那行会被按 GBK 解成乱码 ——
+        而 GBK 几乎什么字节都能「解成功」，所以**不会报错**，只会悄悄给
+        一行谁也看不懂的字符。
+
+        **改坏会红吗**：把 `_decode_narrow` 里「utf-8 解得出来且与主编码
+        结果不同就优先用它」这条判定去掉，这行会变乱码，本断言红。
+        """
+        p = tmp_path / "gbk_main.log"
+        p.write_bytes(
+            "2024-01-01 10:00:00 ERROR 数据库连接失败\n".encode("gb18030")
+            + "2024-01-01 10:00:01 ERROR 这一行是 UTF-8 编码的\n".encode("utf-8")
+            + "2024-01-01 10:00:02 ERROR 数据库连接失败\n".encode("gb18030"))
+        result = S.analyze(paths=[str(p)])
+        text = json.dumps(result.clusters, ensure_ascii=False, default=str)
+        assert "\ufffd" not in text, "出现了替换符"
+        assert "这一行是 UTF-8 编码的" in text, (
+            "UTF-8 那一行没被正确解码（被按 GBK 解成乱码了）")
+        # 且要**记账**：这是混合编码，不能悄悄过去
+        assert result.stats.mixed_encoding_lines >= 1, (
+            "混合编码没记账：%r" % result.stats.mixed_encoding_lines)
+
+    def test_a_zip_log_is_analysed(self, tmp_path):
+        """`.zip` 里的日志也要能分析（走二进制流那条路）。
+
+        **改坏会红吗**：把 `open_binary_stream` 里 zip 分支去掉
+        （或让它抛异常），本断言红。
+        """
+        import zipfile
+        z = tmp_path / "log.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("app.log",
+                        "2024-01-01 10:00:00 ERROR zipped failure here\n")
+        result = S.analyze(paths=[str(z)])
+        text = json.dumps(result.clusters, ensure_ascii=False, default=str)
+        assert "zipped failure here" in text, (
+            "zip 里的日志没被分析出来：%s" % text[:200])
+
 
 # ---------------------------------------------------------------------------
 # 2b. 摄入与回读走同一个解码器（这条是 2 的前提，缺了会出假 TAMPERED）
