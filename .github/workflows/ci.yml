@@ -314,7 +314,7 @@ jobs:
                   print("coverage.xml 里读不到 lines-valid / lines-covered")
                   sys.exit(1)
               c_missing = int(detail.group(1).replace(",", ""))
-              c_valid = n_valid
+              c_valid = int(detail.group(2).replace(",", ""))
               if (c_valid, c_missing) != (n_valid, n_valid - n_cov):
                   print(f"README 写漏行 {c_missing} / {c_valid} 语句，"
                         f"{matrix_label} 实测 {n_valid - n_cov} / {n_valid} —— "
