@@ -923,6 +923,35 @@ class TestTail:
         assert "tail" in (proc.stderr or "").lower(), (
             "报错要说清是 --tail 的问题：%r" % proc.stderr)
 
+    def test_merged_files_report_per_file_line_numbers(self, tmp_path):
+        """**合并分析**时，簇的区间也必须是**文件内**行号。
+
+        背景：证据引用指向文件内行号这件事早就修对了（修复缺陷#2），
+        但**簇与实例的展示行号**一直用全局号 —— 单文件看不出来，
+        合并两个文件时，第二个文件的簇区间会是「跨文件连续」的号
+        （6~10 而不是 1~5），读的人按它去翻第二个文件就翻错了。
+
+        **改坏会红吗**：把 `clustering.py` 里的 `entry.file_line_no`
+        换回 `entry.line_no`，本断言立刻红。
+        """
+        a = tmp_path / "a.log"
+        b = tmp_path / "b.log"
+        a.write_text("".join(
+            "2024-01-01 10:00:%02d ERROR aaa boom %d\n" % (i, i)
+            for i in range(1, 6)), encoding="utf-8")
+        b.write_text("".join(
+            "2024-01-01 11:00:%02d ERROR bbb boom %d\n" % (i, i)
+            for i in range(1, 6)), encoding="utf-8")
+
+        result = S.analyze_files([a, b])
+        assert len(result.clusters) == 2, "两个文件应各聚成一簇"
+        for c in result.clusters:
+            assert 1 <= c.first_line <= 5, (
+                "簇的行号 %s 不是**文件内**行号（两个文件各 5 行，"
+                "全局口径会给出 6~10）" % c.first_line)
+            assert c.last_line <= 5, (
+                "簇的结束行 %s 越过了单个文件的行数" % c.last_line)
+
     def test_verify_reports_a_display_range_that_exceeds_the_file(self, tmp_path):
         """`verify --report` 要能抓到「报告标出来的区间越界」。
 
