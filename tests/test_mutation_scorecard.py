@@ -155,6 +155,71 @@ class TestTheMutationTableIsHonest:
                if m.target.replace("\\", "/") == "scripts/mutation_scorecard.py"]
         assert not bad, f"这些变异改的是记分卡自己：{bad}"
 
+    def test_a_multiline_anchor_is_actually_applied_to_a_crlf_file(self, tmp_path):
+        """**多行锚点在 CRLF 文件里也必须真的被替换** —— 否则报出来的「存活」是假的。
+
+        2026-10-22 实测踩过（真事故）：本机 checkout 出来的
+        `.github/workflows/ci.yml` 是 **CRLF**（实测 427 处），而变异的
+        锚点按 **LF** 写。
+
+        * `_precondition` 用 `read_text()` —— Python 的通用换行转换把
+          `\r\n` 归一成了 `\n` ⇒ 锚点**找得到**；
+        * 施加变异时用 `read_bytes().decode()` —— **不做**转换 ⇒
+          锚点**匹配不上** ⇒ `replace` 什么也没改 ⇒ **变异压根没被施加**
+          ⇒ 测试全绿 ⇒ 报出「**变异存活**」。
+
+        那个结论是**假的**：守卫没弱，是变异没落到被读的那份上。
+        实测：129 条里恰好 **6 条**存活，全是**多行锚点**
+        （单行锚点不含换行，不受影响）—— 症状与诊断完全吻合。
+
+        这条**真的调**记分卡施加变异的那一步（不是查源码字符串），
+        断言：变异**确实被施加了**，且**行尾一个没动**。
+
+        **改坏会红吗**：把 `_apply_mutation_bytes` 里那行换算去掉
+        （直接 `m.old.encode()`），本条立刻红。
+        """
+        m = MS.Mutation(
+            id="probe/multiline-crlf",
+            why="测试用：多行锚点",
+            target="tests/test_mutation_scorecard.py",
+            old="first line\nsecond line\n",
+            new="first line\nCHANGED\n",
+            tests=["tests/test_mutation_scorecard.py"],
+        )
+        raw = b"first line\r\nsecond line\r\nthird line\r\n"
+        out = MS._apply_mutation_bytes(raw, m)
+        assert b"CHANGED" in out, (
+            "变异**没被施加** —— 而记分卡会把这种结果报成「变异存活」，"
+            "那是**假结论**（守卫没弱，是变异没落到被读的那份上）。")
+        # 行尾必须保住：还原是**字节级**的，写回时改了行尾会让门禁红，
+        # 而红的原因与被测的东西无关。
+        assert out.count(b"\r\n") == 3, (
+            "行尾被改掉了：CRLF=%d（应为 3）" % out.count(b"\r\n"))
+        assert b"\n" not in out.replace(b"\r\n", b""), "出现了裸 LF（混行尾）"
+
+    def test_the_scorecard_errors_out_when_the_anchor_cannot_be_matched(self):
+        """匹配不到锚点时**必须报错**，不能悄悄施加一个「什么都没改」的变异。
+
+        那样报出来的「变异存活」是**假结论** —— 而它看起来完全像
+        「守卫已经失去牙齿」。
+
+        **改坏会红吗**：把 `_apply_mutation_bytes` 里那个 `raise` 去掉，
+        本条立刻红。
+        """
+        m = MS.Mutation(
+            id="probe/not-found",
+            why="测试用",
+            target="tests/test_mutation_scorecard.py",
+            old="this text is definitely not in the file\n",
+            new="whatever\n",
+            tests=["tests/test_mutation_scorecard.py"],
+        )
+        with pytest.raises(SystemExit) as exc:
+            MS._apply_mutation_bytes(b"nothing to match here\n", m)
+        assert "匹配不到" in str(exc.value), (
+            "匹配不到锚点时必须报错（否则会施加一个空变异，"
+            "然后报出假的「变异存活」）")
+
     def test_ids_are_unique(self):
         """重名会让表里的两行指向同一条，出错时看不出是哪条。"""
         ids = [m.id for m in MS.MUTATIONS]

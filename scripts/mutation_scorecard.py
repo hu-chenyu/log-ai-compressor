@@ -1610,11 +1610,60 @@ def _is_dirty(status_text: str, rel: str) -> bool:
     return False
 
 
+def _apply_mutation_bytes(raw: bytes, m: Mutation) -> bytes:
+    """把变异**施加**到原始字节上，返回施加后的字节。
+
+    为什么单独抽出来（2026-10-22 实测踩过）：本机 checkout 出来的
+    `.github/workflows/ci.yml` 是 **CRLF**（实测 427 处），而变异的锚点
+    按 **LF** 写。
+
+    * `_precondition` 用 `read_text()` —— Python 的通用换行转换把
+      `\r\n` 归一成了 `\n` ⇒ 锚点**找得到**；
+    * 施加变异时若用 `read_bytes().decode()` —— **不做**任何转换 ⇒
+      锚点**匹配不上** ⇒ `replace` 什么也没改 ⇒ **变异压根没被施加**
+      ⇒ 测试全绿 ⇒ 报出「**变异存活**」。
+
+    那个结论是**假的**：守卫没弱，是变异没落到被读的那份上。
+    实测：129 条里恰好 **6 条**存活，全是**多行锚点**（单行锚点不含换行，
+    不受影响）—— 症状与诊断完全吻合。
+
+    ⇒ **在原始字节上替换**（保住行尾），**但按文件的行尾换算锚点**。
+    ⇒ 匹配不到就**报错**，绝不悄悄施加一个「什么都没改」的变异。
+    """
+    if b"\r\n" in raw:
+        old_b = m.old.replace("\n", "\r\n").encode("utf-8")
+        new_b = m.new.replace("\n", "\r\n").encode("utf-8")
+    else:
+        old_b = m.old.encode("utf-8")
+        new_b = m.new.encode("utf-8")
+    if raw.count(old_b) == 0:
+        eol = "CRLF" if b"\r\n" in raw else "LF"
+        raise SystemExit(
+            f"[{m.id}] 锚点在 {m.target} 里匹配不到（已按行尾 "
+            f"{eol} 试过）—— 这会让变异**根本没被施加**，"
+            f"而结论却会显示成「变异存活」（假的）。\n"
+            f"  找不到：{m.old[:80]!r}")
+    return raw.replace(old_b, new_b, 1)
+
+
+def _read_for_mutation(p: Path) -> str:
+    """读目标文件用于**匹配锚点** —— 统一换行口径。
+
+    为什么必须统一（2026-10-22 实测踩过）：见 `_apply_mutation_bytes`
+    的注释 —— 「判锚点」与「施加锚点」若看到**不同的文本**，
+    一个说「锚点在」、另一个说「锚点不在」，
+    而后者的后果是**变异没被施加**，结论却是假的「存活」。
+
+    ⇒ 读、判、替换，**三处必须用同一个口径**。
+    """
+    return p.read_text(encoding="utf-8")
+
+
 def _precondition(m: Mutation, status_text: str = "") -> None:
     p = m.path()
     if not p.is_file():
         raise SystemExit(f"[{m.id}] 目标文件不存在：{m.target}")
-    hits = p.read_text(encoding="utf-8").count(m.old)
+    hits = _read_for_mutation(p).count(m.old)
     if hits == 0:
         dirty = ""
         if _is_dirty(status_text, m.target):
@@ -1681,8 +1730,9 @@ def scorecard(*, full: bool = False,
             p = m.path()
             if p not in originals:
                 originals[p] = p.read_bytes()          # 事先存下，不是事后读回
-            text = originals[p].decode("utf-8")
-            p.write_bytes(text.replace(m.old, m.new, 1).encode("utf-8"))
+            # 施加变异：**在原始字节上替换**（保住行尾），锚点按行尾换算 ——
+            # 详见 `_apply_mutation_bytes` 的注释（那是本轮的一次真事故）。
+            p.write_bytes(_apply_mutation_bytes(originals[p], m))
 
             t0 = time.monotonic()
             rc = _run_tests(m.tests, full)
