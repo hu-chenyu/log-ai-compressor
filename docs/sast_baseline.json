@@ -225,6 +225,12 @@
     },
     {
       "test_id": "B404",
+      "path": "tests/test_timezone_independence.py",
+      "count": 1,
+      "reason": "复核过：**换 TZ 只能在进程启动时做** —— `TZ` 只在进程初始化时被读一次，进程内改 os.environ 对已初始化的时区状态无效。所以「同一份日志在不同时区下指纹相同」这条断言**必须**起子进程才能验（进程内跑两次同一个进程，时区根本没变，那条断言就成了装饰）。import subprocess 是这个测试的正当手段，不是被绕过的检查。"
+    },
+    {
+      "test_id": "B404",
       "path": "tests/test_uncovered_paths.py",
       "count": 1,
       "reason": "复核过：跑真实分析流程以覆盖降级分支。import 本身无法消除。"
@@ -330,6 +336,12 @@
       "path": "tests/test_subprocess_encoding_contract.py",
       "count": 3,
       "reason": "复核过：三处都是列表传参 + shell=False，跑的是已安装的 `log-ai-compressor` 控制台脚本。子进程编码契约就是这条测试的被测对象。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_timezone_independence.py",
+      "count": 1,
+      "reason": "复核过：subprocess.run 的第一参数是 sys.executable —— 那是**当前解释器的绝对路径**（不是 PATH 查找），且 shell=False、无 shell 拼接；参数是本测试的常量（仓库里的 examples/app.log 与两个固定的 TZ 值），不接收任何外部输入作为命令行片段。bandit 的 B603 是字面量启发式，看不见这一点。"
     },
     {
       "test_id": "B603",

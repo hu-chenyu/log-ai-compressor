@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from log_ai_compressor.constants import (
@@ -125,15 +125,39 @@ _CACHE_MISS = object()
 def _to_epoch(dt: datetime) -> float:
     """datetime -> 浮点秒（兼容 Windows：1970 前的 naive 时间会抛 OSError）。
 
+    **naive datetime 按 UTC 解释**（2026-10-22 第十轮修复）。
+
+    为什么：naive datetime 调 `.timestamp()` 时，Python 按**本机本地时区**
+    解释它 —— 于是同一份日志在 UTC 机器和在 UTC+8 机器上得到**不同的 epoch**。
+    而 epoch 会进 `stats.time_start` / `cluster.first_seen` / `last_seen`，
+    这些字段**在结论指纹里** ⇒ 同一份日志在不同机器上指纹不同。
+
+    实测（2026-10-22）：`examples/app.log` 在本机（UTC+8）指纹
+    `32f71d7a…`，在 CI 的 ubuntu runner（UTC）指纹 `56df0a5f…` ——
+    差的正是这 8 小时。README 首屏那段示例因此「在别人的机器上复现不出来」。
+
+    这与本仓库已有的约定同族：`tests/test_perf_gate.py` 早就钉住
+    「性能负载用 gmtime 而不是 localtime —— 否则同一个 seed 在 UTC 和
+    UTC+8 机器上生成的是不同字节」。那条约定管住了性能门禁的负载，
+    漏在了主解析路径上；这里是同一个洞的另一半。
+
+    **带显式时区的 datetime 不受影响**：`fromisoformat` 解析出的
+    `Z` / `+08:00` 是 aware 的，`.timestamp()` 对 aware datetime 按
+    其自带偏移换算成绝对时刻，与本机时区无关 —— 那是日志作者的真实
+    时刻，不能被替换掉。
+
     无年份格式（HH:MM:SS / syslog）经 strptime 得到 1900 年，此处统一
     替换为安全基准年 2000，保证同文件内时间排序正确。
     """
+    if dt.tzinfo is None:
+        # naive -> 按 UTC 解释（见上面的说明）
+        dt = dt.replace(tzinfo=timezone.utc)
     if dt.year < 1970:
         dt = dt.replace(year=2000)
     try:
         return dt.timestamp()
     except (OSError, OverflowError, ValueError):
-        return (dt - datetime(1970, 1, 1)).total_seconds()
+        return (dt - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds()
 
 
 class TimestampParser:

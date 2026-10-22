@@ -1615,6 +1615,72 @@ MUTATIONS: List[Mutation] = [
              "（文件共 {total:,} 行，\""),
         tests=["tests/test_ninth_round_fixes.py"],
     ),
+    # ---- 第十一轮（2026-10-22 时区缺陷）----------------------------------
+    Mutation(
+        id="r11/naive-timestamp-localtime",
+        why="naive 时间戳改回按**本机本地时区**解释（`.timestamp()` 对 naive "
+            "datetime 就是这么做的）⇒ 同一份日志在 UTC 机器与 UTC+8 机器上"
+            "得到不同的 epoch ⇒ `stats.time_start` / `cluster.first_seen` "
+            "这些**在结论指纹里**的字段变了 ⇒ **同一份日志的指纹随时区变**。"
+            "2026-10-22 实测：examples/app.log 在本机（UTC+8）指纹 "
+            "32f71d7a…、在 CI 的 ubuntu runner（UTC）指纹 56df0a5f…。"
+            "README 首屏那段示例因此「在别人的机器上复现不出来」",
+        target="log_ai_compressor/core/parser.py",
+        old=("    if dt.tzinfo is None:\n"
+             "        # naive -> 按 UTC 解释（见上面的说明）\n"
+             "        dt = dt.replace(tzinfo=timezone.utc)\n"),
+        new=("    if dt.tzinfo is None:\n"
+             "        pass\n"),
+        tests=["tests/test_timezone_independence.py"],
+    ),
+    Mutation(
+        id="r11/explicit-tz-overridden",
+        why="**过度修正**：把带显式时区（`Z` / `+08:00`）的时间戳也一律"
+            "当成 UTC ⇒ `16:00+08:00` 被说成 `16:00Z`，整整差 8 小时，"
+            "而且方向与「当成本地时间」相反 —— 两种错都静默。"
+            "带时区的那个时刻是日志作者的**真实时刻**，不能被替换掉",
+        target="log_ai_compressor/core/parser.py",
+        old=("    if dt.tzinfo is None:\n"
+             "        # naive -> 按 UTC 解释（见上面的说明）\n"
+             "        dt = dt.replace(tzinfo=timezone.utc)\n"),
+        new=("    dt = dt.replace(tzinfo=timezone.utc)\n"),
+        tests=["tests/test_timezone_independence.py"],
+    ),
+    Mutation(
+        id="r11/display-localtime",
+        why="展示改回按**本地时区**渲染（`fromtimestamp` 不带 tz）⇒ "
+            "同一份日志的「时间范围」在不同机器上显示**不同的钟点**："
+            "本机（UTC+8）显示 00:00:00 ~ 00:00:25，CI（UTC）显示 "
+            "08:00:00 ~ 08:00:25。而 JSON 导出一直用 UTC ⇒ "
+            "**同一个工具的两条路径给出两个答案**",
+        target="log_ai_compressor/core/models.py",
+        old='    return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")',
+        new='    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")',
+        tests=["tests/test_timezone_independence.py"],
+    ),
+    Mutation(
+        id="r11/service-time-localtime",
+        why="Web 接口的时间文本改回按本地时区渲染 ⇒ 同一份日志在 Web 界面上"
+            "显示的钟点随**看报告的人在哪台机器上**而变",
+        target="log_ai_compressor/service.py",
+        old=("        return datetime.fromtimestamp(value, tz=timezone.utc).strftime(\n"
+             "            \"%Y-%m-%d %H:%M:%S\")"),
+        new=("        return datetime.fromtimestamp(value).strftime(\n"
+             "            \"%Y-%m-%d %H:%M:%S\")"),
+        tests=["tests/test_timezone_independence.py"],
+    ),
+    Mutation(
+        id="r11/tod-window-localtime",
+        why="每日时段窗口改回用 `time.localtime` 取「一天里的第几秒」⇒ "
+            "同一条 `--tod-start/--tod-end` 在 UTC 机器与 UTC+8 机器上"
+            "**选出不同的条目**。这与 tests/test_perf_gate.py 早就钉住的"
+            "「负载不得调用 localtime」是同一个洞的两半 —— 那条约定管住了"
+            "性能门禁的负载，漏在了主解析路径上",
+        target="log_ai_compressor/core/pipeline.py",
+        old="                lt = time.gmtime(ts)",
+        new="                lt = time.localtime(ts)",
+        tests=["tests/test_timezone_independence.py"],
+    ),
 ]
 
 

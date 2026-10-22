@@ -51,9 +51,8 @@ $ python scripts/prove.py
   PASS  置信档位：无因果链时零确定性断言
         日志含 1 条 Caused-by；判 CONFIRMED 1 个（不得超过链数，且每个须有链证据）；verdict=CONFIRMED
   PASS  压缩：投喂口径远小于原文，且完整报告体积如实报出
-        原始 ≈934 tok → summary ≈363 tok （2.6x）→ md ≈8,935 tok；注意：本日志只有 52 行，
-        完整 md 报告比原文**大** 9.6 倍 —— 小文件上带样例与上下文的完整报告必然比原文长，
-        这是事实不是缺陷；大数据集上的口径见 docs/BENCHMARK.md
+        原始 ≈934 tok → summary ≈389 tok （2.4x）→ md ≈8,956 tok；注意：本日志只有 52 行，完整 md 报告比原文**大** 9.6 倍
+        —— 小文件上带样例与上下文的完整报告必然比原文长，这是事实不是缺陷；大数据集上的口径见 docs/BENCHMARK.md
   PASS  对抗性评测：该弃权时确实弃权
         10 场景 35/35 通过；正确弃权率 100.0%；自信错误率 0.0%
   PASS  结构化日志：JSON 认领 / 普通文本不误判
@@ -63,20 +62,31 @@ $ python scripts/prove.py
   PASS  分层：接入层只经 service 触达 core/export
         实际扫描 10 个文件（ai=4 cli=1 mcp=2 web=3）AST 核验通过
   PASS  README 工程指标与仓库一致
-        README 写 8611 行 / 32 个模块；实测 8611 行 / 32 个模块；README 写自证主张
-[11] 条，本文件实际登记 11 条；测试/主代码行数比实测 2.15；覆盖率分母写 7840，
-实测 7810（8611 − 801，omit=['log_ai_compressor/cli.py']）
+        README 写 8742 行 / 32 个模块；实测 8742 行 / 32 个模块（口径：log_ai_compressor/**/*.py 非空非注释行）；README
+        写自证主张 [11] 条，本文件实际登记 11 条；测试/主代码行数比实测 2.16；覆盖率分母写 7874，实测 7874（8742 −
+        868，omit=['log_ai_compressor/cli.py']）
   PASS  架构树列全包内模块
         24 个模块全部在架构树里
   PASS  基准表与实测一致
-        对账 README.md×1、docs/BENCHMARK.md×2、docs/FAQ.md×1、docs/POSITIONING.md(无表)
-        共 40 行：160 格百分数 + 22 处胜负场次（容差 0.05pp）；token 表 5 行，散文里 4 处
-        派生比值已对账（OpenStack 15,299,983 ÷ 746 = 20,509）；全部一致；5 处胜负未带口径，
-        无从判定对账对象，仅统计不判红｜重跑：python scripts/benchmark_loghub.py --budgets 32000 --write-baseline
+        对账 README.md×1、docs/BENCHMARK.md×2、docs/FAQ.md×1、docs/POSITIONING.md(无表) 共 40 行：160 格百分数 +
+        22 处胜负场次（容差 0.05pp）；token 表 5 行，散文里 4 处派生比值已对账（OpenStack 15,299,983 ÷ 746 = 20,509）；全部一致；11
+        处胜负未带口径，无从判定对账对象，仅统计不判红｜重跑：python scripts/benchmark_loghub.py --budgets 32000
+        --write-baseline
 
 尚无数据的主张（刻意列出，不藏）
   ?  根因判定的真实数据集覆盖度
+        复现语料（自建故障场景 + 真实 Java 异常/栈帧/日志格式，**非生产日志**）5 条因果链，精确率 100%、召回率 100%、自信错误率 0%，无链对照组 0
+        CONFIRMED（eval_rootcause.py --repro）。**一个真实数据集**：Loghub Android_v1 **全量** 1,555,005 行 / 131
+        条链 —— 精确率 100%、自信错误率 0%、报告口径召回率 100%（这一项最初是 **0%**，logcat 无解析模式 + 单行 Caused by
+        被行首锚点漏扫，修后补上）；该数据集可从 Loghub 1.0 的 Zenodo 记录 8196385 完整下载复现，v2.4.0 已补跑全量（原先测的是切片）。v2.7.0
+        起对外只认**报告口径**：CONFIRMED 簇对外报告的根因文本（含全部内层因变体）必须点名该链的根因类名 —— 旧口径查的是簇的样例原文，而 v2.6.0
+        的「一簇只报一因」缺陷在旧口径下照样满分，指标看不见自己该管的缺陷。**v2.7.0 已撤回一组数字**：Loghub Hadoop 61 个含链文件 / 5,921 条链、精确率
+        100%、自信错误率 0%、召回率 91.4%。撤回理由：该数据集的来源已确认不可得 —— 两个 Zenodo 记录（8275861 / 8196385）、logpai/loghub
+        仓库根目录、本项目 data/ 下全部真实日志都查过，均无 YARN / `application_*/container_*.log`；且本地全部 Loghub 日志逐文件实测
+        Caused by 出现次数为 0，只有 Android_v1
+        有链。一个跑不出来的数字留着只会在被追问时塌台，撤。本项目现在只有两类主张：能逐条复现的，和明说给不出的。此外尚未覆盖的日志形态未知，结论未必能外推。
   ?  与云平台根因准确率的对比
+        不可比且不该比。RCA100 的结论是 62.5% 的根因案例至少需要两种模态，本工具只有日志一种。硬比只会输，且输了也不说明什么。
 
 总判定：全部主张成立
 ```

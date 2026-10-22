@@ -22,13 +22,26 @@ from log_ai_compressor.core.evidence import EvidenceRef
 
 
 def format_timestamp(t: Optional[float]) -> str:
-    """时间戳展示格式化：epoch 秒 -> 日期时间；相对秒 -> 秒计数。"""
+    """时间戳展示格式化：epoch 秒 -> 日期时间；相对秒 -> 秒计数。
+
+    **按 UTC 展示**（2026-10-22 第十轮修复）。
+
+    为什么：`datetime.fromtimestamp(t)` 不带 tz 时按**本机本地时区**渲染，
+    于是同一份日志在 UTC 机器与 UTC+8 机器上会显示**不同的钟点** ——
+    报告里「时间范围 08:00:00 ~ 08:00:25」在别人的机器上变成
+    「00:00:00 ~ 00:00:25」。日志里的裸时间戳没有时区信息，本工具统一
+    按 UTC 解释它（见 `core/parser.py::_to_epoch`），展示口径就必须与
+    解释口径一致，否则「同一份日志的结论」在不同机器上对不上。
+
+    这也是 JSON 导出（`export/reporters.py::_iso_ts`）一直以来的口径 ——
+    这次是把人读的那几条路径补齐到同一套规则上。
+    """
     if t is None:
         return "-"
     if t < 1e9:                      # 相对计时（嵌入式秒计数等）
         return f"{t:.3f}s"
-    from datetime import datetime
-    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ---------------------------------------------------------------------------

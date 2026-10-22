@@ -686,7 +686,15 @@ class LogPipeline:
                 return
             if (self._config.tod_start is not None
                     or self._config.tod_end is not None):
-                lt = time.localtime(ts)
+                # **用 gmtime 而非 localtime**（2026-10-22 第十轮修复）：
+                # 每日时段窗口必须与时间戳的**解释口径**一致 ——
+                # 裸时间戳按 UTC 解释（见 core/parser.py::_to_epoch），
+                # 这里就按 UTC 取「一天里的第几秒」。
+                # 此前用 localtime，于是同一条 `--tod-start` 参数
+                # 在 UTC 机器与 UTC+8 机器上选出**不同的条目** ——
+                # 这与 tests/test_perf_gate.py 早就钉住的
+                # 「负载不得调用 localtime」是同一个洞的两半。
+                lt = time.gmtime(ts)
                 tod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
                 if not _in_tod_window(tod, self._config.tod_start,
                                       self._config.tod_end):

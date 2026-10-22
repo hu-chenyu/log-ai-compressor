@@ -359,12 +359,19 @@ def _fnum(value: Optional[float]) -> Optional[float]:
 
 
 def _ts(value: Optional[float]) -> Optional[str]:
-    """epoch → 本地时间字符串（无时间戳则 None）。"""
+    """epoch → UTC 时间字符串（无时间戳则 None）。
+
+    **按 UTC 展示**（2026-10-22 第十轮修复）—— 与 `core/parser.py::_to_epoch`
+    的解释口径、以及 JSON 导出（`export/reporters.py::_iso_ts`）一致。
+    此前这里用本地时区渲染，于是同一份日志在 Web 界面上显示的钟点
+    随**看报告的人在哪台机器上**而变。
+    """
     if value is None or value <= 0:
         return None
     try:
-        from datetime import datetime
-        return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(value, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S")
     except (ValueError, OSError, OverflowError):
         return None
 
