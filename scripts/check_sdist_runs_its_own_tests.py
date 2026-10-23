@@ -56,6 +56,30 @@ def find_sdist(explicit: str | None) -> Path | None:
     return cands[-1] if cands else None
 
 
+def failing_modules(output: str) -> list[str]:
+    """从 pytest 的输出里找出**红了哪些模块**。
+
+    为什么要有它：原先这道门禁红了只说「两种可能」（MANIFEST 漏收 /
+    新模块忘了登记），而排查的人得自己猜是哪个文件。
+    2026-10-24 第十二轮外部复核指出：真正能兜住「新增一个需要仓库上下文
+    的测试模块却忘了登记」的**就是这道门禁**（经验判据：真跑一遍），
+    所以它必须**说清楚是哪个模块**红了 —— 否则「兜底」只是兜住了，
+    却让人多花一轮排查。
+
+    判据：pytest 短摘要里的 ``FAILED <路径>::<用例>`` 行。
+    """
+    out: list[str] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("FAILED "):
+            continue
+        path = line[len("FAILED "):].split("::", 1)[0].split(" - ", 1)[0].strip()
+        name = Path(path).name
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="从 sdist 里跑它自己的测试")
     ap.add_argument("--sdist", default=None, help="sdist 路径（默认取 dist/ 里最新那个）")
@@ -97,15 +121,29 @@ def main(argv: list[str] | None = None) -> int:
         env = dict(os.environ, PYTHONIOENCODING="utf-8")
         env.pop("PYTHONWARNDEFAULTENCODING", None)
         print("在解包目录里跑它自己的测试（需要 git 上下文的用例按 conftest 跳过）……")
-        proc = subprocess.run(
+        # 边跑边打印（这一道要跑十几分钟，闷着跑会让人以为卡住了），
+        # 同时把输出留下来 —— 红了要靠它点名是哪个模块。
+        proc = subprocess.Popen(
             [sys.executable, "-m", "pytest", "-q", "--tb=short", "-p", "no:cacheprovider"],
-            cwd=str(pkg), env=env, timeout=3600)
-        if proc.returncode != 0:
+            cwd=str(pkg), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace")
+        collected: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            collected.append(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        rc = proc.wait()
+        if rc != 0:
+            bad = failing_modules("".join(collected))
             print()
             print("**sdist 跑不了它自己的测试** —— 上面那些红就是原因。")
+            if bad:
+                print("红了的是这些模块：%s" % "、".join(bad))
             print("两种可能：")
             print("  · MANIFEST.in 漏收了某个文件（改 MANIFEST.in，别改测试）")
-            print("  · 新增的测试需要 git 上下文，却没登记进 tests/conftest.py 的名单")
+            print("  · 新增的测试需要 git 上下文，却没登记进 tests/conftest.py 的名单"
+                  "（改 tests/conftest.py 的 NEEDS_REPO_CONTEXT）")
             return 1
     print()
     print("sdist 能跑自己的测试。")
