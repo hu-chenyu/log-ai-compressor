@@ -109,7 +109,7 @@ log-ai-compressor verify --report r.json --json  # 机器可读
 | verdict | 含义 | 退出码 |
 | --- | --- | --- |
 | `VERIFIED` | 每条结论都能在原始日志里逐行复核 | 0 |
-| `TAMPERED` | **回读过了，对不上** —— 日志确实被改过 | 1 |
+| `TAMPERED` | **回读过了，对不上** —— 日志与报告**有一方变了**（回读分不出是哪一方） | 1 |
 | `UNVERIFIABLE` | 有引用，但**一条都回读不了**（源被删/轮转/粘贴文本） | 1 |
 | `NO_EVIDENCE` | 本来就没有证据引用 | 0 |
 
