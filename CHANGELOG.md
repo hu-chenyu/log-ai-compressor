@@ -63,6 +63,19 @@
 | 变异记分卡 | 148 条，**本地实跑：148 条，存活 0，击杀率 100%** |
 | SAST 豁免 | 静态分析发现里**剩下 75 条**才是真该留下的（`docs/sast_baseline.json` 逐条对账） |
 
+### 发布：2.12.8 的事实（都是实测）
+
+| 项 | 值 |
+| --- | --- |
+| PyPI 上传 | wheel `2026-10-23T20:52:12Z` / sdist `2026-10-23T20:52:15Z` |
+| 三方 sha256 | wheel `53e93160…`（258,816 B）/ sdist `c7185dd9…`（1,259,005 B）—— 本地 == PyPI == Release 附件，**逐字节相同** |
+| 从 tag 重建 | `build_repro.py --ref v2.12.8` 重建出来的两个产物，与 PyPI 上那一份**逐字节相同** |
+| tag | `v2.12.8` → commit `1dad8f5`（**不是** main 的 HEAD —— main 在发版后又走了发布记录回填） |
+| GitHub Release | `v2.12.8`，2 个附件（wheel + sdist） |
+| MCP Registry | 登记名 `io.github.hu-chenyu/log-ai-compressor` 已有 **13** 个版本，含 2.12.8（推 tag 触发的发布工作流 success） |
+| 产物审计 | 247 个文件、0 命中、产物自带 SAST 绿、**文件全部来自源码树**、**没有构建机的路径** |
+| CI | PR #4 的 run（4 job）与 main 的 run 全绿 |
+
 ---
 
 ## [2.12.7] - 2026-10-23
