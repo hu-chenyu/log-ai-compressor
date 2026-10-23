@@ -615,8 +615,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 63 条才是真该留下的。",
-        new="剩下 64 条才是真该留下的。",
+        old="剩下 73 条才是真该留下的。",
+        new="剩下 74 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
@@ -1680,6 +1680,42 @@ MUTATIONS: List[Mutation] = [
         old="                lt = time.gmtime(ts)",
         new="                lt = time.localtime(ts)",
         tests=["tests/test_timezone_independence.py"],
+    ),
+    # ---- 主编码的「逐行投票」（2026-10-23 第十一轮外部复核后修）----
+    Mutation(
+        id="r11/encoding-main-encoding-vote-reverted",
+        why="把主编码判定改回**整块**判定（候选按顺序试整块严格解码）。"
+            "gb18030 几乎什么字节序列都能「解成功」，一行 GBK 就足以让整块的 "
+            "utf-8 失败 ⇒ 9 行 UTF-8 + 1 行 GBK 的文件会被判成主编码 gb18030，"
+            "报告写「有 9 行不是主编码 gb18030」—— **把多数派说成少数派**。"
+            "数据没坏（逐行兜底仍优先 utf-8），坏的是这个标签",
+        target="log_ai_compressor/core/encoding.py",
+        old=("    voted = _vote_main_encoding(head)\n"
+             "    if voted:\n"
+             "        return voted\n"),
+        new=("    for enc in _CANDIDATE_ENCODINGS:\n"
+             "        if _decodes_cleanly(head, enc):\n"
+             "            return enc\n"),
+        tests=["tests/test_encoding_majority_vote.py"],
+    ),
+    Mutation(
+        id="r11/encoding-vote-threshold-lowered",
+        why="把投票门槛从「utf-8 能解开的行 ≥ 一半」降到「只要有一行」⇒ "
+            "1 行 UTF-8 + 9 行 GBK 的文件也被判成主编码 utf-8，"
+            "提示同样把少数派说成多数派。方向反了，症状一样",
+        target="log_ai_compressor/core/encoding.py",
+        old="    if n_u8 * 2 >= len(lines):",
+        new="    if n_u8 >= 1:",
+        tests=["tests/test_encoding_majority_vote.py"],
+    ),
+    Mutation(
+        id="r11/encoding-vote-always-gb18030",
+        why="投票恒定选 gb18030 ⇒ 纯 UTF-8 的文件也被说成 GBK。"
+            "这是「投票被架空」的极端形态：代码还在，判据已经不生效",
+        target="log_ai_compressor/core/encoding.py",
+        old='    n_u8 = sum(1 for ln in lines if _decodes_strict(ln, "utf-8"))',
+        new="    n_u8 = 0",
+        tests=["tests/test_encoding_majority_vote.py"],
     ),
 ]
 

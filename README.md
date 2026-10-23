@@ -21,9 +21,9 @@
 ```console
 $ log-ai-compressor run examples/app.log
 【日志分析摘要】examples/app.log
-原始日志 ≈379 tokens → 压缩后 ≈186 tokens（压缩 51%）
+原始日志 ≈379 tokens → 压缩后 ≈175 tokens（压缩 54%）
 确定性指纹 `56df0a5f2bdff598e23edb83f2487ade1d5607410320188b4c2ab6d05c478ded`（同一份日志跑两遍必须完全一致）
-总行数 24，错误 8 行，去重后 4 种，时间范围 2024-03-15 08:00:00 ~ 08:00:25。
+总行数 24，错误 8 行，去重后 4 种，时间范围 2024-03-15 08:00:00 ~ 2024-03-15 08:00:25。
 已定位根因：java.net.ConnectException: Connection refused（另有 1 个根因候选）
 
 1. [P0 | ERROR | ×3 | 根因 | 行 4~13] authorization failed: connection refused to db-primary:5432
@@ -32,7 +32,22 @@ $ log-ai-compressor run examples/app.log
 3. [P0 | ERROR | ×1 | 根因 | 行 18~22] java.net.ConnectException: Connection refused
    -> Caused-by 因果链直连，根因：java.net.ConnectException: Connection refused
 4. [P0 | ERROR | ×1 | 行 23~23] stock check timeout after 3000ms item=SKU-7781
+报告已导出: examples/app_report.md（MD，9.2 KB）
 ```
+
+> **有三处随环境变**，别拿它们对不上就以为装错了：
+>
+> * 首行的路径**回显你给的写法** —— Windows 上是 `examples\app.log`，
+>   Linux 上是 `examples/app.log`；
+> * 「压缩后 ≈175 tokens」**随路径长度变**（摘要里有那一行路径）——
+>   同一份日志，给绝对路径会多几个 token。实测：相对路径 175、
+>   临时目录里的绝对路径 184、仓库里的绝对路径 186；
+> * 「时间范围」两端都带完整日期 —— 这是 2026-10-23 起统一按 UTC 展示的结果
+>   （此前第二端只显示钟点）。
+>
+> **指纹与行号区间不随这些变** —— 那两个才是结论本身，也是本工具的承诺。
+> 上面那个 175 是**照上面那条命令**（仓库根目录 + 相对路径）跑出来的数；
+> 这条由 `tests/test_readme_sample_is_reproducible.py` 逐行盯着。
 
 注意第 3 行：标题点名的**不是**「外层症状」而是**链尾真因**。
 这条结论指向日志的**第 18~22 行**，那段原文的 sha256 一并写进报告 ——
@@ -331,14 +346,14 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 
 | 指标 | 实测值 |
 | --- | --- |
-| 生产代码 | 8,742 行（32 个模块），硬依赖只有 PyYAML |
-| 测试 | **1765 用例**，覆盖率 **95%**（漏行 211 / 4,279 语句），`ruff` 全绿 |
-| CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**十一道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **变异存活率记分卡**（只跑参考矩阵一条）/ **SAST** / **依赖漏洞扫描** / **性能回归** / **产物审计**（产物本身，不是源码树） |
+| 生产代码 | 8,789 行（32 个模块），硬依赖只有 PyYAML |
+| 测试 | **1799 用例**，覆盖率 **95%**（漏行 225 / 4,298 语句），`ruff` 全绿 |
+| CI | Ubuntu 3.11 / 3.12 / Windows 3.12 三矩阵，**十二道门禁**：ruff / 单测+覆盖率 / 对抗评分卡 / 确定性指纹 / 自证脚本 / 构建可复现性 / **变异存活率记分卡**（只跑参考矩阵一条）/ **SAST** / **依赖漏洞扫描** / **性能回归** / **产物审计**（产物本身，不是源码树）/ **sdist 自测**（源码交付能不能自证） |
 | 自证脚本 | 现已断言 **11 条**主张，含「README 工程指标与架构树必须与仓库一致」「README 写的条数不许漂」「**每一处基准表逐格对账实测基线（含胜负场次与合计行）**」 |
 | 构建 | 可复现 —— 同源码两次构建字节相同，本地/PyPI/GitHub 三方 sha256 对账 |
 | 依赖 | **运行时硬依赖只有 PyYAML 一个**，全部 16 条声明依赖（含 web/mcp/ai 三个 extra 与开发工具）经 pip-audit 扫描无已知漏洞；Dependabot 每周一提 PR |
 
-> **上面这十一道门禁里的门禁清单本身也有门禁在守**：
+> **上面这十二道门禁里的门禁清单本身也有门禁在守**：
 > `tests/test_ci_gate_wiring.py` 双向核对 —— README 写下的每一道都必须
 > 在 `ci.yml` 里有一个真正执行它的步骤（认的是 `run:` 正文，不是步骤名），
 > 而 `ci.yml` 里的每一道也必须出现在这张表里。
@@ -349,9 +364,9 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 > [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 > **覆盖率的分母比上面那行代码量小**：`pyproject.toml` 的
-> `[tool.coverage.run] omit` 排除了 `cli.py`（薄适配层，637 行，
-> 只做参数解析与格式分发）。所以 95% 是在 7,874 行上算的，
-> 而「8,742 行生产代码」**含**它 —— 两个数字口径不同，别拿它们互推。
+> `[tool.coverage.run] omit` 排除了 `cli.py`（薄适配层，868 行，
+> 只做参数解析与格式分发）。所以 95% 是在 7,921 行上算的，
+> 而「8,789 行生产代码」**含**它 —— 两个数字口径不同，别拿它们互推。
 > 这个排除列表由 `tests/test_coverage_omit_watchdog.py` 钉住：
 > 增删任何一项都会红；分母这个数本身由 `prove.py` 重算。
 >
@@ -361,18 +376,21 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 > 而「漏行」**会差几行** —— 语句数相同而覆盖数不同，只可能是条件分支
 > 在另一套上没被执行到。
 >
-> 实测（**同一 commit**、同一个分母 4,279、四次测量各自 pytest 全绿）：
+> 实测（**同一 commit**、同一个分母 4,298、四次测量各自 pytest 全绿）：
 >
 > | 在哪测的 | 漏行 |
 > | --- | --- |
-> | **ubuntu-3.12**（CI 参考矩阵，README 采信这个） | **211** |
-> | ubuntu-3.11（CI） | 211 |
-> | windows-3.12（CI） | 207 |
-> | windows-3.11（本机） | 168 |
+> | **ubuntu-3.12**（CI 参考矩阵，README 采信这个） | **225** |
+> | ubuntu-3.11（CI） | 225 |
+> | windows-3.12（CI） | 221 |
+> | windows-3.11（**作者那台 Windows 本机**） | 221 |
 >
-> ⇒ **平台参与**（211 vs 207，差 4 行）；
-> ⇒ **Python 版本也参与**，但**只在 Windows 上**（同为 Windows，3.12 与 3.11
-> 差 39 行；而 ubuntu 的 3.11 与 3.12 **完全相同**，都是 211）。
+> ⇒ **平台参与**（225 vs 221，差 4 行）；
+> ⇒ **这一次 Python 版本没测出差异**：ubuntu 的 3.11 与 3.12 都是 225，
+> 本机（3.11）与 CI 的 windows-3.12 也都是 221。
+> ⇒ 上一版这里记的「差 39 行」里，那个本机数（168）是**旧工具链**下测的 ——
+>   那套 pytest 7.4.4 + pytest-cov 4.1.0 的组合会让 coverage 的 `omit` 失效，
+>   记的是**另一个分母**上的数 ⇒ 不是一个可比的口径。
 > ⇒ 所以本地跑出来的漏行数**不能**拿来填这个位置，**只有参考矩阵的实测值算数**。
 > 两个数都被 CI 逐个比对，与参考矩阵对不上就红。
 >
@@ -493,7 +511,7 @@ Windows 可双击 `start.bat` 自动定位 Python、装依赖、启动并打开�
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 模块树、分层依赖、核心算法 |
 | [`docs/CLI.md`](docs/CLI.md) | 完整命令行用法 + 自定义解析规则 |
 | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | 开发、测试、门禁说明 |
-| [`AGENTS.md`](AGENTS.md) | **给 AI agent 的工作契约**：分层与唯一门面、十一道门禁各自守什么、这个仓库特有的坑 |
+| [`AGENTS.md`](AGENTS.md) | **给 AI agent 的工作契约**：分层与唯一门面、十二道门禁各自守什么、这个仓库特有的坑 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 人类贡献流程：分支、提交约定、基准纪律、发版与三方 sha256 对账 |
 | `SKILL.md` / `INSTRUCTIONS` | 接入 Claude Code / Codex / Mavis 等 Agent |
 

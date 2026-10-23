@@ -24,6 +24,29 @@
    `scripts/sast_gate.py` —— 产物里带的基线与产物里带的代码必须对得上
    （v2.12.2 的 sdist 就是这么红的：基线写 3 条，代码实测 4 条）。
 
+2026-10-23 第十一轮外部复核后补了两件事
+----------------------------------------
+上面两件事**查不到**「产物里混进了源码树没有的文件」与「产物里带着构建机的
+绝对路径」。实测：已发布的 2.12.6 sdist 里夹着三个**从未进过任何 commit** 的
+文件（``examples/app_report.md`` 等），它们嵌着构建机的绝对路径与账户名
+（各出现 7～11 次），而这一版的门禁在**这份产物上照样通过**。
+
+机制是三件各自都正确的事凑在一起：
+
+* ``MANIFEST.in`` 收了 ``examples/*`` —— 生成物也匹配；
+* ``.gitignore`` 把 ``*_report.*`` 挡住 —— 它们在 ``git status`` 里**隐身**；
+* 构建在工作区里跑 —— 它们被静默打包。
+
+⇒ 现在补两道：
+
+3. **产物里的每个文件都必须来自源码树**（构建工具自己生成的元数据除外）
+   —— 否则产物里就有**从未被复核过**的内容。
+4. **产物里不能出现构建机的路径**（仓库根目录、用户主目录）——
+   那是个人信息，一旦发到 PyPI 就撤不回来。
+
+「239 个文件、0 命中」是真的，但**由它推不出「产物干净」**：词表里没有
+「个人路径」这一类。
+
 用法
 ----
     python scripts/audit_release_artifact.py                 # 用 pyproject 里的版本号
@@ -38,6 +61,7 @@ import argparse
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -92,6 +116,51 @@ def scan_bytes(raw: bytes) -> list[tuple[str, int]]:
     return out
 
 
+#: 构建工具自己生成的元数据 —— 它们**不来自源码树**，但也不是「野生文件」。
+_BUILD_METADATA = re.compile(
+    r"^(PKG-INFO|setup\.cfg|.*\.egg-info/.*|.*\.dist-info/.*)$")
+
+
+def committed_files() -> set[str]:
+    """源码树（HEAD）里有哪些文件，相对仓库根目录。
+
+    用 ``git ls-tree`` 而不是遍历工作区 —— 工作区里有未入库/被忽略的文件，
+    而那正是要查出来的东西。
+
+    git 用**绝对路径**起（SAST 的 B607：部分路径启动进程）。解析不到就返回
+    空集 —— 此时「文件是否来自源码树」那一项会被跳过，而不是误判成「有野文件」。
+    """
+    git = shutil.which("git")
+    if git is None:
+        return set()
+    try:
+        proc = subprocess.run(
+            [git, "ls-tree", "-r", "--name-only", "HEAD"],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
+
+
+def build_machine_markers() -> list[tuple[str, bytes]]:
+    """构建机上**不该出现在产物里**的路径。
+
+    只查**构建机自己的**路径（仓库根目录、用户主目录），不做泛化的
+    「像不像路径」猜测 —— 那种猜测会把测试夹具里刻意写的假路径
+    （``C:\\Users\\bob\\app.log``）也报成命中。
+    """
+    out = []
+    for label, p in (("仓库根目录", str(ROOT)), ("用户主目录", str(Path.home()))):
+        if not p or p in ("/", "\\", "C:\\"):
+            continue
+        for variant in (p, p.replace("\\", "/")):
+            raw = variant.encode("utf-8", "replace")
+            if raw and (label, raw) not in out:
+                out.append((label, raw))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="审计将要发布出去的产物：解包 → 用当前门禁扫 → 跑它自己的门禁")
@@ -121,12 +190,21 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="lac-artifact-") as tmp:
         tmpdir = Path(tmp)
         # ---- 1) 内容口径：逐文件扫 ----
+        artifact_names: list[tuple[str, str]] = []      # (产物名, 相对路径)
+        path_leaks: list[tuple[str, str, int]] = []      # (产物名, 路径, 次数)
+        markers = build_machine_markers()
         with zipfile.ZipFile(wheel) as z:
             for info in z.infolist():
                 if info.is_dir():
                     continue
                 n_files += 1
-                found = scan_bytes(z.read(info.filename))
+                raw = z.read(info.filename)
+                artifact_names.append((wheel.name, info.filename))
+                for label, marker in markers:
+                    c = raw.count(marker)
+                    if c:
+                        path_leaks.append((wheel.name + " :: " + info.filename, label, c))
+                found = scan_bytes(raw)
                 if found:
                     hits.append((wheel.name + " :: " + info.filename, found))
         with tarfile.open(sdist, "r:gz") as t:
@@ -137,7 +215,14 @@ def main(argv: list[str] | None = None) -> int:
                 fh = t.extractfile(m)
                 if fh is None:
                     continue
-                found = scan_bytes(fh.read())
+                raw = fh.read()
+                rel = m.name.split("/", 1)[1] if "/" in m.name else m.name
+                artifact_names.append((sdist.name, rel))
+                for label, marker in markers:
+                    c = raw.count(marker)
+                    if c:
+                        path_leaks.append((sdist.name + " :: " + m.name, label, c))
+                found = scan_bytes(raw)
                 if found:
                     hits.append((sdist.name + " :: " + m.name, found))
                 # 把 sdist 解出来，后面要在解包目录里跑它自己的门禁
@@ -175,6 +260,39 @@ def main(argv: list[str] | None = None) -> int:
           % ("通过" if sast_rc == 0 else ("未跑" if sast_rc is None else "**失败**"),
              sast_note))
 
+    # ---- 3) 产物里的文件必须来自源码树 ----
+    committed = committed_files()
+    extra = []
+    if committed:
+        for art, rel in artifact_names:
+            if rel in committed or _BUILD_METADATA.match(rel):
+                continue
+            extra.append("%s :: %s" % (art, rel))
+    else:
+        print("（拿不到源码树清单 —— 跳过「文件是否来自源码树」这一项）")
+
+    if not extra:
+        print()
+        print("**产物里的文件全部来自源码树**（构建元数据除外）")
+    else:
+        print()
+        print("**产物里有 %d 个文件不在源码树里** —— 它们从未被复核过：" % len(extra))
+        for name in extra[:20]:
+            print("  %s" % name)
+        if len(extra) > 20:
+            print("  …… 还有 %d 个" % (len(extra) - 20))
+
+    # ---- 4) 产物里不能带构建机的路径 ----
+    if not path_leaks:
+        print("**产物里没有构建机的路径**")
+    else:
+        print()
+        print("**产物里有构建机的路径（个人信息，发出去撤不回来）：**")
+        for name, label, c in path_leaks[:20]:
+            print("  %-64s [%s] x%d" % (name, label, c))
+        if len(path_leaks) > 20:
+            print("  …… 还有 %d 处" % (len(path_leaks) - 20))
+
     if not hits:
         print()
         print("**产物内容 0 命中**")
@@ -186,13 +304,13 @@ def main(argv: list[str] | None = None) -> int:
             for w, n in found:
                 print("     [%s] x%d" % (w, n))
 
-    if hits or sast_rc not in (0, None) or extract_failures:
+    if hits or sast_rc not in (0, None) or extract_failures or extra or path_leaks:
         print()
         print("**产物审计未通过** —— 不要发布。"
               "（已发布到 PyPI 的版本不可覆盖，只能再发一版。）")
         return 1
     print()
-    print("产物审计通过：内容 0 命中，产物自带门禁也绿。")
+    print("产物审计通过：内容 0 命中、产物自带门禁绿、文件全部来自源码树、没有构建机路径。")
     return 0
 
 

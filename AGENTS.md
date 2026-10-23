@@ -160,7 +160,7 @@ v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一�
 
 ---
 
-## 4. CI 的十一道门禁
+## 4. CI 的十二道门禁
 
 改代码前要知道它们各自在守什么 —— **不要通过删断言、跳过测试、放宽阈值让 CI 变绿。**
 
@@ -176,7 +176,8 @@ v2.11.0 又修掉**同家族的两处**：门禁在自己声称修好的那一�
 | 8 | `python scripts/sast_gate.py` | **静态分析发现是否都有交代**。bandit 一开几十条，逐条 `nosec` 等于没检查；判据是逐条对账 `docs/sast_baseline.json`，四件事都让门禁红：新发现 / 数量对不上 / **豁免过期** / **豁免没写理由**。三矩阵全跑 |
 | 9 | `python scripts/dep_audit_gate.py --self-check` | **声明依赖有没有已知漏洞**。来源唯一（`pyproject.toml`）。`--self-check` 先喂已知有漏洞的 pin，要求它必须报出来，否则返回 2（门禁自身失能）而不是绿 |
 | 10 | `python scripts/perf_gate.py` | **性能回归**。硬门禁建在**确定性工作量计数**上（相似度回退次数 / `ratio` 次数 / 掩码次数 / 簇数 / 条目数），同一份负载在任何机器上必须给出同一组整数。**墙钟只报告、不判定** —— 跨机器不可比，噪声只会向下，做成红线只会收获假红然后被人 `--continue-on-error` |
-| 11 | `python scripts/audit_release_artifact.py` | **产物本身**（不是源码树）要过门禁。查两件事：产物里每个文本文件用措辞门禁那套词表再扫一遍；把 sdist 解包后跑它自带的 `scripts/sast_gate.py`（自洽性）。**「仓库干净 ≠ 产物干净」**：v2.12.3 是措辞清理**之前**构建的，产物里实测 88 处、38 个文件（含一个真实内部主机名），而仓库当时已是 0 命中；PyPI 不允许覆盖已发布文件，那一版**永远留在那儿**。三矩阵全跑 |
+| 11 | `python scripts/audit_release_artifact.py` | **产物本身**（不是源码树）要过门禁。查两件事：产物里每个文本文件用措辞门禁那套词表再扫一遍；把 sdist 解包后跑它自带的 `scripts/sast_gate.py`（自洽性）。**「仓库干净 ≠ 产物干净」**：v2.12.3 是措辞清理**之前**构建的，产物里实测 88 处、38 个文件（含一个真实内部主机名），而仓库当时已是 0 命中；PyPI 不允许覆盖已发布文件，那一版**永远留在那儿**。三矩阵全跑。2026-10-23 起还查两件此前**原理上查不到**的事：产物里的每个文件是否都来自源码树（实测已发布的 2.12.6 sdist 夹带三个从未入库、还带构建机绝对路径的文件，而这一道门禁当时照样通过）、产物里是否带着构建机的路径 |
+| 12 | `python scripts/check_sdist_runs_its_own_tests.py` | **源码交付能不能自证**。把 sdist 解包，在解包目录里跑**它自己的测试**，必须绿。`MANIFEST.in` 开头承诺「拿到它的人应该能跑测试」—— 实测从 PyPI 拿到的 sdist 里跑 pytest 硬红 115 条（缺 `.github/`、`.gitignore`、`.git` 历史）。承诺在、交付不跟，那是一句空话。只跑参考矩阵（它要跑一遍全量测试，是最重的一道） |
 
 矩阵是 `ubuntu-3.11` / `ubuntu-3.12` / `windows-3.12` 三条。
 `3.11` 是 `pyproject.toml` 的下限（改矩阵必须同步改那边），
@@ -362,20 +363,22 @@ job 日志端点要 `actions:read` scope，普通 token 读不到 ⇒ 只能靠
 
 **规则四：本地测出来的数**不能**用来填「口径是 ubuntu-3.12」的那个位置。**
 
-实测（2026-10-22 第十一轮，同一份代码、同一批测试、同一个分母 **4,279**，
+实测（2026-10-23 第十一轮复核后，同一份代码、同一批测试、同一个分母 **4,298**，
 四份测量各自 pytest 全绿）：
 
 | 在哪测的 | 漏行 |
 | --- | --- |
-| **ubuntu-3.12**（**参考矩阵**） | **211** ← README 里该填的就是它 |
-| ubuntu-3.11 | 211 |
-| windows-3.12 | 207 |
-| 本机 Windows + Python 3.11 | 168 |
+| **ubuntu-3.12**（**参考矩阵**） | **225** ← README 里该填的就是它 |
+| ubuntu-3.11 | 225 |
+| windows-3.12 | 221 |
+| 本机 Windows + Python 3.11 | 221 |
 
-**平台参与**（211 vs 207，差 4 行）；
-**Python 版本也参与，但只在 Windows 上**（同为 Windows，3.12 与 3.11 差 39 行；
-而 ubuntu 的 3.11 与 3.12 **完全相同**，都是 211 —— 那边的条件分支
-不按版本走）。
+**平台参与**（225 vs 221，差 4 行）；
+**这一次 Python 版本没测出差异**（ubuntu 的 3.11 与 3.12 都是 225；
+本机 3.11 与 CI 的 windows-3.12 也都是 221）。
+⚠️ 上一版这里记的「差 39 行」里那个本机数（168）是**旧工具链**下测的 ——
+那套 pytest 7.4.4 + pytest-cov 4.1.0 的组合会让 coverage 的 `omit` 失效
+（cli.py 进了分母）⇒ 记的是**另一个分母**上的数 ⇒ 不是一个可比的口径。
 ⇒ 本地数**不是**「差一点」的那个数，而是**另一个数**。
 ⇒ 回填的顺序固定：**先让门禁报出参考矩阵的真值，再回填**（AGENTS.md §6.2）。
 ⇒ **口径也要对**：「漏行」是**分支**口径（`coverage.xml` 的 `lines-valid` 减
@@ -431,6 +434,7 @@ python scripts/sast_gate.py                  # 第八道：SAST 发现逐条对�
 python scripts/dep_audit_gate.py --self-check  # 第九道：依赖漏洞（含阳性对照）
 python scripts/perf_gate.py                  # 第十道：性能回归（确定性计数）
 python scripts/audit_release_artifact.py     # 第十一道：产物本身（不是源码树）要过门禁
+python scripts/check_sdist_runs_its_own_tests.py  # 第十二道：sdist 能跑它自己的测试
 
 # 诊断：有没有任何相似度量能把「该合并」和「不该合并」分开
 python scripts/diagnose_merge_decisions.py
@@ -506,8 +510,12 @@ fix(report): 「变更关联」吃掉 Mac 全篇 33%，且它根本不是变更
   （照抄 `scripts/adversarial_eval.py` 那段）。Windows 控制台默认 cp1252，
   打印中文会抛 `UnicodeEncodeError`：**门禁本身全绿，step 却红了**，
   而 ubuntu 两条全绿。症状看起来像功能坏了，实际与代码质量毫无关系。
-  `tests/test_windows_console_encoding.py` 钉住它 —— 新脚本忘了加就会在
-  windows 矩阵上现形。
+  钉它的是 `tests/test_invariants.py::TestGateScriptsEncodingSafe` ——
+  它的**覆盖面从 `.github/workflows/ci.yml` 派生**（ci.yml 里跑的每个
+  `scripts/*.py` 都在内），不是一份写死的名单。
+  写死的名单必然漏：2026-10-23 实测，`scripts/build_repro.py` 打印中文却没有
+  兜底，Windows CI 的 windows-3.12 就红在那一行 `print` 上（**构建其实完全
+  成功**，红的只是「打印不出来」）——而它没被抓到，只因为那时它还没被接进 CI。
 - **`requirements*.txt` 的每一行都要能被机器解析**，不管 pip 会不会执行它。
   Dependabot 按通配扫全部文件，"这里只是给人看的"不成立（见
   `requirements-optional.txt` 开头那段事故记录）。要放安装命令就加 `# `。

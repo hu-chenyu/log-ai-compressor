@@ -14,7 +14,7 @@ import gzip
 import io
 import zipfile
 from collections import deque
-from typing import List, TextIO
+from typing import List, Optional, TextIO
 
 # 优化缺陷R87：压缩包魔数（gzip 1f 8b / zip PK\x03\x04）
 _GZIP_MAGIC = b"\x1f\x8b"
@@ -98,6 +98,60 @@ def _decodes_cleanly(data: bytes, enc: str) -> bool:
     return False
 
 
+def _decodes_strict(data: bytes, enc: str) -> bool:
+    """**单行**的严格解码判定 —— 不给尾部留余量。
+
+    与 :func:`_decodes_cleanly` 的区别：那个的「尾部回退」是为**采样边界**
+    准备的（一行末尾的多字节字符被采样截断）。逐行投票时每一行都是完整的一行，
+    尾部回退会把「本来就解不开的行」算成「解得开」⇒ 票数失真。
+    """
+    try:
+        data.decode(enc, errors="strict")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def _vote_main_encoding(head: bytes) -> Optional[str]:
+    """按**行**投票决定主编码；票数不足时返回 None（交给调用方兜底）。
+
+    为什么不能整块判
+    --------------
+    整块判（候选按顺序试「整块能否严格解码」）有两个毛病，第二个更要命：
+
+    1. gb18030 几乎什么字节序列都能「解成功」⇒ 它是**最容易被整块选中**的候选，
+       哪怕文件里绝大多数行其实是 UTF-8。
+    2. **整块能不能解通**与**这个文件是什么编码**本来就不是一回事：
+       一行 GBK 就足以让整块的 utf-8 严格解码失败。
+
+    实测（2026-10-23 第十一轮外部复核后修）：9 行 UTF-8 + 1 行 GBK 的文件，
+    整块 gb18030 **能解通**（UTF-8 的字节恰好能按 gb18030 两两配对），
+    于是主编码被判成 gb18030，报告写「有 9 行不是主编码 gb18030」——
+    **把多数派说成少数派**，而 README 的错误表里写的恰恰是
+    「有 N 行不是主编码 utf-8」。数据本身没坏（逐行兜底仍然优先 utf-8），
+    坏的是这个标签：读者会据此以为自己的日志是 GBK。
+
+    规则
+    ----
+    · utf-8 能严格解开的行 **≥ 一半** ⇒ 主编码 utf-8；
+    · 否则（utf-8 在大多数行上都解不开）才退到 gb18030；
+    · 两边都解不开的行不算票（那是 undecodable，另有记账）。
+
+    「utf-8 优先」不是新规矩，是这一模块**早就写下的意图**
+    （见 :class:`LogDecoder` 的文档串：能通过 utf-8 严格校验的行
+    几乎必然本来就是 utf-8）—— 此前只是**探测**没按它执行。
+    """
+    lines = [ln for ln in head.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    n_u8 = sum(1 for ln in lines if _decodes_strict(ln, "utf-8"))
+    if n_u8 * 2 >= len(lines):
+        return "utf-8"
+    if any(_decodes_strict(ln, "gb18030") for ln in lines):
+        return "gb18030"
+    return None
+
+
 def detect_encoding_from_bytes(head: bytes) -> str:
     """基于字节采样探测编码（便于单元测试）。"""
     if not head:
@@ -115,12 +169,17 @@ def detect_encoding_from_bytes(head: bytes) -> str:
         # 根据奇偶位置判断字节序
         return "utf-16-le" if probe[0:1] != b"\x00" else "utf-16-be"
 
-    # 3) 严格解码验证（容忍尾部截断）
+    # 3) 逐行投票定主编码（整块判定会把多数派说成少数派，见上面的说明）
+    voted = _vote_main_encoding(head)
+    if voted:
+        return voted
+
+    # 4) 整块判定兜底：投票给不出结论时（没有可判的行）
     for enc in _CANDIDATE_ENCODINGS:
         if _decodes_cleanly(head, enc):
             return enc
 
-    # 4) 兜底：流式读取时配合 errors='replace' 容错
+    # 5) 兜底：流式读取时配合 errors='replace' 容错
     return "utf-8"
 
 

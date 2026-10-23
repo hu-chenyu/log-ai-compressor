@@ -855,6 +855,11 @@ _GATE_STEPS = {
     # 88 处禁用词（含一个真实内部主机名），而仓库当时已经是 0 命中。
     # 这一道查的是「**将要发布出去的那份字节**」，不是源码树。
     "Release artifact audit (content + self-consistency)",
+    # v2.12.7 新增：**源码交付能不能自证**。
+    # MANIFEST.in 开头承诺「拿到它的人应该能跑测试」—— 实测从 PyPI 拿到的
+    # sdist 里跑 pytest 硬红 115 条（缺 .github/、.gitignore、.git 历史）。
+    # 这一道查的是「**交付出去的那份源码**能不能自己跑绿」。
+    "The sdist can run its own test suite",
 }
 
 #: 不是门禁的：装环境 / 装依赖 / 产物构建 / 传产物。
@@ -894,7 +899,7 @@ class TestGateCountCannotDrift:
     def test_the_documented_count_matches_the_workflow(self):
         actual = len(_GATE_STEPS)
         cn = {2: "两", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七",
-              8: "八", 9: "九", 10: "十", 11: "十一"}
+              8: "八", 9: "九", 10: "十", 11: "十一", 12: "十二"}
         word = cn.get(actual, str(actual))
         docs = {
             "README.md": f"{word}道门禁",

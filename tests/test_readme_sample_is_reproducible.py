@@ -54,6 +54,28 @@ def _run_app() -> dict:
         return json.loads(out.read_text(encoding="utf-8"))
 
 
+def _run_app_human() -> str:
+    """照 README 里写的**那条命令**跑一遍，返回人读的那份摘要。
+
+    为什么必须用**相对路径**、且 cwd 在仓库根：README 首屏贴的就是
+    `log-ai-compressor run examples/app.log` 的输出，而「压缩后 tokens」
+    **随路径长度变**（摘要里有那一行路径）——
+    实测相对路径 175、仓库里的绝对路径 186。
+    用绝对路径去比，判据就成了「另一个运行的数」。
+
+    路径分隔符是平台差异（Windows `examples\\app.log` / POSIX `examples/app.log`），
+    但**长度相同** ⇒ token 估算相同 ⇒ 这一行仍可跨平台比对。
+    """
+    import os
+    env = dict(os.environ, PYTHONPATH=str(_ROOT), PYTHONIOENCODING="utf-8")
+    p = subprocess.run(
+        [_PY, "-m", "log_ai_compressor", "run", "examples/app.log"],
+        cwd=str(_ROOT), env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=300)
+    assert p.returncode == 0, "跑 examples/app.log 失败：%s" % p.stderr[-400:]
+    return p.stdout
+
+
 def _readme_head() -> str:
     return _README.read_text(encoding="utf-8")[:4000]
 
@@ -119,3 +141,59 @@ def test_the_first_screen_fingerprint_matches_a_real_run():
     assert real.startswith(claimed.group(1)), (
         "README 首屏写 %s…，真实跑出来是 %s… —— 示例已经过期了"
         % (claimed.group(1), real[:16]))
+
+
+def test_the_first_screen_token_line_matches_a_real_run():
+    """首屏里那行「原始日志 ≈N tokens → 压缩后 ≈M tokens」必须与真跑出来的一致。
+
+    为什么补这条（2026-10-23 第十一轮外部复核后）：
+    首屏那块此前是**三次不同的运行拼起来的** ——
+    标题与路径来自「相对路径」那次，token 数来自「绝对路径」那次
+    （同一份日志，相对路径 175、绝对路径 186），
+    而「时间范围」的写法来自改显示格式之前那版。
+    换句话说：**没有任何一次运行能产出 README 里那块**。
+    而这一条门禁此前只校三样（三个数 / 行号区间 / 指纹），
+    恰好漏掉了会漂的那两行。
+
+    **改坏会红吗**：把 README 里的 175 改成 186，本条立刻红。
+    """
+    head = _readme_head()
+    claimed = re.search(r"原始日志 ≈\d+ tokens → 压缩后 ≈(\d+) tokens（压缩 (\d+)%）", head)
+    assert claimed, "README 首屏没写那行 token 数"
+    real_line = None
+    for ln in _run_app_human().splitlines():
+        if "tokens" in ln and "压缩后" in ln:
+            real_line = ln
+            break
+    assert real_line, "真跑一遍没有拿到那行 token 数"
+    m = re.search(r"压缩后 ≈(\d+) tokens（压缩 (\d+)%）", real_line)
+    assert m, "真跑出来的那行长得不一样：%r" % real_line
+    assert (int(claimed.group(1)), int(claimed.group(2))) == (int(m.group(1)), int(m.group(2))), (
+        "README 首屏写 压缩后 ≈%s tokens（压缩 %s%%），真跑出来是 ≈%s tokens（压缩 %s%%）"
+        " —— 那不是同一次运行的输出" % (claimed.group(1), claimed.group(2),
+                                        m.group(1), m.group(2)))
+
+
+def test_the_first_screen_time_range_matches_a_real_run():
+    """首屏里那行「时间范围 A ~ B」必须与真跑出来的一致。
+
+    这行恰恰是「改显示格式」时最容易留下的旧痕迹：2026-10-23 起时间统一
+    按 UTC 展示，两端都带完整日期（此前第二端只显示钟点）。
+
+    **改坏会红吗**：把 README 里的「~ 2024-03-15 08:00:25」改回「~ 08:00:25」，
+    本条立刻红。
+    """
+    head = _readme_head()
+    claimed = re.search(r"时间范围 ([0-9T:\-~ ]+?)。", head)
+    assert claimed, "README 首屏没写时间范围"
+    real_line = None
+    for ln in _run_app_human().splitlines():
+        if "时间范围" in ln:
+            real_line = ln
+            break
+    assert real_line, "真跑一遍没有拿到那行时间范围"
+    m = re.search(r"时间范围 ([0-9T:\-~ ]+?)。", real_line)
+    assert m, "真跑出来的那行长得不一样：%r" % real_line
+    assert claimed.group(1).strip() == m.group(1).strip(), (
+        "README 首屏写 时间范围 %s，真跑出来是 %s —— 示例已经过期了"
+        % (claimed.group(1).strip(), m.group(1).strip()))

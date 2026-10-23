@@ -73,15 +73,24 @@ def _install_fake_build(monkeypatch, outdir: Path, produced: Path,
 
     ``touch=False`` 表示假构建不碰产物文件 —— 用来观察调用方**自己**判定
     出来的归一化范围，而不是被构建步骤的副作用带出来的。
-    """
 
+    2026-10-23 起 ``build()`` 在**干净快照**里构建（未入库/被忽略的文件
+    不该进产物，见 ``build_repro.py`` 的模块文档）。快照这一步单独 stub 掉：
+    否则它会真的去调 ``git archive``，而本测试刻意**不依赖真实仓库状态**。
+    """
     def _fake_run(cmd, **kwargs):  # noqa: ARG001 - 签名对齐 subprocess.run
         if touch:
             _write_sdist(produced, member_mtime)
         return None
 
+    def _fake_snapshot(dest: Path, ref: str = "HEAD") -> Path:
+        dest.mkdir(parents=True, exist_ok=True)
+        return dest
+
     monkeypatch.setattr(br.subprocess, "run", _fake_run)
-    monkeypatch.setattr(br, "last_commit_epoch", lambda: EPOCH)
+    monkeypatch.setattr(br, "snapshot_into", _fake_snapshot)
+    # last_commit_epoch 现在带 ref 参数（构建哪一笔提交）
+    monkeypatch.setattr(br, "last_commit_epoch", lambda ref="HEAD": EPOCH)
 
 
 @pytest.fixture()

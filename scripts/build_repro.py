@@ -22,6 +22,25 @@
 
 注意：``SOURCE_DATE_EPOCH`` 取 **最后一次提交的作者时间**，不是构建时间 ——
 它必须只由内容决定，否则「同一个 commit 重建出同一份」就不成立。
+
+构建在**干净快照**里跑，不在工作区
+----------------------------------
+2026-10-23 实测：已发布的 2.12.6 sdist 里夹着三个**从未进过任何 commit** 的
+文件（``examples/app_report.md`` 等），而且它们嵌着构建机的**绝对路径与账户名**。
+机制是三件各自都正确的事凑在一起：
+
+* ``MANIFEST.in`` 收了 ``examples/*`` —— 生成物也匹配；
+* ``.gitignore`` 把 ``*_report.*`` 挡住 —— 它们在 ``git status`` 里**隐身**；
+* 构建在工作区里跑 —— 它们被静默打包。
+
+⇒ 「三方 sha256 逐字节相同」对 sdist **不成立**（从 tag 重建出来是另一份字节），
+而这一版的门禁（词表扫描 + 产物自带 SAST）原理上查不到这一类。
+
+修法是**换掉构建的输入**：不是「工作区」，而是「已提交的树」。
+``git archive`` 导出的是 blob 的内容 —— 未入库/被忽略的文件根本不在里面；
+而且它按 ``.gitattributes`` 做行尾归一 ⇒ 同一份源码在任何机器上导出成同样的
+字节（工作区里 ``LICENSE`` 在 Windows 检出后是 CRLF、在 Linux 上是 LF，
+产物因此**随机器变**）。
 """
 from __future__ import annotations
 
@@ -34,8 +53,22 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from pathlib import Path
+
+# Windows 控制台默认 cp1252，打印中文会抛 UnicodeEncodeError ——
+# 症状极具误导性：构建**完全成功**，却因为「打印不出来」让整个 step 变红，
+# 看起来像功能坏了。2026-10-23 实测踩到：Windows CI 的 windows-3.12 就红在这行
+# `print(f"SOURCE_DATE_EPOCH = …")` 上，而 ubuntu 两条全绿。
+# 这个仓库已经因为同一类事故红过两次，所以这里照抄既有做法（见
+# scripts/adversarial_eval.py 顶部），并且由 tests/test_invariants.py
+# 盯着「ci.yml 里跑的每个脚本都必须有这层兜底」。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")   # py3.7+
+    except (AttributeError, ValueError, OSError):                # pragma: no cover
+        pass
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
@@ -54,13 +87,27 @@ def git_exe() -> str:
     return exe
 
 
-def last_commit_epoch() -> int:
+def uncommitted_changes() -> list[str]:
+    """工作区里**被跟踪文件**的未提交改动（不含未入库/被忽略的文件）。
+
+    为什么构建前要查它：产物是从**已提交的树**导出的（见
+    :func:`snapshot_into`），所以工作区里的改动**不在**产物里。
+    如果不吭声，构建出来的东西会与眼前的工作区对不上 ——
+    而「产物对应哪一笔提交」恰恰是这个项目最要紧的那条纪律。
+    """
+    proc = subprocess.run(
+        [git_exe(), "status", "--porcelain", "--untracked-files=no"],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+
+
+def last_commit_epoch(ref: str = "HEAD") -> int:
     """用最后一次提交的作者时间当 SOURCE_DATE_EPOCH。
 
     刻意不用「构建时刻」——那会让两次构建必然不同，可复现就无从谈起。
     """
     out = subprocess.run(
-        [git_exe(), "log", "-1", "--format=%at"],
+        [git_exe(), "log", "-1", "--format=%at", ref],
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout.strip()
     return int(out)
@@ -97,16 +144,76 @@ def normalize_sdist(path: Path, epoch: int) -> None:
             gz.write(buf.getvalue())
 
 
-def build(outdir: Path) -> list[Path]:
-    epoch = last_commit_epoch()
+def _extract_archive(archive: tarfile.TarFile, dest: Path) -> None:
+    """把归档安全地解到 dest。
+
+    ``filter="data"`` 是 Python 3.12 起的能力（3.11.4 / 3.10.12 等也回合了），
+    但本项目声明支持 **3.11 起** —— 3.11.0～3.11.3 没有这个参数。
+    所以：能用就用（它顺带挡住了路径穿越与特殊文件），不能用就**逐个成员**
+    手工校验后解出来，而不是无校验地 extractall。
+
+    为什么自己写校验：``extractall`` 不带 filter 时会照着归档里的路径写文件，
+    归档里带 ``../`` 就能写到 dest 外面去。
+    """
+    try:
+        archive.extractall(dest, filter="data")
+        return
+    except TypeError:
+        pass
+    dest.mkdir(parents=True, exist_ok=True)
+    for member in archive.getmembers():
+        name = member.name
+        if name.startswith("/") or ".." in Path(name).parts:
+            raise SystemExit("归档里有不安全的成员名：%r" % name)
+        if member.isdir():
+            (dest / name).mkdir(parents=True, exist_ok=True)
+            continue
+        if not member.isfile():
+            continue
+        target = dest / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fh = archive.extractfile(member)
+        if fh is None:
+            continue
+        with target.open("wb") as out:
+            out.write(fh.read())
+
+
+def snapshot_into(dest: Path, ref: str = "HEAD") -> Path:
+    """把**已提交的树**导出成一份干净快照，构建在它里面跑。
+
+    为什么必须是快照而不是工作区
+    --------------------------
+    见模块文档：已发布的 2.12.6 sdist 夹带了三个从未入库的文件（还带着构建机
+    的绝对路径），因为 ``MANIFEST.in`` 收了 ``examples/*``、``.gitignore`` 又把
+    它们挡住（于是 ``git status`` 里看不见）、而构建在工作区里跑。
+
+    ``git archive`` 导出的是 blob 的内容：未入库/被忽略的文件根本不在里面，
+    而且它按 ``.gitattributes`` 归一行尾 ⇒ 同一份源码在任何机器上导出成
+    同样的字节。
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [git_exe(), "archive", "--format=tar", ref],
+        cwd=ROOT, capture_output=True, check=True,
+    )
+    with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r") as tf:
+        _extract_archive(tf, dest)
+    return dest
+
+
+def build(outdir: Path, ref: str = "HEAD") -> list[Path]:
+    epoch = last_commit_epoch(ref)
     env = dict(os.environ, SOURCE_DATE_EPOCH=str(epoch), PYTHONHASHSEED="0")
     # 整秒取整：某些文件系统只存整秒的 mtime，而写文件发生在 started 之后，
     # 整秒比较在粗/细两种时间精度下都成立（细精度下 mtime 是小数，也 ≥ 整秒）。
     started = int(time.time())
-    subprocess.run(
-        [sys.executable, "-m", "build", "--outdir", str(outdir)],
-        cwd=ROOT, env=env, check=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="lac-snapshot-") as td:
+        src = snapshot_into(Path(td) / "src", ref)
+        subprocess.run(
+            [sys.executable, "-m", "build", "--outdir", str(outdir.resolve())],
+            cwd=str(src), env=env, check=True,
+        )
     # 只归一化**本次构建产生**的 sdist，不能对 outdir 里所有 .tar.gz 一视同仁。
     #
     # 正式构建的 outdir 是 dist/，那里堆着历次发布的产物。而 epoch 取的是
@@ -131,18 +238,31 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--verify", action="store_true",
                     help="构建两次并断言字节一致")
+    ap.add_argument("--ref", default="HEAD",
+                    help="构建哪一笔提交（默认 HEAD；复核历史版本时用 tag）")
     args = ap.parse_args()
 
-    epoch = last_commit_epoch()
-    print(f"SOURCE_DATE_EPOCH = {epoch}  （最后提交的作者时间）")
+    # 工作区有未提交改动时**直接停**：产物是从已提交的树导出的，
+    # 继续构建等于交付一份与眼前工作区对不上的产物 —— 而「产物对应哪一笔
+    # 提交」是本项目最要紧的那条纪律。改了先提交（或 stash）再构建。
+    dirty = uncommitted_changes()
+    if dirty:
+        print("**工作区有未提交的改动**，而产物是从已提交的树导出的：")
+        for line in dirty:
+            print("   %s" % line)
+        print("\n先提交（或 git stash）再构建 —— 否则产物与工作区对不上。")
+        return 2
+
+    epoch = last_commit_epoch(args.ref)
+    print(f"SOURCE_DATE_EPOCH = {epoch}  （{args.ref} 最后提交的作者时间）")
 
     if args.verify:
         import shutil
         a, b = DIST / "repro_a", DIST / "repro_b"
         for d in (a, b):
             shutil.rmtree(d, ignore_errors=True)
-        build(a)
-        build(b)
+        build(a, args.ref)
+        build(b, args.ref)
         bad = 0
         for f in sorted(x for x in a.iterdir() if x.suffix in (".whl", ".gz")):
             g = b / f.name
@@ -154,7 +274,7 @@ def main() -> int:
         print("构建可复现。" if not bad else f"{bad} 个产物不可复现。")
         return 1 if bad else 0
 
-    made = build(DIST)
+    made = build(DIST, args.ref)
     print()
     for f in made:
         print(f"  {f.name}  {f.stat().st_size} B")
