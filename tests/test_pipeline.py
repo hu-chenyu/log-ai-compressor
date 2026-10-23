@@ -377,10 +377,16 @@ class TestTimeRangeFilter:
         assert all("early" not in c.summary for c in r.clusters)
 
     def test_epoch_range(self):
-        """epoch 精确区间：15:00 之后仅晚间错误。"""
-        import time as _time
-        start = _time.mktime(
-            _time.strptime("2024-01-01 15:00:00", "%Y-%m-%d %H:%M:%S"))
+        """epoch 精确区间：15:00 之后仅晚间错误。
+
+        **下界按 UTC 算**（2026-10-22 第十一轮）：裸时间戳一律按 UTC 解释
+        （见 `core/parser.py::_to_epoch`），所以过滤下界也必须用同一口径 ——
+        原来用 `time.mktime`（**本机本地时区**），在 UTC 机器上与日志里的
+        08:00/14:00/20:00 对得上，在 UTC+8 机器上就整体差 8 小时 ⇒
+        那条断言只在一半的机器上成立。
+        """
+        import calendar
+        start = calendar.timegm((2024, 1, 1, 15, 0, 0))
         r = analyze_text(self._LOG, time_start=start)
         assert len(r.clusters) == 1
         assert "evening" in r.clusters[0].summary

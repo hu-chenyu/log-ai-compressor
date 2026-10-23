@@ -2,7 +2,7 @@
 """解析器单元测试：时间戳解析、多行聚合、堆栈跟踪、级别/模块推断。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -379,12 +379,21 @@ class TestYearlessTimestampPinning:
     Python 3.15 将改变 strptime 无年份默认年：默认年一变就不再 <1970，
     _to_epoch 的基准年归一化（→2000）不再触发，syslog/纯时间戳的 epoch
     会整体漂移。快速路径与 strptime 兜底必须给出同一个结果。
+
+    **期望值显式按 UTC 算**（2026-10-22 第十一轮）：
+    裸时间戳一律按 UTC 解释（见 `core/parser.py::_to_epoch`），
+    所以期望值也必须用同一个口径 ——
+    原来写 `datetime(...).timestamp()`，那走**本机本地时区**：
+    在 UTC 机器上绿、在 UTC+8 机器上红（差 28800 秒），
+    于是这条断言只在一半的机器上「有牙齿」。
     """
 
     def test_fast_path_yearless_normalized(self):
         tp = TimestampParser()
         v = tp.parse("05:04:03")
-        assert v == pytest.approx(datetime(2000, 1, 1, 5, 4, 3).timestamp())
+        expected = datetime(2000, 1, 1, 5, 4, 3,
+                            tzinfo=timezone.utc).timestamp()
+        assert v == pytest.approx(expected)
 
     def test_strptime_fallback_yearless_normalized(self, monkeypatch):
         """屏蔽快速路径，强制走 strptime 兜底 —— 同样必须钉在 2000 基准年。"""
@@ -392,5 +401,7 @@ class TestYearlessTimestampPinning:
         monkeypatch.setattr(parser_mod, "_fast_datetime", lambda key: None)
         tp = TimestampParser()
         v = tp.parse("Jan 2 05:04:03")
-        assert v == pytest.approx(datetime(2000, 1, 2, 5, 4, 3).timestamp())
+        expected = datetime(2000, 1, 2, 5, 4, 3,
+                            tzinfo=timezone.utc).timestamp()
+        assert v == pytest.approx(expected)
 

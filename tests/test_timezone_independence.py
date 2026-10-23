@@ -54,9 +54,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from log_ai_compressor.core.models import format_timestamp
-from log_ai_compressor.core.parser import TimestampParser, _to_epoch
-from log_ai_compressor.core.pipeline import analyze_text
+from log_ai_compressor.core.parser import TimestampParser
 
 _ROOT = Path(__file__).resolve().parent.parent
 _APP = _ROOT / "examples" / "app.log"
@@ -128,22 +126,49 @@ def test_time_range_does_not_depend_on_machine_timezone():
 def test_naive_timestamp_is_interpreted_as_utc():
     """naive datetime 的 epoch 必须等于「按 UTC 解释」的那个值。
 
-    **改坏会红吗**：改回 `dt.timestamp()`（localtime 解释）⇒ 本机在
-    UTC+8 上得到 1710460800 而非 1710489600 ⇒ 差 28800 ⇒ 红。
-    （在 UTC 机器上这一条不会红 —— 所以它**不能单独**当门禁用，
-    必须与上面那条「两个 TZ 对比」合起来才完整。）
+    **在带 TZ 的子进程里跑**（2026-10-22 第十一轮修正）。
+
+    原来这条是**进程内**调 `_to_epoch` —— 期望值按 UTC 算，而被测代码
+    改回 localtime 解释后，在 **UTC 机器上两者相同** ⇒ 抓不住
+    （实测：本地 UTC+8 杀掉、CI 的 ubuntu 上**存活**）。
+    ⇒ 判据必须在**能观察到差异的时区**里跑：子进程带 `TZ=UTC-8`。
     """
-    dt = datetime(2024, 3, 15, 8, 0, 0)
-    expected = dt.replace(tzinfo=timezone.utc).timestamp()
-    assert _to_epoch(dt) == expected, (
-        "naive 时间戳被按本地时区解释了：%r != %r"
-        % (_to_epoch(dt), expected))
+    check = (
+        "from datetime import datetime, timezone;"
+        "from log_ai_compressor.core.parser import _to_epoch;"
+        "dt=datetime(2024,3,15,8,0,0);"
+        "print(_to_epoch(dt));"
+        "print(dt.replace(tzinfo=timezone.utc).timestamp())"
+    )
+    env = dict(os.environ, TZ=_TZ_SHIFTED, PYTHONPATH=str(_ROOT),
+               PYTHONIOENCODING="utf-8")
+    p = subprocess.run([sys.executable, "-c", check], cwd=str(_ROOT), env=env,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=300)
+    assert p.returncode == 0, "跑 _to_epoch 校验失败：%s" % p.stderr[-400:]
+    lines = p.stdout.strip().splitlines()
+    assert len(lines) >= 2, "子进程没有输出两个数"
+    got, expected = float(lines[0]), float(lines[1])
+    assert got == expected, (
+        "naive 时间戳被按本地时区解释了：%r != %r" % (got, expected))
 
 
 def test_timestamp_parser_uses_utc_for_naive_input():
-    """解析器入口同样按 UTC 解释裸时间戳。"""
-    tp = TimestampParser()
-    got = tp.parse("2024-03-15 08:00:00")
+    """解析器入口同样按 UTC 解释裸时间戳。
+
+    **在带 TZ 的子进程里跑**（理由同上一条：进程内在 UTC 机器上抓不住）。
+    """
+    check = (
+        "from log_ai_compressor.core.parser import TimestampParser;"
+        "print(TimestampParser().parse('2024-03-15 08:00:00'))"
+    )
+    env = dict(os.environ, TZ=_TZ_SHIFTED, PYTHONPATH=str(_ROOT),
+               PYTHONIOENCODING="utf-8")
+    p = subprocess.run([sys.executable, "-c", check], cwd=str(_ROOT), env=env,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=300)
+    assert p.returncode == 0, "跑解析器校验失败：%s" % p.stderr[-400:]
+    got = float(p.stdout.strip())
     expected = datetime(2024, 3, 15, 8, 0, 0, tzinfo=timezone.utc).timestamp()
     assert got == expected, (
         "裸时间戳解析结果 %r != UTC 口径的 %r" % (got, expected))
@@ -178,20 +203,45 @@ def test_explicit_timezone_timestamps_keep_their_meaning():
 def test_tod_window_uses_utc():
     """`--tod-start/--tod-end` 必须按 UTC 取小时内秒数。
 
-    **改坏会红吗**：把 `time.gmtime(ts)` 改回 `time.localtime(ts)`，
-    在 UTC+8 机器上「12:00~18:00」的窗口会选出 08:00~14:00 的条目 ⇒
-    留下的簇数从 1 变成别的值 ⇒ 红。
+    **在带 TZ 的子进程里跑**（2026-10-22 第十一轮修正）。
+
+    原来这条是**进程内**调 `analyze_text` —— 那它看到的时区是**本机**的：
+    在 UTC 机器上 `time.localtime` 与 `time.gmtime` **完全一样**，
+    于是把 `gmtime` 改回 `localtime` 在 CI（ubuntu = UTC）上**抓不住**
+    （实测：本地 UTC+8 杀掉、CI 的 ubuntu 上**存活** ⇒ 记分卡报「存活 2」）。
+    ⇒ 判据必须在**能观察到差异的时区**里跑。
+
+    跑在 `TZ=UTC-8`（UTC+8）的子进程里：日志写的是 08:00/14:00/20:00，
+    窗口取 12:00~18:00。
+    * 按 UTC 取 ⇒ 命中 14:00 那条 ⇒ 留 1 个簇；
+    * 按本地时区取 ⇒ UTC+8 上那三条落在 16:00/22:00/04:00 ⇒ 留 0 个簇。
+
+    **为什么走库 API 而不是 CLI**：CLI **没有** `--tod-start/--tod-end`
+    这两个参数（实测 `run` 子命令不认），只有 `analyze_text` 的关键字。
     """
-    log = "\n".join([
-        "2024-01-01 08:00:00 ERROR [db] early morning error",
-        "2024-01-01 14:00:00 ERROR [db] midday error",
-        "2024-01-01 20:00:00 ERROR [db] evening error",
-    ])
-    r = analyze_text(log, tod_start=12 * 3600, tod_end=18 * 3600)
-    assert len(r.clusters) == 1, (
-        "12:00~18:00 的窗口留下了 %d 个簇（应为 1）—— 时段口径可能用了本地时区"
-        % len(r.clusters))
-    assert "midday" in r.clusters[0].summary
+    check = (
+        "from log_ai_compressor.core.pipeline import analyze_text;"
+        "log=('2024-01-01 08:00:00 ERROR [db] early morning error\\n'"
+        "'2024-01-01 14:00:00 ERROR [db] midday error\\n'"
+        "'2024-01-01 20:00:00 ERROR [db] evening error\\n');"
+        "r=analyze_text(log, tod_start=12*3600, tod_end=18*3600);"
+        "print(len(r.clusters));"
+        "print(';'.join(c.summary for c in r.clusters))"
+    )
+    env = dict(os.environ, TZ=_TZ_SHIFTED, PYTHONPATH=str(_ROOT),
+               PYTHONIOENCODING="utf-8")
+    p = subprocess.run([sys.executable, "-c", check], cwd=str(_ROOT), env=env,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=300)
+    assert p.returncode == 0, "跑 tod 校验失败：%s" % p.stderr[-400:]
+    lines = p.stdout.strip().splitlines()
+    assert lines, "子进程没有输出"
+    assert lines[0].strip() == "1", (
+        "12:00~18:00 的窗口留下了 %s 个簇（应为 1）—— 时段口径可能用了本地时区。"
+        "实际留下的：%s" % (lines[0].strip(), lines[1] if len(lines) > 1 else ""))
+    if len(lines) > 1:
+        assert "midday" in lines[1], (
+            "留下的不是 14:00 那条，而是 %r" % lines[1])
 
 
 # ---------------------------------------------------------------------------
@@ -200,26 +250,88 @@ def test_tod_window_uses_utc():
 def test_displayed_time_range_is_utc_everywhere():
     """md/txt 的时间范围与 JSON 的 ISO 串必须指向同一个钟点。
 
-    **改坏会红吗**：把 `format_timestamp` 里的
-    `tz=timezone.utc` 去掉（改回 localtime 渲染）⇒ 在 UTC+8 机器上
-    md 显示 00:00:00 而 JSON 显示 08:00:00+00:00 ⇒ 两边对不上 ⇒ 红。
+    **在指定 TZ 的子进程里跑**（2026-10-22 第十一轮修正）——
+    理由同 `test_tod_window_uses_utc`：进程内跑时看到的是**本机**时区，
+    在 UTC 机器上 localtime 与 UTC 渲染**输出相同** ⇒ 变异抓不住。
+
+    **两条路径都要验**（`r11/display-localtime` 改的是 `models.format_timestamp`
+    —— 人读的那条；JSON 那条走 `export/reporters.py::_iso_ts`，本来就是 UTC，
+    只验它**抓不住**那个变异）。
     """
-    log = "2024-03-15 08:00:00 ERROR [db] connection refused\n"
-    r = analyze_text(log)
-    shown = format_timestamp(r.stats.time_start)
-    assert shown == "2024-03-15 08:00:00", (
-        "时间范围显示为 %r —— 应当是日志里写的那个钟点（UTC 口径）" % shown)
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "one.log"
+        src.write_text(
+            "2024-03-15 08:00:00 ERROR [db] connection refused\n",
+            encoding="utf-8")
+        out = Path(td) / "r.json"
+        env = dict(os.environ, TZ=_TZ_SHIFTED, PYTHONPATH=str(_ROOT),
+                   PYTHONIOENCODING="utf-8")
+        p = subprocess.run(
+            [sys.executable, "-m", "log_ai_compressor", "run", str(src),
+             "-f", "json", "-o", str(out)],
+            cwd=str(_ROOT), env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300)
+        assert p.returncode == 0, "跑单行样例失败：%s" % p.stderr[-400:]
+        data = json.loads(out.read_text(encoding="utf-8"))
+        # 人读的那条路径（txt）：`-f txt` 且无 `-o` 时 stdout 就是那个格式
+        q = subprocess.run(
+            [sys.executable, "-m", "log_ai_compressor", "run", str(src),
+             "-f", "txt"],
+            cwd=str(_ROOT), env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300)
+        assert q.returncode == 0, "跑 txt 输出失败：%s" % q.stderr[-400:]
+        txt = q.stdout
+    # JSON 侧：ISO 串必须带 +00:00（UTC 口径）
+    ts = (data.get("meta") or {}).get("time_start")
+    assert ts == "2024-03-15T08:00:00+00:00", (
+        "JSON 的 time_start 是 %r —— 应当是日志里写的那个钟点（UTC 口径）" % ts)
+    # 人读的那侧：时间范围必须是日志里写的那个钟点
+    want = "时间范围: 2024-03-15 08:00:00 ~ 2024-03-15 08:00:00"
+    assert want in txt, (
+        "txt 报告里的时间范围不是日志里写的那个钟点 —— 展示口径可能用了本地时区。"
+        "期望含 %r，实际输出：\n%s" % (want, txt[:600]))
 
 
 def test_service_time_text_is_utc():
-    """Web 接口的时间文本也必须是 UTC（与 JSON 导出同一套规则）。"""
-    from log_ai_compressor import service as S
-    log = "2024-03-15 08:00:00 ERROR [db] connection refused\n"
-    r = analyze_text(log)
-    payload = S.result_to_dict(r)
-    assert payload["stats"]["time_range_text"] == "2024-03-15 08:00:00 ~ 2024-03-15 08:00:00", (
-        "Web 的时间范围是 %r —— 应当与 md/JSON 同一口径（UTC）"
-        % payload["stats"]["time_range_text"])
+    """Web 接口的时间文本也必须是 UTC（与 JSON 导出同一套规则）。
+
+    **在指定 TZ 的子进程里跑**（2026-10-22 第十一轮修正）——
+    进程内跑时看到的是**本机**时区，在 UTC 机器上 localtime 与 UTC
+    渲染**输出相同** ⇒ 变异抓不住（实测：CI 的 ubuntu 上该变异**存活**）。
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "one.log"
+        src.write_text(
+            "2024-03-15 08:00:00 ERROR [db] connection refused\n",
+            encoding="utf-8")
+        out = Path(td) / "r.json"
+        env = dict(os.environ, TZ=_TZ_SHIFTED, PYTHONPATH=str(_ROOT),
+                   PYTHONIOENCODING="utf-8")
+        p = subprocess.run(
+            [sys.executable, "-m", "log_ai_compressor", "run", str(src),
+             "-f", "json", "-o", str(out)],
+            cwd=str(_ROOT), env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300)
+        assert p.returncode == 0, "跑单行样例失败：%s" % p.stderr[-400:]
+        # Web 接口的形状由 service.result_to_dict 决定；这里直接验那一条规则
+        check = (
+            "import json,sys;"
+            "sys.path.insert(0, %r);"
+            "from log_ai_compressor import service as S;"
+            "from log_ai_compressor.core.pipeline import analyze_text;"
+            "log=open(%r,encoding='utf-8').read();"
+            "print(S.result_to_dict(analyze_text(log))['stats']['time_range_text'])"
+            % (str(_ROOT), str(src))
+        )
+        q = subprocess.run([sys.executable, "-c", check], cwd=str(_ROOT), env=env,
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300)
+        assert q.returncode == 0, "跑 service 校验失败：%s" % q.stderr[-400:]
+        shown = q.stdout.strip()
+    assert shown == "2024-03-15 08:00:00 ~ 2024-03-15 08:00:00", (
+        "Web 的时间范围是 %r —— 应当与 md/JSON 同一口径（UTC）" % shown)
 
 
 def test_malformed_timestamps_still_do_not_crash():
