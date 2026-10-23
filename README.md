@@ -407,6 +407,20 @@ curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.hu
 （`com.everythingmeetsai/archive`）—— 所以那个 3 是「查到了」，
 不是「这个接口只会回 0」。
 
+**2026-10-23 再查一次**（接口的响应形状变了，所以单独记一段）：同一个查询现在
+返回 `metadata.count = 11` —— **同一个登记名下挂着 11 个版本**（2.11.2 … 2.12.6）。
+两个字段的位置也变了：`count` 从顶层挪进了 `metadata`，版本号在
+`servers[].server.version`（不再是顶层 `version`，`isLatest` 这个字段也没了）。
+**2.12.6 在册** —— 判据仍是「全名 + 版本」双重精确匹配，
+与 [`publish-mcp.yml`](https://github.com/hu-chenyu/log-ai-compressor/blob/main/.github/workflows/publish-mcp.yml)
+里的回查代码用的是同一套字段。
+
+> 一件今天才看清的事：Registry 上**每个发过的版本都留着条目**，
+> 而 PyPI 上按「只留最新版本」只留最新版
+> ⇒ **Registry 里查得到某个版本，不等于
+> `pip install log-ai-compressor==那个版本` 还能装上。**
+> 复核「能不能装上」请直接查 PyPI。
+
 > 「只看前 N 个版本会得出相反结论」这件事已经踩过两次：响应里**第一条通常是
 > 旧版本**，而「找出新登记的那个」这个任务本身要求的恰恰是最后一条。
 > 只读前 4000 字符时看到的是 `2.11.2`，照那个写就是错的。
