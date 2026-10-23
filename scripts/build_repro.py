@@ -37,10 +37,30 @@
 而这一版的门禁（词表扫描 + 产物自带 SAST）原理上查不到这一类。
 
 修法是**换掉构建的输入**：不是「工作区」，而是「已提交的树」。
-``git archive`` 导出的是 blob 的内容 —— 未入库/被忽略的文件根本不在里面；
-而且它按 ``.gitattributes`` 做行尾归一 ⇒ 同一份源码在任何机器上导出成同样的
-字节（工作区里 ``LICENSE`` 在 Windows 检出后是 CRLF、在 Linux 上是 LF，
-产物因此**随机器变**）。
+``git archive`` 导出的是 blob 的内容 —— 未入库/被忽略的文件根本不在里面。
+
+但「换掉输入」只解决了一半
+--------------------------
+2026-10-24 第十二轮外部复核实测：同一个 tag ``v2.12.7``，在
+``core.autocrlf=true`` 的机器上导出的是 29a9f8bf…（= PyPI 上那份），
+在 ``core.autocrlf=false`` 的机器上导出的是 c3001fed… —— **同一份源码，
+两份字节**，差的是 ``.gitignore`` 与 ``.gitattributes`` 两个文件。
+
+机制：``git archive`` 对**没有 eol 规则**的文本文件按 ``core.autocrlf`` 转换，
+而那是**构建机的配置**，不是源码的。上一版补 ``.gitattributes`` 时按**扩展名**
+补（``*.json`` / ``*.csv`` / ``*.in`` / ``LICENSE``），漏的正是**无扩展名**的那几个
+—— 而它们恰恰会进产物（``.gitignore`` 与 ``.gitattributes`` 由 MANIFEST.in 收进
+sdist，``py.typed`` 是包数据）。
+
+⇒ 所以这一版做两件事：
+  1. 导出时**强制** git 配置（见 ``_ARCHIVE_CONFIG_LF``），让结果只由
+     ``.gitattributes`` 决定；
+  2. 构建前**自证**：两种配置各导一次，必须逐字节相同，否则**直接停下**
+     并点名是哪几个文件（见 :func:`assert_config_independent`）。
+
+而「每个进产物的文本文件都有 eol 规则」这条判据，由
+``tests/test_build_snapshot.py`` **逐个跟踪文件**核对（不是核对一份写死的
+扩展名清单 —— 写死的清单必然漏，这正是它上一版漏掉三个文件的原因）。
 """
 from __future__ import annotations
 
@@ -72,6 +92,23 @@ for _stream in (sys.stdout, sys.stderr):
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
+
+#: 导出快照时**强制**的 git 配置。
+#:
+#: 为什么不能让它跟着构建机走：``git archive`` 对**没有 eol 规则**的文本文件
+#: 会按 ``core.autocrlf`` 转换，而那是**构建机的配置**（Windows 默认 true、
+#: Linux 默认 false）。2026-10-24 第十二轮外部复核实测：同一个 tag
+#: ``v2.12.7``，``autocrlf=true`` 导出 29a9f8bf…（= PyPI），
+#: ``autocrlf=false`` 导出 c3001fed… —— 同一份源码在两种机器上导出成
+#: **不同字节**的 sdist。
+#:
+#: ⇒ 导出结果只由 ``.gitattributes`` 决定：那份文件里**每个进产物的文本文件
+#: 都有 eol 规则**（由 ``tests/test_build_snapshot.py`` 逐个跟踪文件核对）。
+_ARCHIVE_CONFIG_LF = ("core.autocrlf=false", "core.eol=lf")
+
+#: 对照组：反过来强制成 CRLF。两组导出必须**逐字节相同** ——
+#: 那才说明产物与构建机的配置无关（见 :func:`assert_config_independent`）。
+_ARCHIVE_CONFIG_CRLF = ("core.autocrlf=true", "core.eol=crlf")
 
 
 def git_exe() -> str:
@@ -179,7 +216,8 @@ def _extract_archive(archive: tarfile.TarFile, dest: Path) -> None:
             out.write(fh.read())
 
 
-def snapshot_into(dest: Path, ref: str = "HEAD") -> Path:
+def snapshot_into(dest: Path, ref: str = "HEAD",
+                  config: tuple[str, ...] = _ARCHIVE_CONFIG_LF) -> Path:
     """把**已提交的树**导出成一份干净快照，构建在它里面跑。
 
     为什么必须是快照而不是工作区
@@ -188,23 +226,88 @@ def snapshot_into(dest: Path, ref: str = "HEAD") -> Path:
     的绝对路径），因为 ``MANIFEST.in`` 收了 ``examples/*``、``.gitignore`` 又把
     它们挡住（于是 ``git status`` 里看不见）、而构建在工作区里跑。
 
-    ``git archive`` 导出的是 blob 的内容：未入库/被忽略的文件根本不在里面，
-    而且它按 ``.gitattributes`` 归一行尾 ⇒ 同一份源码在任何机器上导出成
-    同样的字节。
+    ``git archive`` 导出的是 blob 的内容：未入库/被忽略的文件根本不在里面。
+
+    为什么必须**强制** git 配置
+    --------------------------
+    ``git archive`` 对**没有 eol 规则**的文本文件按 ``core.autocrlf`` 转换 ——
+    而 ``core.autocrlf`` 是**构建机的配置**（Windows 上默认 true、Linux 上默认
+    false）。2026-10-24 第十二轮外部复核实测：同一个 tag ``v2.12.7``，
+    ``autocrlf=true`` 导出的是 29a9f8bf…（= PyPI），``autocrlf=false`` 导出的是
+    c3001fed… —— 同一份源码在两种机器上导出成**不同字节**的 sdist，
+    差的正是 ``.gitignore`` 与 ``.gitattributes``（它们没有 eol 规则）。
+
+    ⇒ 这里把配置**钉死**（LF），让导出结果只由 ``.gitattributes`` 决定；
+    而「每个进产物的文本文件都有 eol 规则」这条判据由
+    ``tests/test_build_snapshot.py`` 钉住。两件事合起来，产物才与构建机无关。
     """
     dest.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        [git_exe(), "archive", "--format=tar", ref],
-        cwd=ROOT, capture_output=True, check=True,
-    )
+    cmd = [git_exe()]
+    for item in config:
+        cmd += ["-c", item]
+    cmd += ["archive", "--format=tar", ref]
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, check=True)
     with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r") as tf:
         _extract_archive(tf, dest)
     return dest
 
 
+def export_bytes(ref: str = "HEAD",
+                 config: tuple[str, ...] = _ARCHIVE_CONFIG_LF) -> dict[str, bytes]:
+    """导出快照并返回「相对路径 → 字节」，不落盘。"""
+    cmd = [git_exe()]
+    for item in config:
+        cmd += ["-c", item]
+    cmd += ["archive", "--format=tar", ref]
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, check=True)
+    out: dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r") as tf:
+        for m in tf.getmembers():
+            if not m.isfile():
+                continue
+            fh = tf.extractfile(m)
+            if fh is not None:
+                out[m.name] = fh.read()
+    return out
+
+
+def assert_config_independent(ref: str = "HEAD") -> list[str]:
+    """两次导出（LF 配置 / CRLF 配置）必须**逐字节相同**。
+
+    为什么要有这一步：产物是从快照构建的，而快照的字节由 ``git archive``
+    决定 —— 它对**没有 eol 规则**的文本文件会看 ``core.autocrlf``。
+    那个配置是**构建机的**，不是源码的 ⇒ 同一份源码在两台机器上会产出
+    两份不同的字节，而「三方 sha256 对账」只在那台机器上成立。
+
+    ⇒ 与其等外部复核再撞上一次，不如**构建时自证**：两种配置各导一次，
+    不一样就**直接停下**，并点名是哪几个文件。
+
+    返回的是不相同的文件清单（空 = 无关）。
+    """
+    lf = export_bytes(ref, _ARCHIVE_CONFIG_LF)
+    crlf = export_bytes(ref, _ARCHIVE_CONFIG_CRLF)
+    diff = sorted(k for k in set(lf) | set(crlf) if lf.get(k) != crlf.get(k))
+    if diff:
+        print("**导出结果与构建机的 git 配置有关** —— 产物会随机器变：", file=sys.stderr)
+        for name in diff[:20]:
+            a, b = lf.get(name, b""), crlf.get(name, b"")
+            print("   %s（LF %d 字节 / CRLF %d 字节）" % (name, len(a), len(b)),
+                  file=sys.stderr)
+        if len(diff) > 20:
+            print("   …… 还有 %d 个" % (len(diff) - 20), file=sys.stderr)
+        print("⇒ 给这些文件补一条 eol 规则（.gitattributes），再构建。",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return diff
+
+
 def build(outdir: Path, ref: str = "HEAD") -> list[Path]:
     epoch = last_commit_epoch(ref)
     env = dict(os.environ, SOURCE_DATE_EPOCH=str(epoch), PYTHONHASHSEED="0")
+    # **先自证**：这份源码导出的快照与构建机的 git 配置无关。
+    # 不然就是在造一份「只在这台机器上对得上」的产物 ——
+    # 而「本地/PyPI/GitHub 三方 sha256 对账」那句话正是这么写的。
+    assert_config_independent(ref)
     # 整秒取整：某些文件系统只存整秒的 mtime，而写文件发生在 started 之后，
     # 整秒比较在粗/细两种时间精度下都成立（细精度下 mtime 是小数，也 ≥ 整秒）。
     started = int(time.time())
