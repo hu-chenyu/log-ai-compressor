@@ -261,6 +261,38 @@ UTC 机器与 UTC+8 机器上得到**不同的 epoch**；而 epoch 会进 `stats
 原来用 `time.mktime`（本地时区）⇒ 改成 `calendar.timegm`。
 这两处原来都**只在 UTC+8 机器上成立** —— 与本轮修的是同一个族。
 
+### CI 的一次红：GitHub API 的 502，与本轮改动无关
+
+run 55 里 **ubuntu-3.11 那一格红了**，另外三格（mutation / ubuntu-3.12 /
+windows-3.12）全绿。失败的是：
+
+```
+tests/test_audit_wording_script.py::test_word_planted_only_in_history_is_found
+审计脚本不该以 2 退出：读不到 Release 列表
+（https://api.github.com/repos/hu-chenyu/log-ai-compressor/releases?per_page=100）：
+<HTTPError 502: 'Bad Gateway'>
+```
+
+那条用例会起审计脚本去拉 GitHub 的 **Release 列表**（措辞门禁的「面 6」），
+而 GitHub API 那一刻返回了 502 ⇒ 脚本以 2 退出 ⇒ 用例红。
+
+**为什么判定它是外部偶发、不是本轮改动**：
+
+1. run 54 是**同一份代码、同一批测试**，四格全绿；
+2. 失败信息里的 HTTP 状态码是 **502 Bad Gateway**（网关错误），
+   不是断言不符；
+3. 本机当场重拉那个 Release 列表：**成功**（拿到 1 个 Release）；
+4. 本地那一轮全量 pytest（1764 passed / 1 skipped）**含这条用例**，它过了。
+
+⇒ 这是「门禁依赖外部网络」的固有脆弱点：**GitHub API 抖一下，CI 就红**，
+而红的原因与被守的东西毫无关系。
+
+> 这一条**留作已知问题**，本轮**不**顺手改它 ——
+> 「门禁该不该依赖外部网络」是个设计决策（要讨论「网络不可达时怎么判」，
+> 而不只是「跳过还是失败」），不该在收尾时夹带。
+> 但它该被记下来：下一个看到 CI 偶发红的人，
+> 应当先看是不是这条，而不是怀疑自己的代码。
+
 ### 覆盖率那个数：变量终于被分离干净了
 
 上一节说「本地数不能用来填那个位置」，但**到底是哪个变量在动**当时没查清。
