@@ -702,6 +702,37 @@ def test_the_real_readme_detail_matches_a_real_coverage_run(tmp_path):
         assert int(m.group(1)) > 0, f"{attr} 为 0"
 
 
+def test_every_statement_count_in_the_docs_is_the_same_number():
+    """文档里**每一处**「N 语句」都必须是同一个数。
+
+    为什么要有这条：CI 那段对账用的是 ``re.search`` —— 它只找**第一处**
+    「漏行 N / M 语句」。所以同一份文档里**第二处**写错，它原理上看不见。
+
+    实测（2026-10-24 第十二轮外部复核抓到的）：README 同一段里「4,298」
+    出现两次、「4,279」出现一次 —— 而 4,279 是**旧值**
+    （用 coverage 自己的配置重算，语句数是 4,298）。
+    指标表那一行是对的、下一段的解释是旧的，而**全部门禁绿着**：
+    没有一处看第二处。
+
+    ⇒ 这条把「同一份文档里同一个量只能有一个值」变成判据。
+    真正的「这个数对不对」由 CI 那段对账（拿实测值比）负责 ——
+    这里是补上它看不见的那一半。
+
+    **改坏会红吗**：把 README 里那处「4,298 语句」改成别的数，本条立刻红。
+    """
+    canonical = _readme_detail(ROOT / "README.md")[0]
+    for name in ("README.md", "AGENTS.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        found = {int(m.group(1).replace(",", ""))
+                 for m in re.finditer(r"([\d,]+)\s*语句", text)}
+        assert found, f"{name} 里一处「N 语句」都没有 —— 判据没生效，检查它"
+        wrong = sorted(v for v in found if v != canonical)
+        assert not wrong, (
+            "%s 里的语句数 %s 与指标表里的 %d 不一致 —— "
+            "同一个量在一份文档里只能有一个值（CI 那段对账只查第一处，"
+            "看不见后面这些）" % (name, wrong, canonical))
+
+
 @pytest.mark.parametrize("os_name,py_ver", [
     ("windows-latest", "3.12"),
     ("ubuntu-latest", "3.11"),
