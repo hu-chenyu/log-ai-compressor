@@ -47,13 +47,26 @@ recursive-include scripts *.py
 recursive-include docs *.md *.jpg *.png *.svg *.json *.csv
 recursive-include examples *.log *.md *.json
 
+# .github/ 与 .gitignore 也要进 sdist（2026-10-23 第十一轮外部复核后）
+# ---------------------------------------------------------------------------
+# 此前 `prune .github` 把它们排在外面，于是**从源码交付里跑 pytest 会硬红
+# 80 多条**：tests/test_ci_gate_wiring.py、tests/test_publish_mcp_workflow.py
+# 等直接读 `.github/workflows/*.yml`，而 tests/test_gitignore_report_artifacts.py
+# 读 `.gitignore`。
+#
+# 而本文件开头写的承诺是「拿到它的人应该能跑测试」—— 承诺在，交付不跟，
+# 那就是一句空话。CI 配置是纯文本，几 KB，收进来没有代价；
+# `.gitignore` 更该收：它说明了「哪些生成物不进版本库」，正是
+# 交付方需要知道的事。
+include .gitignore
+recursive-include .github *.yml
+
 # 运行时资源（wheel 由 [tool.setuptools.package-data] 负责，
 # 这里列出是为了 sdist 里也有，万一 package-data 规则变动不会连带失效）
 recursive-include log_ai_compressor/rules/presets *.yaml
 recursive-include log_ai_compressor/web/static *.html *.css *.js
 
 prune data
-prune .github
 
 global-exclude *.py[cod]
 global-exclude __pycache__/*
