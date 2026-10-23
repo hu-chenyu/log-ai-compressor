@@ -36,6 +36,8 @@ helper 起进程，字面量抓不到）。
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -84,6 +86,46 @@ def test_the_gate_names_nothing_when_nothing_failed():
     """对照组：没红的时候不许报模块（否则那条提示会变成噪音）。"""
     mod = _load_gate()
     assert mod.failing_modules("1 passed in 3.2s\n") == []
+
+
+def test_the_gate_really_names_the_module_when_the_sdist_tests_fail(tmp_path):
+    """**真跑一遍**：造一个必然红的 sdist，看门禁有没有点名是哪个模块。
+
+    为什么不能只测辅助函数：辅助函数对了、而**调用点**被拆掉（比如把
+    ``bad = failing_modules(...)`` 改成 ``bad = []``），上一条照样绿 ——
+    而门禁实际上已经不点名了。这正是变异记分卡逮住过的一次：
+    「**函数还在，但没人调它**」。
+
+    所以这里端到端跑一遍：造 sdist → 跑门禁 → 看它有没有点名。
+
+    **改坏会红吗**：把 ``scripts/check_sdist_runs_its_own_tests.py`` 里的
+    ``failing_modules(...)`` 调用去掉，本条立刻红。
+    """
+    import io
+    import tarfile
+
+    sdist = tmp_path / "log_ai_compressor-0.0.1.tar.gz"
+    top = "log_ai_compressor-0.0.1"
+    with tarfile.open(sdist, "w:gz") as t:
+        raw = b"def test_boom():\n    assert False, 'boom'\n"
+        info = tarfile.TarInfo("%s/tests/test_boom.py" % top)
+        info.size = len(raw)
+        t.addfile(info, io.BytesIO(raw))
+
+    script = _ROOT / "scripts" / "check_sdist_runs_its_own_tests.py"
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    proc = subprocess.run([sys.executable, str(script), "--sdist", str(sdist)],
+                          cwd=str(_ROOT), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=env, timeout=600)
+    assert proc.returncode == 1, (
+        "红的 sdist 居然过了门禁：\n%s" % (proc.stdout + proc.stderr)[-800:])
+    # 断的是**门禁自己那句话** —— 而不是「test_boom.py 这个字符串出现过」：
+    # pytest 自己的输出里就有它（FAILED tests/test_boom.py::…），
+    # 那样断的话「门禁没点名」也照样绿。
+    assert "红了的是这些模块" in proc.stdout, (
+        "门禁红了却没说清是哪个模块：\n%s" % proc.stdout[-800:])
+    assert "test_boom.py" in proc.stdout, (
+        "门禁点了名但没点对：\n%s" % proc.stdout[-800:])
 
 
 class _FakeItem:
