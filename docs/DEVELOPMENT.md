@@ -32,9 +32,9 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
 `ubuntu-3.12`（最常用版本，也是覆盖率与变异记分卡的**参考矩阵**）、
 `windows-3.12`（行尾 / shell / 路径处理与 unix 不同，且 `start.bat` 是
-Windows 一等入口）。**十一道门禁**：ruff → pytest + 覆盖率 ≥90% → 对抗性评分卡
+Windows 一等入口）。**十二道门禁**：ruff → pytest + 覆盖率 ≥90% → 对抗性评分卡
 → 确定性指纹 → 自证脚本 → 构建可复现性 → 变异存活率记分卡 →
-SAST → 依赖漏洞扫描 → 性能回归 → **产物审计**
+SAST → 依赖漏洞扫描 → 性能回归 → **产物审计** → **sdist 自测**
 （逐条见 [`AGENTS.md` §4](AGENTS.md)）。
 自证脚本内部已扩到 **11 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
 v2.8.1 再加「README 架构树必须列全包内模块」，v2.9.0 加「接入层只经 service

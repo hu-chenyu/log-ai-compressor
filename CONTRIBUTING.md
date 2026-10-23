@@ -81,7 +81,7 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 
 ## 5. 门禁
 
-CI 跑十一道，全部必须在本地先跑通（见 [`AGENTS.md` §4](AGENTS.md#4-ci-的十一道门禁)）。
+CI 跑十二道，全部必须在本地先跑通（见 [`AGENTS.md` §4](AGENTS.md#4-ci-的十二道门禁)）。
 最常用的三条：
 
 ```bash

@@ -121,7 +121,14 @@ jobs:
         # 每个文件都得在包里"这条承诺**在 CI 上从来没被验证过**。
         # 2.1.0 就是在这里漏掉 start.bat / 首图 / SKILL.md 的。
         # 先构建，再跑测试，那 5 条才会真正执行。
-        run: python -m build --sdist --wheel
+        #
+        # 用 build_repro.py 而不是 `python -m build`：2026-10-23 起构建的**输入**
+        # 是「已提交的树」（git archive 出的干净快照），不是工作区 ——
+        # 工作区里那些被 .gitignore 挡住的生成文件会被 MANIFEST 的
+        # `examples/*` 规则扫进 sdist（实测：已发布的 2.12.6 sdist 夹带了三个
+        # 从未入库、还带着构建机绝对路径的文件）。
+        # 统一用同一条构建路径，CI 审的产物才与发出去的产物**逐字节相同**。
+        run: python scripts/build_repro.py
 
       - name: Release artifact audit (content + self-consistency)
         # **仓库干净 ≠ 产物干净。** 2026-10-21 实测：措辞门禁在仓库上 0 命中，
@@ -149,6 +156,18 @@ jobs:
         # 只跑一个平台 —— 可复现性是构建器属性，与 OS 无关，三矩阵跑三遍纯属浪费。
         if: matrix.os == 'ubuntu-latest'
         run: python scripts/build_repro.py --verify
+
+      - name: The sdist can run its own test suite
+        # 第十二道门禁（2026-10-23 第十一轮外部复核后加）。
+        # MANIFEST.in 开头承诺「拿到它的人应该能跑测试」—— 实测从 PyPI 拿到的
+        # sdist 里跑 pytest 硬红 115 条（缺 .github/、.gitignore、.git 历史）。
+        # 承诺在、交付不跟，那是一句空话。
+        # 这一步把它变成可执行的判据：解包 sdist，在解包目录里跑它自己的测试。
+        #
+        # 只跑参考矩阵那一条：这一条量的是「交付物能不能自证」，
+        # 与 OS / Python 版本无关；而它要跑一遍全量测试，是最重的一道。
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: python scripts/check_sdist_runs_its_own_tests.py
 
       - name: Unit & integration tests with coverage
         # 措辞门禁的面 6 要拉 GitHub 的 Release 列表。**匿名的额度是每个 IP

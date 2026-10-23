@@ -117,6 +117,37 @@ log-ai-compressor verify --report r.json --json  # 机器可读
 东西」。把它俩混为一谈等于指控一个没发生的篡改。两者退出码都是 1，因为结论
 **确实已无法被核实** —— 返回 0 等于说「那份报告还成立」。
 
+### 证据摘要怎么算的 —— 让你能脱离本工具自己复核
+
+报告里每条结论都带一个 `digest`（那段原文的 sha256）。本工具承诺
+「用户可脱离本工具自校验」—— 那就得**说得出怎么算**：
+
+> **取报告里的行区间 `[line_start, line_end]` →
+> 逐行去掉行尾的 `\r\n` → 用 `\n` 连接 → 对这段 UTF-8 字节算 sha256。**
+
+举例（`examples/app.log` 的第 18~22 行）：
+
+```python
+import hashlib, pathlib
+raw = pathlib.Path("examples/app.log").read_bytes().splitlines(keepends=True)
+block = b"\n".join(ln.rstrip(b"\r\n") for ln in raw[17:22])
+print(hashlib.sha256(block).hexdigest())
+# 与报告里那条引用的 digest 相同
+```
+
+三条容易踩的：
+
+| 事项 | 规矩 |
+| --- | --- |
+| **按原始字节算** | 行里有 ANSI 转义序列时，摘要按**带转义**的原始字节算 —— 剥掉 ANSI 再算就对不上 |
+| **行尾不算进去** | 每行末尾的 `\r\n` / `\n` 都去掉，所以同一份日志在 LF 与 CRLF 两个平台上的摘要**相同** |
+| **多行区间用 `\n` 连接** | 不是把行首尾相接，也不是带换行 —— 行数变一个字符，摘要就变 |
+
+> 这一段此前**没有任何文档写过**：README、docs/CLI.md、docs/FAQ.md 只说
+> 「那段原文的 sha256」，没给算法。承诺本身是成立的（实测 4/4 条引用都能
+> 自己对上），但读者只能逆推 —— 而「可脱离本工具自校验」这句话的意思
+> 恰恰是「不用逆推」。现在由 `tests/test_evidence_digest_formula.py` 钉住。
+
 ## `web` / `mcp` / `ai`
 
 ```bash

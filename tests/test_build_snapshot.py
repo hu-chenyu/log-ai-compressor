@@ -27,12 +27,19 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "scripts" / "build_repro.py"
+
+#: git 的**绝对路径**。SAST（bandit B607）报的是「用部分路径启动进程」——
+#: 写死 "git" 会在 git 不在 PATH 时抛 FileNotFoundError，看不出是
+#: 「git 缺失」还是「测试跑错目录」。scripts/build_repro.py 里也是这么做的。
+_GIT = shutil.which("git") or "git"
 
 
 def _load():
@@ -44,8 +51,9 @@ def _load():
 
 
 def _git(*args: str) -> bytes:
-    proc = subprocess.run(["git", *args], cwd=str(_ROOT), capture_output=True,
-                          timeout=180)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    proc = subprocess.run([_GIT, *args], cwd=str(_ROOT), capture_output=True,
+                          env=env, timeout=180)
     return proc.stdout
 
 
