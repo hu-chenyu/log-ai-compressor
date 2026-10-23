@@ -252,6 +252,10 @@ MAX_TOTAL_INSTANCES = 50000             # 全局实例记录总数上限
 # 超出部分不静默丢弃，而是计入 ErrorCluster.cause_overflow —— 报告里如实写
 # 「另有 N 次的内层因未展开」。
 MAX_CAUSES_PER_CLUSTER = 32
+# 每簇最多记住多少个**关联键**（request_id / trace_id）。用于对比分析按
+# trace 对齐（core/comparator.py）：对齐只需要「有没有共同 trace」，
+# 上限只防内存无界 —— 记住更多并不让判定更准。
+MAX_CLUSTER_TRACE_IDS = 64
 # 报告/导出里最多列出前几种变体（cause_counts 仍全量保留）
 MAX_CAUSES_SHOWN = 8
 

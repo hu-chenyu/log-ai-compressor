@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from log_ai_compressor.core.analysis import cooccurring_clusters, simplify_stack
 from log_ai_compressor.core.clustering import extract_variable_distribution
 from log_ai_compressor.core.comparator import CompareResult, compare_files
+from log_ai_compressor.core.encoding import LogDecoder, detect_encoding_from_bytes
 from log_ai_compressor.core.evidence import (
     # `EvidenceRef as EvidenceRef` 是**显式再导出**：接入层只经 service 触达
     # 取证 API（v2.7.0 起 cli / mcp 都改成用 S.EvidenceRef）。写成同名别名
@@ -29,7 +30,12 @@ from log_ai_compressor.core.evidence import (
     verify_refs,
 )
 from log_ai_compressor.core.models import AnalysisResult, ErrorCluster
-from log_ai_compressor.core.pipeline import analyze_file, analyze_files, analyze_text
+from log_ai_compressor.core.pipeline import (
+    analyze_file,
+    analyze_files,
+    analyze_tail,
+    analyze_text,
+)
 from log_ai_compressor.core.redact import redact_text as _core_redact_text
 from log_ai_compressor.export.reporters import (
     SECTIONS_ALL,
@@ -251,6 +257,62 @@ def analyze(paths: Optional[Sequence[str]] = None,
     return analyze_files(cleaned, **_core_kwargs(cfg))
 
 
+def decode_log_bytes(raw: bytes) -> str:
+    """字节流 → 文本（接入层的管道入口用）。
+
+    为什么要门面层提供：接入层只经 service 触达 core（分层契约），
+    而「stdin 是字节流」这件事只有接入层知道。
+
+    解码规则与文件路径**完全一致**（同一个 core.encoding.LogDecoder）：
+    探测编码 → 逐行兜底（混合编码修复）→ BOM 剥离。
+    所以「管道进来的 GBK 日志」与「文件里的 GBK 日志」解出来一样，
+    不会出现「同一份日志，走管道就乱码」这种只因入口不同而变的结果。
+    """
+    if not raw:
+        return ""
+    enc = detect_encoding_from_bytes(raw[:262144])
+    decoder = LogDecoder(enc)
+    return "".join(decoder.decode_bytes(line)
+                   for line in raw.splitlines(keepends=True))
+
+
+def export_compare(results: List[CompareResult], fmt: str = "md") -> str:
+    """对比结果导出（md / json / txt）。
+
+    为什么要有 json：2026-10-21 第九轮外部复核实测 `compare` **不支持
+    `--format`**，只有 run 有 —— 对比报告是「发版前后有没有引入新错误」
+    这类问题的答案，而那个问题通常要接进 CI 脚本。只能出 Markdown
+    的话，脚本就得去解析表格。
+    """
+    key = (fmt or "md").lower()
+    if key in ("md", "markdown"):
+        return compare_to_markdown(results)
+    if key in ("json", "txt", "text"):
+        import json as _json
+        payload = {
+            "comparisons": [c.as_dict() for c in results],
+        }
+        text = _json.dumps(payload, ensure_ascii=False, indent=2)
+        return text if key == "json" else text
+    raise ServiceError(
+        f"不支持的对比导出格式 {fmt!r}，可用：{('md', 'json', 'txt')}")
+
+
+def analyze_tail_file(path: str, tail_lines: int,
+                      params: Optional[Dict[str, Any]] = None) -> AnalysisResult:
+    """只分析文件最后 tail_lines 行（`--tail N` 的门面入口）。
+
+    为什么单独一个入口：它不是「换个过滤条件」，而是**只读文件尾部**
+    —— 行号仍指向原文件（证据可复核），而耗时与全量分析无关。
+    """
+    cfg = normalize_params(params)
+    if tail_lines <= 0:
+        raise ServiceError(f"tail_lines 必须为正整数，收到 {tail_lines!r}")
+    if not os.path.isfile(path):
+        raise ServiceError(f"文件不存在：{path}")
+    return analyze_tail(path, tail_lines, **_core_kwargs(cfg))
+
+
 def compare(paths: Sequence[str], params: Optional[Dict[str, Any]] = None
             ) -> List[CompareResult]:
     """多文件对比（第一个为基准）。对比模式不跑智能标记，只做差异。"""
@@ -297,12 +359,19 @@ def _fnum(value: Optional[float]) -> Optional[float]:
 
 
 def _ts(value: Optional[float]) -> Optional[str]:
-    """epoch → 本地时间字符串（无时间戳则 None）。"""
+    """epoch → UTC 时间字符串（无时间戳则 None）。
+
+    **按 UTC 展示**（2026-10-22 第十轮修复）—— 与 `core/parser.py::_to_epoch`
+    的解释口径、以及 JSON 导出（`export/reporters.py::_iso_ts`）一致。
+    此前这里用本地时区渲染，于是同一份日志在 Web 界面上显示的钟点
+    随**看报告的人在哪台机器上**而变。
+    """
     if value is None or value <= 0:
         return None
     try:
-        from datetime import datetime
-        return datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(value, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S")
     except (ValueError, OSError, OverflowError):
         return None
 
@@ -564,6 +633,10 @@ def compare_to_dicts(results: List[CompareResult]) -> List[Dict[str, Any]]:
                 "summary": getattr(it, "summary", ""),
                 "level": getattr(it, "level", ""),
                 "count": getattr(it, "count", 0),
+                # 对齐依据（'template' / 'trace'）—— Agent 与人看到的是
+                # 同一份信息。缺了它，Agent 会把「按 trace 对上的同一件事」
+                # 当成「两边恰好长得像」，而那正是 compare 最容易被误读的地方。
+                "matched_by": getattr(it, "matched_by", ""),
             }
             for it in seq
         ]

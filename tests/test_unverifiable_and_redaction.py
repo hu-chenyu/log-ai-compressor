@@ -50,7 +50,12 @@ class TestUnreadableIsNotTampered:
         def _boom(*a, **kw):
             raise PermissionError("file is locked by another process")
 
-        monkeypatch.setattr(E, "open_text_stream", _boom)
+        # 接缝是**解码器**（core.encoding.LogDecoder），不是 open_text_stream：
+        # 回读路径已经改成与摄入共用同一个解码器（修复缺陷#2）。
+        # 若这里还去 patch open_text_stream，异常永远不触发，测试会**假绿** ——
+        # 它断言的是「读不到不被当成被改过」，而接缝错位后这条断言
+        # 根本走不到要验的那条分支。
+        monkeypatch.setattr(E, "LogDecoder", _boom)
         ref = E.EvidenceRef(evidence_id="x", source=str(p),
                             line_start=1, line_end=2, digest="deadbeef")
         report = E.verify_refs([ref])
@@ -117,7 +122,7 @@ class TestCliSurfacesUnreadable:
         def _boom(*a, **kw):
             raise PermissionError("file is locked by another process")
 
-        monkeypatch.setattr(E, "open_text_stream", _boom)
+        monkeypatch.setattr(E, "LogDecoder", _boom)
         rc = main(["verify", "--report", str(rep)])
         cap = capsys.readouterr()          # capsys 只认一次，两路一起取
         said = cap.out + cap.err

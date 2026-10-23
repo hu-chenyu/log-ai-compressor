@@ -29,6 +29,17 @@ class CompareItem:
     count_a: int = 0
     count_b: int = 0
     change_rate: Optional[float] = None   # (B-A)/A*100；A=0（新增）时为 None
+    # 本项是怎么对上的：'template'（消息模板相同）/ 'trace'（同一个
+    # trace_id，措辞不同）/ ''（新增或消失，没有对应项）。
+    #
+    # 为什么要有这个字段：同一个 trace 在两个文件里措辞不同（上游报
+    # "connection refused"、下游报 "upstream unavailable"）时，只按
+    # 消息模板匹配会把**同一次事故**算成「1 个新增 + 1 个消失」——
+    # 报告会让人以为出了新问题、同时又修好了老问题。看报告的人
+    # 分不清这两项其实是同一件事。标出对齐依据，人才判断得了。
+    matched_by: str = ""
+    # 按 trace 对齐时共同命中的关联键（给人看一眼是哪条 trace）
+    trace_ids: List[str] = field(default_factory=list)
 
     @property
     def change_text(self) -> str:
@@ -70,6 +81,8 @@ def _item_dict(i: CompareItem) -> dict:
         "level": i.level, "module": i.module, "summary": i.summary,
         "count_a": i.count_a, "count_b": i.count_b,
         "change_rate": i.change_rate,
+        "matched_by": i.matched_by,
+        "trace_ids": list(i.trace_ids),
     }
 
 
@@ -78,8 +91,32 @@ def _cluster_key(c: ErrorCluster) -> Tuple[str, str]:
     return (c.level, c.message_template or c.template)
 
 
+def _trace_index(clusters) -> Dict[str, List[ErrorCluster]]:
+    """关联键 → 出现过它的簇（一个 trace 可能横跨多个簇）。"""
+    idx: Dict[str, List[ErrorCluster]] = {}
+    for c in clusters:
+        for tid in (getattr(c, "trace_ids", None) or ()):
+            idx.setdefault(tid, []).append(c)
+    return idx
+
+
 def compare_results(base: AnalysisResult, other: AnalysisResult) -> CompareResult:
-    """对比两份管线结果。"""
+    """对比两份管线结果。
+
+    对齐分两级（2026-10-21 第九轮外部复核发现缺第二级）：
+
+    1. **消息模板**相同 → 直接配上（原有行为）；
+    2. **同一个 trace_id** → 兜底配上。
+
+    为什么需要第二级：同一次请求横跨多个服务时，各服务的措辞往往不同
+    （上游 "connection refused"、下游 "upstream unavailable"）。只按
+    模板匹配时，这一次事故会被算成「新增 1 种 + 消失 1 种」—— 报告读
+    起来像「出了新问题、同时修好了老问题」，而实际上是**同一件事**。
+    对一位拿着两份日志做版本对比的工程师，这个假象会直接把人带偏。
+
+    兜底的边界：只有**两边都没被模板匹配上**的簇才走 trace 兜底，
+    且一个簇只配一次（先到先得），避免把 trace 当万能钥匙乱连。
+    """
     a_map: Dict[Tuple[str, str], ErrorCluster] = {}
     for c in base.clusters:
         a_map.setdefault(_cluster_key(c), c)
@@ -92,25 +129,70 @@ def compare_results(base: AnalysisResult, other: AnalysisResult) -> CompareResul
         other_name=Path(other.stats.source).name,
     )
 
+    # 已配上的簇（用 id() 记）。
+    #
+    # 为什么用 id() 而不是簇对象：ErrorCluster 是 dataclass 且带 list 字段
+    # （instances / trace_ids / evidence）⇒ **不可哈希**，不能放进 set。
+    # 用 id() 是安全的：base.clusters / other.clusters 在整个 compare
+    # 期间都被 result 之外的对象持有着，簇不会被回收 ⇒ 地址不会被复用。
+    matched_a: set = set()
+    matched_b: set = set()
+
+    # ---- 第一级：消息模板相同 ------------------------------------------
     for key, bc in b_map.items():
         ac = a_map.get(key)
         if ac is None:
-            result.new_items.append(CompareItem(
-                template=bc.template, level=bc.level, module=bc.module,
-                summary=bc.summary, count_a=0, count_b=bc.count))
-        else:
-            change = (None if ac.count == 0
-                      else (bc.count - ac.count) / ac.count * 100.0)
-            result.common_items.append(CompareItem(
-                template=bc.template, level=bc.level, module=bc.module,
-                summary=bc.summary, count_a=ac.count, count_b=bc.count,
-                change_rate=change))
+            continue
+        change = (None if ac.count == 0
+                  else (bc.count - ac.count) / ac.count * 100.0)
+        result.common_items.append(CompareItem(
+            template=bc.template, level=bc.level, module=bc.module,
+            summary=bc.summary, count_a=ac.count, count_b=bc.count,
+            change_rate=change, matched_by="template"))
+        matched_a.add(id(ac))
+        matched_b.add(id(bc))
 
+    # ---- 第二级：同一个 trace_id 兜底 ----------------------------------
+    # 只处理**两边都没被模板匹配上**的簇。
+    a_traces = _trace_index(base.clusters)
+    b_traces = _trace_index(other.clusters)
+    for tid, b_clusters in sorted(b_traces.items()):
+        a_clusters = a_traces.get(tid)
+        if not a_clusters:
+            continue
+        for bc in b_clusters:
+            if id(bc) in matched_b:
+                continue
+            for ac in a_clusters:
+                if id(ac) in matched_a:
+                    continue
+                change = (None if ac.count == 0
+                          else (bc.count - ac.count) / ac.count * 100.0)
+                result.common_items.append(CompareItem(
+                    template=bc.template, level=bc.level,
+                    module=bc.module, summary=bc.summary,
+                    count_a=ac.count, count_b=bc.count,
+                    change_rate=change, matched_by="trace",
+                    trace_ids=[tid]))
+                matched_a.add(id(ac))
+                matched_b.add(id(bc))
+                break
+
+    # ---- 剩下的才是真新增 / 真消失 ------------------------------------
     for key, ac in a_map.items():
-        if key not in b_map:
-            result.gone_items.append(CompareItem(
-                template=ac.template, level=ac.level, module=ac.module,
-                summary=ac.summary, count_a=ac.count, count_b=0))
+        if id(ac) in matched_a:
+            continue
+        result.gone_items.append(CompareItem(
+            template=ac.template, level=ac.level, module=ac.module,
+            summary=ac.summary, count_a=ac.count, count_b=0,
+            matched_by=""))
+    for key, bc in b_map.items():
+        if id(bc) in matched_b:
+            continue
+        result.new_items.append(CompareItem(
+            template=bc.template, level=bc.level, module=bc.module,
+            summary=bc.summary, count_a=0, count_b=bc.count,
+            matched_by=""))
 
     # 排序：新增按 B 次数降序；消失按 A 次数降序；共同按变化幅度降序
     result.new_items.sort(key=lambda i: i.count_b, reverse=True)

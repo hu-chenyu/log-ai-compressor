@@ -195,6 +195,12 @@
     },
     {
       "test_id": "B404",
+      "path": "tests/test_ninth_round_fixes.py",
+      "count": 1,
+      "reason": "本文件要真的跑一遍 CLI **子进程**才能验「退出码 / stdout / stderr」这些子进程才有的行为（进程内调函数验不到退出码，也验不到stdout 是不是可解析的 JSON）。import subprocess 是这个测试的正当手段，不是被绕过的检查。"
+    },
+    {
+      "test_id": "B404",
       "path": "tests/test_no_job_wording.py",
       "count": 1,
       "reason": "复核过：这条门禁的主题就是「全历史里不出现那批措辞」—— 它必须真的去读 git 仓库（工作区文件、提交信息、历史版本内容），起子进程是它要测的东西本身。import 本身无法消除。"
@@ -216,6 +222,12 @@
       "path": "tests/test_subprocess_encoding_contract.py",
       "count": 1,
       "reason": "复核过：这条测试的主题就是子进程的输出编码契约，起子进程是它要测的东西本身。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_timezone_independence.py",
+      "count": 1,
+      "reason": "复核过：**换 TZ 只能在进程启动时做** —— `TZ` 只在进程初始化时被读一次，进程内改 os.environ 对已初始化的时区状态无效。所以「同一份日志在不同时区下指纹相同」这条断言**必须**起子进程才能验（进程内跑两次同一个进程，时区根本没变，那条断言就成了装饰）。import subprocess 是这个测试的正当手段，不是被绕过的检查。"
     },
     {
       "test_id": "B404",
@@ -297,6 +309,12 @@
     },
     {
       "test_id": "B603",
+      "path": "tests/test_ninth_round_fixes.py",
+      "count": 1,
+      "reason": "subprocess.run 的第一参数是 sys.executable —— 那是**当前解释器的绝对路径**（不是 PATH 查找），且 shell=False、无 shell 拼接。bandit 的 B603 是字面量启发式，看不见这一点；真要按名字启动外部程序才该用绝对路径，而这里启动的是自己。"
+    },
+    {
+      "test_id": "B603",
       "path": "tests/test_no_job_wording.py",
       "count": 4,
       "reason": "复核：四处都是列表传参 + shell=False，跑的是 `git`（shutil.which 解析出的绝对路径），参数是本文件的常量与 rev/blob 列表；新增的一处是面 4 反向测试里的临时仓库（init/add/commit/tag，路径是 pytest 的 tmp_path）。不接收任何外部输入作为命令行片段。"
@@ -318,6 +336,12 @@
       "path": "tests/test_subprocess_encoding_contract.py",
       "count": 3,
       "reason": "复核过：三处都是列表传参 + shell=False，跑的是已安装的 `log-ai-compressor` 控制台脚本。子进程编码契约就是这条测试的被测对象。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_timezone_independence.py",
+      "count": 8,
+      "reason": "复核过：八处都是列表传参 + shell=False，第一参数是 sys.executable —— 那是**当前解释器的绝对路径**（不是 PATH 查找），无 shell 拼接；参数是本测试的常量（仓库里的样例路径与两个固定的 TZ 值），不接收任何外部输入作为命令行片段。bandit 的 B603 是字面量启发式，看不见这一点。（2026-10-22 由 1 条增到 8 条：为了让这些断言在**任何时区**下都能抓住回归，子进程调用从 1 处增到 8 处 —— 原因见 CHANGELOG 第十一轮。）"
     },
     {
       "test_id": "B603",
@@ -354,6 +378,18 @@
       "path": "scripts/run_local_gates.py",
       "count": 2,
       "reason": "复核过：两处都是列表传参 + shell=False。一处跑门禁本身（argv 由 ci.yml 的 run 正文逐词拆出，外加两个固定的本地别名：python -> 当前解释器、ruff -> python -m ruff），另一处用 git credential fill 取 GitHub token —— **不打印、不落盘**（面 6 走匿名额度每 IP 每小时 60 次，连续自测很容易撞上限，那时门禁红的原因与仓库无关）。**不接收任何外部输入作为命令行片段。**"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_readme_sample_is_reproducible.py",
+      "count": 1,
+      "reason": "本文件要**真跑一次 CLI**才能验「README 首屏那段输出与仓库里的输入文件对得上」（行号区间/指纹/三个数逐条核对）—— 只读文本比不出「跑出来的结果对不对」。import 本身无法消除。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_readme_sample_is_reproducible.py",
+      "count": 1,
+      "reason": "复核过：只调用 `sys.executable`（绝对路径，不经 PATH 查找）跑 `-m log_ai_compressor`，**不开 shell**、参数是列表形式，唯一参数是测试自己创建的 tmp 文件路径 —— 没有注入面。"
     }
   ]
 }

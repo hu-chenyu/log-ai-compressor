@@ -33,6 +33,7 @@ from log_ai_compressor.constants import (
     CLUSTER_SIMILARITY_THRESHOLD,
     MAX_CLUSTER_INSTANCES_DETAILED,
     MAX_CLUSTER_INSTANCES_META,
+    MAX_CLUSTER_TRACE_IDS,
     MAX_SIMILARITY_COMPARE,
     MAX_TOTAL_INSTANCES,
 )
@@ -443,8 +444,8 @@ class ErrorClusterer:
             module=entry.module,
             summary=self._summarize(entry),
             count=0,
-            first_line=entry.line_no,
-            last_line=entry.last_line_no or entry.line_no,
+            first_line=entry.file_line_no or entry.line_no,
+            last_line=entry.file_last_line_no or entry.file_line_no or entry.line_no,
             first_seen=entry.timestamp,
             last_seen=entry.timestamp,
             sample=ClusterSample(entry=entry, before=list(before_lines or [])),
@@ -462,7 +463,8 @@ class ErrorClusterer:
                 ) -> Tuple[bool, Optional[ClusterInstance]]:
         """更新簇计数/时间/样例；返回 (是否更换了样例, 本次记录的实例)。"""
         cluster.count += 1
-        cluster.last_line = entry.last_line_no or entry.line_no
+        cluster.last_line = (entry.file_last_line_no or entry.file_line_no
+                             or entry.line_no)
         # 修复：无时间戳的条目**不得**抹掉簇已有的时间信息。此前无条件
         # 赋值 last_seen = entry.timestamp，混合日志（部分行带戳、部分行
         # 不带）里只要最后一条不带戳，整个簇的 last_seen 就变 None ——
@@ -480,6 +482,14 @@ class ErrorClusterer:
             replaced = True
         if not cluster.module and entry.module:
             cluster.module = entry.module
+        # 关联键（request_id / trace_id）流式记进簇：对比分析要靠它
+        # 把「同一次请求」在两个文件里的不同措辞对齐到同一项上
+        # （core/comparator.py）。摄入期就记 ⇒ 不依赖 analysis 层，
+        # 对比模式（analyze=False）也拿得到。
+        cid = entry.correlation_id
+        if cid and cid not in cluster.trace_ids:
+            if len(cluster.trace_ids) < MAX_CLUSTER_TRACE_IDS:
+                cluster.trace_ids.append(cid)
         return replaced, inst
 
     def _record_instance(self, cluster: ErrorCluster, entry: LogEntry,
@@ -507,8 +517,9 @@ class ErrorClusterer:
         detailed = len(insts) < MAX_CLUSTER_INSTANCES_DETAILED
         inst = ClusterInstance(
             timestamp=entry.timestamp,
-            line_no=entry.line_no,
-            last_line_no=entry.last_line_no or entry.line_no,
+            line_no=entry.file_line_no or entry.line_no,
+            last_line_no=(entry.file_last_line_no or entry.file_line_no
+                          or entry.line_no),
             summary=self._summarize(entry),
             entry=entry if detailed else None,
             before=list(before_lines or []) if detailed else [],

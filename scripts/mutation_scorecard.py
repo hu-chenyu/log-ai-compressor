@@ -339,6 +339,44 @@ MUTATIONS: List[Mutation] = [
         new="              c_valid = n_valid",
         tests=["tests/test_ci_step_execution.py"],
     ),
+    # ---- 「实测值」这个通道（2026-10-22 批9） ---------------------------
+    #
+    # 这一组守的是一条**元事故**：2026-10-22 我从 CI 的 annotation 里
+    # 读回「ubuntu-3.12 实测 96%」，**差点把它当成真值回填进 README** ——
+    # 而那个 96% 其实是**测试夹具里的假数**（真 CI 那一步压根没跑到对账段，
+    # 因为 pytest 一红就 `sys.exit(rc)` 了）。
+    Mutation(
+        id="measure/pytest-failure-skips-the-measurement",
+        why="pytest 一红就对账段提前退出 ⇒ 覆盖率**根本没被测**，"
+            "而外面只能看到一句「exit code 1」。"
+            "于是「实测覆盖率到底是多少」这个问题**再也问不出答案**，"
+            "只能去猜 —— 或者（更糟）去读测试夹具漏出来的假数",
+        target=".github/workflows/ci.yml",
+        old="          pytest_green = (rc == 0)",
+        new="          pytest_green = (rc == 0)\n          if rc:\n              sys.exit(rc)",
+        tests=["tests/test_ci_step_execution.py"],
+    ),
+    Mutation(
+        id="measure/matrix-name-hardcoded",
+        why="矩阵身份写死成「ubuntu-3.12」 ⇒ **3.11 那一格也自称 3.12**，"
+            "两格报出同一个数，读的人无从知道那个数是哪一格测的。"
+            "2026-10-22 实测：两条一模一样的 annotation 挂在两个 job 上",
+        target=".github/workflows/ci.yml",
+        old='          matrix_label = "${{ matrix.os }} ${{ matrix.python }}"',
+        new='          matrix_label = "ubuntu-3.12"',
+        tests=["tests/test_ci_step_execution.py"],
+    ),
+    Mutation(
+        id="measure/measurement-only-when-it-fails",
+        why="实测值只在**对账失败**时才报出来 ⇒ 「README 那个数现在对不对」"
+            "没法在**不失败**的情况下确认。job 日志端点要 actions:read scope，"
+            "普通 token 读不到 —— annotation 是唯一的通道",
+        target=".github/workflows/ci.yml",
+        old='              print(f"::notice title=覆盖率实测::{matrix_label} 实测覆盖率 {pct}%，"\n'
+            '                    f"漏行 {n_valid - n_cov} / {n_valid} 语句")',
+        new="              pass",
+        tests=["tests/test_ci_step_execution.py"],
+    ),
     # ---- Registry 发布工作流（v2.11.2 批7） ----------------------------
     Mutation(
         id="registry/oidc-permission-downgraded",
@@ -577,8 +615,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 57 条才是真该留下的。",
-        new="剩下 58 条才是真该留下的。",
+        old="剩下 63 条才是真该留下的。",
+        new="剩下 64 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
@@ -1272,6 +1310,377 @@ MUTATIONS: List[Mutation] = [
              " or \"coverage\" in name.lower():\n                continue\n"),
         tests=["tests/test_local_gate_runner_covers_ci.py"],
     ),
+    # ---- 第九轮外部复核的修复（2026-10-22 批） -------------------------
+    # 这一批的共同点：每一条都对应一个**真实被外部复核抓到的问题**，
+    # 或者一个**我自己引入又自己抓到的回归**。其中三条（回读路径、
+    # UTF-16、BOM）是「修 bug 2 时自己踩的坑」——
+    # 混合编码的逐行兜底让摄入与回读走了两条路，于是同一份没被改过的
+    # 文件被报成 TAMPERED（指控了一个没有发生的事）。
+    Mutation(
+        id="ninth/root-headline-uses-cluster-summary",
+        why="根因标题改回用**簇摘要**（外层症状）而不是链尾真因 —— "
+            "标题与簇的 reason 两处口径分叉，而标题那一处正是读者唯一会记住的",
+        target="log_ai_compressor/export/reporters.py",
+        old='    return f"{root_cause_name(top)[:120]}{others}"',
+        new='    return f"{top.summary[:120]}{others}"',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/root-headline-prefers-plain-cluster",
+        why="标题不再优先点名**有 Caused-by 链**的簇 —— 证据最硬的那个被换成了"
+            "「优先级最高但没有因果链」的那个",
+        target="log_ai_compressor/export/reporters.py",
+        old="    pool = with_chain or roots",
+        new="    pool = roots",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/mixed-encoding-fallback-removed",
+        why="混合编码的逐行兜底被去掉 —— GBK 行静默变成一堆 U+FFFD，"
+            "而报告里看不出任何异常（**数据被改了**）",
+        target="log_ai_compressor/core/encoding.py",
+        old=('        alt = self._try(raw, "gb18030")\n'
+            "            if alt is not None:\n"
+            "                self.repaired += 1\n"
+            "                return alt"),
+        new=("        alt = None\n"
+             "            if alt is not None:\n"
+             "                self.repaired += 1\n"
+             "                return alt"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/mixed-encoding-notice-removed",
+        why="混合编码的提示被去掉 —— 「报不出数」与「报数为 0」又分不开了，"
+            "读者以为这份日志是干净的",
+        target="log_ai_compressor/core/pipeline.py",
+        old="    if decoder.repaired:\n        notes.append",
+        new="    if False and decoder.repaired:\n        notes.append",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/readback-uses-whole-file-decode",
+        why="**回读改回「整文件单编码」** —— 摄入逐行兜底、回读整文件解，"
+            "同一份没被改过的文件算出两个摘要 ⇒ 误报 TAMPERED ⇒ "
+            "指控了一个没有发生的事（本轮自己引入、自己抓到的坑）",
+        target="log_ai_compressor/core/evidence.py",
+        old="        out = LogDecoder(enc).read_range(path, line_start, line_end)",
+        new=("        import log_ai_compressor.core.encoding as _E\n"
+             "        with _E.open_text_stream(path, enc) as _fh:\n"
+             "            out = []\n"
+             "            for _i, _l in enumerate(_fh, 1):\n"
+             "                if _i < line_start:\n"
+             "                    continue\n"
+             "                if _i > line_end:\n"
+             "                    break\n"
+             "                out.append(_l)"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/wide-encoding-disabled",
+        why="UTF-16/UTF-32 也按字节切行 —— 换行符本身是多字节的，"
+            "一个字符被劈成两半（实测：2 行变 3 行、行尾多一个 NUL、"
+            "出现 4 个 U+FFFD）",
+        target="log_ai_compressor/core/encoding.py",
+        old="        self._wide = is_wide_encoding(self.encoding)",
+        new="        self._wide = False",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/bom-strip-removed",
+        why="UTF-8 BOM 不再剥离 —— U+FEFF 留在首行文本里，"
+            "用户看到的第一行会多一个看不见的字符",
+        target="log_ai_compressor/core/encoding.py",
+        old=("                if line.startswith(_UTF8_BOM):\n"
+             "                    line = line[len(_UTF8_BOM):]"),
+        new=("                if False:\n"
+             "                    line = line[len(_UTF8_BOM):]"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/report-size-cap-removed",
+        why="超长字段不再截断 —— 5 MB 的单行让报告膨胀到 10 MB，"
+            "而报告是给人读的",
+        target="log_ai_compressor/export/reporters.py",
+        old="    if not isinstance(text, str) or len(text) <= MAX_SAMPLE_FIELD_CHARS:",
+        new="    if True:",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/binary-refusal-disabled",
+        why="二进制输入不再被拒绝 —— 拿 .bin 当日志喂进来会被「成功分析」一遍，"
+            "报告写着「压缩 95%」，退出码 0",
+        target="log_ai_compressor/cli.py",
+        old="    if stats.nul_lines:\n        return True",
+        new="    if False:\n        return True",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/output-error-swallowed",
+        why="写报告失败时不再转成人话错误 —— 栈回溯糊一屏，"
+            "而且是在「成功摘要」之后炸的，滚屏里两者混在一起",
+        target="log_ai_compressor/cli.py",
+        old=("    except OSError as exc:\n"
+             "        raise _OutputError(str(exc), output, code=exc.errno) from exc"),
+        new=("    except OSError as exc:\n"
+             "        raise RuntimeError(str(exc)) from exc"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/json-to-stdout-removed",
+        why="`-f json` 不带 `-o` 时 stdout 不再是 JSON —— "
+            "接 jq 直接失败，而 `-f json` 看上去像是生效了的",
+        target="log_ai_compressor/cli.py",
+        old=('    if args.output is None and fmt == "json":\n'
+             "        sys.stdout.write(content)"),
+        new=('    if False:\n'
+             "        sys.stdout.write(content)"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/json-fingerprint-removed",
+        why="JSON 报告里没有指纹 —— 机器侧没法核对「这两份 JSON 是不是同一份结论」",
+        target="log_ai_compressor/export/reporters.py",
+        old='        "fingerprint": result_fingerprint(result),',
+        new='        "fingerprint": "",',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/json-notice-removed",
+        why="JSON 报告里没有 notice —— 混合编码 / 只看尾部这些**限定了结论适用范围**"
+            "的话只写给人看的格式，机器侧拿到的结论看起来与全量分析一模一样",
+        target="log_ai_compressor/export/reporters.py",
+        old='        "notice": getattr(result, "notice", "") or "",',
+        new='        "notice": "",',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/compare-quiet-removed",
+        why="compare 不再认 --quiet —— 只有 run 认，argparse 直接退出码 2，"
+            "两个子命令的行为不一致",
+        target="log_ai_compressor/cli.py",
+        old='    p_cmp.add_argument("--quiet", "-q", action="store_true",',
+        new='    p_cmp.add_argument("--quiet-x", "-q", action="store_true",',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/compare-trace-alignment-removed",
+        why="compare 不再按 trace_id 兜底对齐 —— 同一次请求在两个文件里措辞不同"
+            "时被算成「新增 1 种 + 消失 1 种」，读起来像「出了新问题、"
+            "同时修好了老问题」",
+        target="log_ai_compressor/core/comparator.py",
+        old="    for tid, b_clusters in sorted(b_traces.items()):",
+        new="    for tid, b_clusters in sorted(b_traces.items()):\n        continue",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/compare-matched-by-hardcoded",
+        why="对齐依据恒写成「模板」—— 按 trace 对上的那一项看不出来了，"
+            "读的人无法判断「共同」到底是怎么对上的",
+        target="log_ai_compressor/core/comparator.py",
+        old='                    change_rate=change, matched_by="trace",',
+        new='                    change_rate=change, matched_by="template",',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/empty-file-notice-removed",
+        why="空文件不再明说「0 行」—— 空文件与「有日志但没定论」被混成同一句话",
+        target="log_ai_compressor/core/pipeline.py",
+        old="    if not stats.total_lines:\n        notes.append",
+        new="    if False:\n        notes.append",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/stdin-dispatch-removed",
+        why="`run -` 不再走 stdin —— 管道接不进来，"
+            "用户必须先落盘才能分析（日常排障的动线被切断）",
+        target="log_ai_compressor/cli.py",
+        old='    if args.file == "-":\n        return _run_stdin(args)',
+        new='    if False:\n        return _run_stdin(args)',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/json-evidence-removed",
+        why="JSON 报告里没有**证据充分性评估** —— 机器消费方拿到的结论"
+            "看不出它有多可信，会把一个 INSUFFICIENT 的结论当成定论用。"
+            "本项目的核心承诺「拿不出因果链就说证据不足」必须**也**"
+            "出现在机器读的出口上，否则承诺只对一半的读者成立",
+        target="log_ai_compressor/export/reporters.py",
+        old='        "evidence": _evidence_dict(result, full=full),',
+        new='        "evidence": {},',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/burst-window-first-claim-guard-removed",
+        why="「只有最早那个突发窗口能叫首发/源头」的守卫失效 —— "
+            "每个窗口都自称首发，读者会当成「全局最早的那个」，"
+            "于是追到了晚的那个错误上（2026-10-21 第九轮外部复核抓到）",
+        target="log_ai_compressor/core/analysis.py",
+        old="    burst_done = False\n",
+        new="    burst_done = True\n",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="ninth/compare-cluster-paired-twice",
+        why="trace 兜底**不记「基准簇已配上」** —— 同一个基准簇会被两个对比簇"
+            "同时配走，于是「消失」列表里留下一条其实配过了的错误。"
+            "（注：只去掉 `matched_b` 那一处守卫是**无效变异** —— 措辞不同的"
+            "两个文件里模板级配对一条也没成，matched_b 本来就是空的，"
+            "去掉它行为不变。这样的条目不进记分卡：一条杀不掉的变异"
+            "只会在表里占一行，让人误以为那里有检查。）",
+        target="log_ai_compressor/core/comparator.py",
+        old=("            for ac in a_clusters:\n"
+             "                if id(ac) in matched_a:\n"
+             "                    continue"),
+        new=("            for ac in a_clusters:\n"
+             "                if False:\n"
+             "                    continue"),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    # ---- 第十轮（2026-10-22 外部复核）--------------------------------
+    Mutation(
+        id="r10/tail-cluster-line-uses-global",
+        why="簇的展示行号改回用**全局** line_no —— 而证据引用用的是文件内号。"
+            "于是同一份报告里两套行号并存：尾部窗口的簇区间整体 +1，"
+            "还能越过文件末尾（100 行的文件报「行 101」）。"
+            "2026-10-22 外部复核实测；`verify` 只查证据那套，所以照样报 VERIFIED",
+        target="log_ai_compressor/core/clustering.py",
+        old='            first_line=entry.file_line_no or entry.line_no,\n            last_line=entry.file_last_line_no or entry.file_line_no or entry.line_no,',
+        new='            first_line=entry.line_no,\n            last_line=entry.last_line_no or entry.line_no,',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/tail-parser-ignores-file-line",
+        why="解析器不再收到文件内行号 —— 条目的行号就退回全局口径，"
+            "与上面那条同源（证据那侧仍是对的，于是两套行号并存）",
+        target="log_ai_compressor/core/pipeline.py",
+        old="                completed = parser.feed(line, line_no, file_line_no)",
+        new="                completed = parser.feed(line, line_no)",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/wide-encoding-tail-splits-by-bytes",
+        why="宽编码的尾部窗口改回按**字节**切行 —— utf-16 的换行符是多字节的"
+            "（`0A 00`），字符被劈成两半 ⇒ 切碎的半行解析不出级别 ⇒ "
+            "**全部错误静默丢失**（实测 5 行的 UTF-16 报「6 行、0 个错误、"
+            "未发现明确根因」，而退出码仍是 0）。"
+            "这正是 AGENTS.md §4c 明令禁止的那件事",
+        target="log_ai_compressor/core/encoding.py",
+        old="    if is_wide_encoding(encoding):",
+        new="    if False:",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/stdin-tail-silently-ignored",
+        why="`run - --tail N` 不再报错 ⇒ --tail 被**静默忽略**："
+            "用户以为在看最后 N 行、其实看了全部。值班时会误判"
+            "「最近几行里没有新错误」",
+        target="log_ai_compressor/cli.py",
+        old='    if getattr(args, "tail", 0):\n'
+            '        print("错误：--tail 不能与标准输入（`-`）一起用 —— "',
+        new='    if False:\n'
+            '        print("错误：--tail 不能与标准输入（`-`）一起用 —— "',
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/verify-skips-range-check",
+        why="`verify --report` 不再校验报告**展示出来**的行号区间 ⇒ "
+            "一份写着「行 2~101」而文件只有 100 行的报告照样报 VERIFIED。"
+            "「每条结论都能复核」这句话那时只对一半成立",
+        target="log_ai_compressor/cli.py",
+        old="        if first < 1 or last < first or last > total:",
+        new="        if False:",
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    Mutation(
+        id="r10/readme-sample-input-changed",
+        why="README 首屏那段示例所依赖的**输入文件**被改了 ⇒ "
+            "那段输出读者复现不出来（本项目最该能被复现的东西，"
+            "反而最不能）。2026-10-22 外部复核抓到：README 写「24 行」，"
+            "而 examples/ 里没有 24 行的那个文件；"
+            "新加的门禁 tests/test_readme_sample_is_reproducible.py "
+            "逐条核对行号区间 / 指纹 / 三个数",
+        target="examples/app.log",
+        old="2024-03-15 08:00:03 ERROR [auth] authorization failed: connection refused to db-primary:5432",
+        new="2024-03-15 08:00:03 ERROR [auth] authorization failed: connection refused to db-secondary:5432",
+        tests=["tests/test_readme_sample_is_reproducible.py"],
+    ),
+    Mutation(
+        id="ninth/tail-notice-removed",
+        why="`--tail` 不再说明「这次只看的是尾部」—— 报告覆盖的不是全量，"
+            "而读者以为它覆盖了全部",
+        target="log_ai_compressor/core/pipeline.py",
+        old='        note = (f"只看最后 {len(lines)} 行（文件共 {total:,} 行，"',
+        new=('        note = ("" if True else f"只看最后 {len(lines)} 行'
+             "（文件共 {total:,} 行，\""),
+        tests=["tests/test_ninth_round_fixes.py"],
+    ),
+    # ---- 第十一轮（2026-10-22 时区缺陷）----------------------------------
+    Mutation(
+        id="r11/naive-timestamp-localtime",
+        why="naive 时间戳改回按**本机本地时区**解释（`.timestamp()` 对 naive "
+            "datetime 就是这么做的）⇒ 同一份日志在 UTC 机器与 UTC+8 机器上"
+            "得到不同的 epoch ⇒ `stats.time_start` / `cluster.first_seen` "
+            "这些**在结论指纹里**的字段变了 ⇒ **同一份日志的指纹随时区变**。"
+            "2026-10-22 实测：examples/app.log 在本机（UTC+8）指纹 "
+            "32f71d7a…、在 CI 的 ubuntu runner（UTC）指纹 56df0a5f…。"
+            "README 首屏那段示例因此「在别人的机器上复现不出来」",
+        target="log_ai_compressor/core/parser.py",
+        old=("    if dt.tzinfo is None:\n"
+             "        # naive -> 按 UTC 解释（见上面的说明）\n"
+             "        dt = dt.replace(tzinfo=timezone.utc)\n"),
+        new=("    if dt.tzinfo is None:\n"
+             "        pass\n"),
+        tests=["tests/test_timezone_independence.py"],
+    ),
+    Mutation(
+        id="r11/explicit-tz-overridden",
+        why="**过度修正**：把带显式时区（`Z` / `+08:00`）的时间戳也一律"
+            "当成 UTC ⇒ `16:00+08:00` 被说成 `16:00Z`，整整差 8 小时，"
+            "而且方向与「当成本地时间」相反 —— 两种错都静默。"
+            "带时区的那个时刻是日志作者的**真实时刻**，不能被替换掉",
+        target="log_ai_compressor/core/parser.py",
+        old=("    if dt.tzinfo is None:\n"
+             "        # naive -> 按 UTC 解释（见上面的说明）\n"
+             "        dt = dt.replace(tzinfo=timezone.utc)\n"),
+        new=("    dt = dt.replace(tzinfo=timezone.utc)\n"),
+        tests=["tests/test_timezone_independence.py"],
+    ),
+    Mutation(
+        id="r11/display-localtime",
+        why="展示改回按**本地时区**渲染（`fromtimestamp` 不带 tz）⇒ "
+            "同一份日志的「时间范围」在不同机器上显示**不同的钟点**："
+            "本机（UTC+8）显示 00:00:00 ~ 00:00:25，CI（UTC）显示 "
+            "08:00:00 ~ 08:00:25。而 JSON 导出一直用 UTC ⇒ "
+            "**同一个工具的两条路径给出两个答案**",
+        target="log_ai_compressor/core/models.py",
+        old='    return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")',
+        new='    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")',
+        tests=["tests/test_timezone_independence.py"],
+    ),
+    Mutation(
+        id="r11/service-time-localtime",
+        why="Web 接口的时间文本改回按本地时区渲染 ⇒ 同一份日志在 Web 界面上"
+            "显示的钟点随**看报告的人在哪台机器上**而变",
+        target="log_ai_compressor/service.py",
+        old=("        return datetime.fromtimestamp(value, tz=timezone.utc).strftime(\n"
+             "            \"%Y-%m-%d %H:%M:%S\")"),
+        new=("        return datetime.fromtimestamp(value).strftime(\n"
+             "            \"%Y-%m-%d %H:%M:%S\")"),
+        tests=["tests/test_timezone_independence.py"],
+    ),
+    Mutation(
+        id="r11/tod-window-localtime",
+        why="每日时段窗口改回用 `time.localtime` 取「一天里的第几秒」⇒ "
+            "同一条 `--tod-start/--tod-end` 在 UTC 机器与 UTC+8 机器上"
+            "**选出不同的条目**。这与 tests/test_perf_gate.py 早就钉住的"
+            "「负载不得调用 localtime」是同一个洞的两半 —— 那条约定管住了"
+            "性能门禁的负载，漏在了主解析路径上",
+        target="log_ai_compressor/core/pipeline.py",
+        old="                lt = time.gmtime(ts)",
+        new="                lt = time.localtime(ts)",
+        tests=["tests/test_timezone_independence.py"],
+    ),
 ]
 
 
@@ -1326,11 +1735,60 @@ def _is_dirty(status_text: str, rel: str) -> bool:
     return False
 
 
+def _apply_mutation_bytes(raw: bytes, m: Mutation) -> bytes:
+    """把变异**施加**到原始字节上，返回施加后的字节。
+
+    为什么单独抽出来（2026-10-22 实测踩过）：本机 checkout 出来的
+    `.github/workflows/ci.yml` 是 **CRLF**（实测 427 处），而变异的锚点
+    按 **LF** 写。
+
+    * `_precondition` 用 `read_text()` —— Python 的通用换行转换把
+      `\r\n` 归一成了 `\n` ⇒ 锚点**找得到**；
+    * 施加变异时若用 `read_bytes().decode()` —— **不做**任何转换 ⇒
+      锚点**匹配不上** ⇒ `replace` 什么也没改 ⇒ **变异压根没被施加**
+      ⇒ 测试全绿 ⇒ 报出「**变异存活**」。
+
+    那个结论是**假的**：守卫没弱，是变异没落到被读的那份上。
+    实测：129 条里恰好 **6 条**存活，全是**多行锚点**（单行锚点不含换行，
+    不受影响）—— 症状与诊断完全吻合。
+
+    ⇒ **在原始字节上替换**（保住行尾），**但按文件的行尾换算锚点**。
+    ⇒ 匹配不到就**报错**，绝不悄悄施加一个「什么都没改」的变异。
+    """
+    if b"\r\n" in raw:
+        old_b = m.old.replace("\n", "\r\n").encode("utf-8")
+        new_b = m.new.replace("\n", "\r\n").encode("utf-8")
+    else:
+        old_b = m.old.encode("utf-8")
+        new_b = m.new.encode("utf-8")
+    if raw.count(old_b) == 0:
+        eol = "CRLF" if b"\r\n" in raw else "LF"
+        raise SystemExit(
+            f"[{m.id}] 锚点在 {m.target} 里匹配不到（已按行尾 "
+            f"{eol} 试过）—— 这会让变异**根本没被施加**，"
+            f"而结论却会显示成「变异存活」（假的）。\n"
+            f"  找不到：{m.old[:80]!r}")
+    return raw.replace(old_b, new_b, 1)
+
+
+def _read_for_mutation(p: Path) -> str:
+    """读目标文件用于**匹配锚点** —— 统一换行口径。
+
+    为什么必须统一（2026-10-22 实测踩过）：见 `_apply_mutation_bytes`
+    的注释 —— 「判锚点」与「施加锚点」若看到**不同的文本**，
+    一个说「锚点在」、另一个说「锚点不在」，
+    而后者的后果是**变异没被施加**，结论却是假的「存活」。
+
+    ⇒ 读、判、替换，**三处必须用同一个口径**。
+    """
+    return p.read_text(encoding="utf-8")
+
+
 def _precondition(m: Mutation, status_text: str = "") -> None:
     p = m.path()
     if not p.is_file():
         raise SystemExit(f"[{m.id}] 目标文件不存在：{m.target}")
-    hits = p.read_text(encoding="utf-8").count(m.old)
+    hits = _read_for_mutation(p).count(m.old)
     if hits == 0:
         dirty = ""
         if _is_dirty(status_text, m.target):
@@ -1397,8 +1855,9 @@ def scorecard(*, full: bool = False,
             p = m.path()
             if p not in originals:
                 originals[p] = p.read_bytes()          # 事先存下，不是事后读回
-            text = originals[p].decode("utf-8")
-            p.write_bytes(text.replace(m.old, m.new, 1).encode("utf-8"))
+            # 施加变异：**在原始字节上替换**（保住行尾），锚点按行尾换算 ——
+            # 详见 `_apply_mutation_bytes` 的注释（那是本轮的一次真事故）。
+            p.write_bytes(_apply_mutation_bytes(originals[p], m))
 
             t0 = time.monotonic()
             rc = _run_tests(m.tests, full)

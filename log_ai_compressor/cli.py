@@ -25,7 +25,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from log_ai_compressor import __version__
 from log_ai_compressor.constants import (
@@ -40,11 +40,15 @@ from log_ai_compressor.constants import (
 # （详见 scripts/prove.py 里 claim_layering 的注释）。门禁修好后它立刻变红，
 # 这才暴露出下面这几行。现在统一从 service 取，调用点一行都不用改。
 from log_ai_compressor.service import (
+    ServiceError,
     analyze_file,
     analyze_files,
+    analyze_tail_file,
+    analyze_text,
     brief_summary,
     compare_files,
-    compare_to_markdown,
+    decode_log_bytes,
+    export_compare,
     to_json,
     to_markdown,
     to_text,
@@ -56,8 +60,20 @@ _FORMAT_TABLE = {"md": to_markdown, "markdown": to_markdown,
                  "json": to_json, "txt": to_text, "text": to_text}
 _SUFFIX_FORMAT = {".md": "md", ".markdown": "md", ".json": "json",
                   ".txt": "txt", ".text": "txt"}
+# compare 支持的格式（比 run 少 html：对比报告没有 HTML 版）
+_COMPARE_FORMAT_TABLE = {"md": to_markdown, "markdown": to_markdown,
+                          "json": to_json, "txt": to_text, "text": to_text}
 
 EXIT_OK, EXIT_ERROR, EXIT_CANCELLED = 0, 1, 130
+
+#: 输入不是文本日志时的退出码（与「分析失败」区分开）。
+#:
+#: 为什么单独一个码：把 `.bin` / 图片当日志喂进来，工具**拒绝分析**是
+#: 正确行为（2026-10-21 第九轮外部复核实测：修复前它把纯二进制当文本
+#: 成功分析了一遍，还写下「压缩 95%」并退出码 0）。但「我拒绝分析一个
+#: 非日志文件」与「我分析失败」对调用方意义不同 —— 前者说明**文件选错了**，
+#: 后者说明**工具出问题了**。CI 里按码分流才用得上。
+EXIT_NOT_A_LOG = 2
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # run 子命令
     p_run = sub.add_parser("run", help="分析单个日志文件")
-    p_run.add_argument("file", help="日志文件路径")
+    p_run.add_argument("file", help="日志文件路径（`-` = 从标准输入读）")
     _add_filter_options(p_run)
     p_run.add_argument("-o", "--output", default=None,
                        help="输出报告路径（默认 <日志名>_report.md）")
@@ -105,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="跳过智能分析（根因/异常/优先级）")
     p_run.add_argument("--quiet", "-q", action="store_true",
                        help="抑制进度输出")
+    p_run.add_argument("--tail", type=int, default=0, metavar="N",
+                       help="只分析**最后 N 行**（0 = 全部）。"
+                            "排查「刚才发生了什么」时用：日志有 10 GB，"
+                            "但要看的是最后几千行")
     p_run.set_defaults(func=cmd_run)
 
     # compare 子命令
@@ -113,6 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_filter_options(p_cmp)
     p_cmp.add_argument("-o", "--output", default=None,
                        help="输出报告路径（默认 compare_report.md）")
+    p_cmp.add_argument("--format", "-f", default=None,
+                       choices=sorted(_COMPARE_FORMAT_TABLE),
+                       help="输出格式（默认按输出后缀推断，否则 md）")
+    p_cmp.add_argument("--quiet", "-q", action="store_true",
+                       help="抑制进度输出（与 run 一致）")
     p_cmp.set_defaults(func=cmd_compare)
 
     # rules 子命令
@@ -244,10 +269,88 @@ def _resolve_format(args) -> str:
     return "md"
 
 
+def _resolve_compare_format(args) -> str:
+    """compare 的格式（与 run 同一条规矩：显式指定优先，其次按后缀推断）。"""
+    if args.format:
+        return args.format
+    if args.output:
+        return _SUFFIX_FORMAT.get(Path(args.output).suffix.lower(), "md")
+    return "md"
+
+
 # ---------------------------------------------------------------------------
 # 子命令实现
 # ---------------------------------------------------------------------------
+def _is_binary_input(result) -> bool:
+    """这份输入**是不是**一份文本日志。
+
+    判据是「解码时读到了不该出现在文本里的东西」：
+    NUL 字节（只有二进制文件与 UTF-16 才有，而 UTF-16 已按宽编码单独处理），
+    或大量行按任何候选编码都解不出来。
+
+    为什么要有这个判断：2026-10-21 第九轮外部复核实测，纯二进制文件
+    （4 KB 随机字节）被当文本成功分析了一遍，报告里写着「压缩 95%」、
+    「未发现明确根因」，退出码 0 —— 用户完全看不出自己喂错了文件。
+    「报不出数」与「报数为 0」必须分得开，这里就是那条分界线。
+    """
+    stats = result.stats
+    if stats.nul_lines:
+        return True
+    if stats.total_lines and stats.undecodable_lines >= stats.total_lines:
+        return True
+    return False
+
+
+def _write_report(output: Path, content: str) -> None:
+    """把报告写到磁盘 —— **写不出去就说人话，不给 traceback**。
+
+    2026-10-21 第九轮外部复核实测：`-o no_such_dir/x.md` 会抛
+    FileNotFoundError，栈回溯直接糊在屏幕上，而用户真正需要的只是一句
+    「这个目录不存在」。更糟的是它**先打印了成功摘要再崩** ——
+    滚屏里「报告已导出」与栈回溯混在一起，人会以为报告写成功了。
+
+    刻意**不**自动创建父目录：`-o typo_dir/x.md` 里那个目录多半是
+    用户打错的名字。悄悄建一个同名目录出来，用户会以为报告存到了
+    预期位置，而那个目录是工具替他造的。报错让人自己确认。
+    """
+    try:
+        output.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        raise _OutputError(str(exc), output, code=exc.errno) from exc
+
+
+class _OutputError(Exception):
+    """报告写不出去（目录不存在 / 无权限 / 路径是目录…）。"""
+
+    def __init__(self, reason: str, target: Path, code=None):
+        self.reason = reason
+        self.target = target
+        self.errno = code
+        super().__init__(reason)
+
+    def human(self) -> str:
+        """人话版原因（不要 OSError 的元组 repr —— 一屏乱码没人看得懂）。"""
+        import errno
+        code = self.errno
+        if code == errno.ENOENT:
+            return "目录不存在（报告路径里的父目录还没建）"
+        if code in (errno.EACCES, errno.EPERM):
+            return "没有写入权限"
+        if code == errno.EISDIR:
+            return "这个路径是个目录，不是文件"
+        if code == errno.ENOTDIR:
+            return "路径里有段不是目录"
+        return self.reason
+
+
 def cmd_run(args) -> int:
+    # -- 接入管道：`-` 表示从 stdin 读。
+    #
+    # 为什么要这个：日常排障的动线是 `kubectl logs ... | lac run -`，
+    # 而此前必须先落盘 —— 让人手工 `> a.log` 再跑，多一步且容易
+    # 忘记自己刚才是从哪个时间段截的。
+    if args.file == "-":
+        return _run_stdin(args)
     path = Path(args.file)
     if not path.is_file():
         print(f"错误：日志文件不存在 {path}", file=sys.stderr)
@@ -255,17 +358,32 @@ def cmd_run(args) -> int:
 
     progress = _ConsoleProgress(enabled=not args.quiet)
     try:
-        result = analyze_file(
-            path,
-            levels=_parse_levels(args.level),
-            include=_parse_keywords(args.include),
-            exclude=_parse_keywords(args.exclude),
-            top_n=args.top,
-            context_lines=args.context,
-            rule=args.rule,
-            analyze=not args.no_analysis,
-            progress_cb=progress,
-        )
+        if getattr(args, "tail", 0):
+            result = analyze_tail_file(
+                str(path),
+                args.tail,
+                params={
+                    "levels": _parse_levels(args.level),
+                    "include": _parse_keywords(args.include),
+                    "exclude": _parse_keywords(args.exclude),
+                    "top_n": args.top,
+                    "context_lines": args.context,
+                    "rule": args.rule,
+                    "analyze": not args.no_analysis,
+                },
+            )
+        else:
+            result = analyze_file(
+                path,
+                levels=_parse_levels(args.level),
+                include=_parse_keywords(args.include),
+                exclude=_parse_keywords(args.exclude),
+                top_n=args.top,
+                context_lines=args.context,
+                rule=args.rule,
+                analyze=not args.no_analysis,
+                progress_cb=progress,
+            )
     except FileNotFoundError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -273,16 +391,112 @@ def cmd_run(args) -> int:
         # 自定义规则 YAML 写错是用户输入问题，给一句话而不是 traceback
         print(f"错误：解析规则有问题 —— {exc}", file=sys.stderr)
         return EXIT_ERROR
+    except ServiceError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    return _emit_result(result, args, source=str(path))
+
+
+def _run_stdin(args) -> int:
+    """从标准输入读日志（`-`）。
+
+    编码：stdin 是字节流，先按 BOM / 严格校验探测，再逐行兜底 ——
+    与文件路径走**同一个**解码器（core.encoding.LogDecoder），
+    所以「管道进来的 GBK 日志」和「文件里的 GBK 日志」解得一样。
+    """
+    # `--tail` 与 stdin **不能共存** —— 而且**必须报错，不能静默忽略**。
+    #
+    # 为什么不能支持：tail 的整个意义是「只看最后 N 行，而**行号仍指回
+    # 原文件**」—— 没有原文件就没有行号可指。管道进来的内容没有
+    # 「原文件第几行」这回事，报告里的行号只能是管道里的第几行，
+    # 那与 tail 承诺的语义是两回事。
+    #
+    # 2026-10-22 外部复核实测：静默忽略时，`--tail 5` 照分析了全部 20 行，
+    # 报告里**没有任何提示**，用户以为在看最后 5 行、其实在看全部 ——
+    # 值班场景下会误判「最近 5 行里没有新错误」。
+    if getattr(args, "tail", 0):
+        print("错误：--tail 不能与标准输入（`-`）一起用 —— "
+              "tail 的行号要指回原文件，而管道没有原文件。\n"
+              "      要看最后 N 行，请把日志落盘后用："
+              "log-ai-compressor run <文件> --tail N",
+              file=sys.stderr)
+        return EXIT_ERROR
+    raw = sys.stdin.buffer.read()
+    if not raw:
+        print("错误：标准输入是空的（没有读到任何日志）", file=sys.stderr)
+        return EXIT_ERROR
+    text = _decode_stdin(raw)
+    try:
+        result = analyze_text(
+            text,
+            source="<标准输入>",
+            levels=_parse_levels(args.level),
+            include=_parse_keywords(args.include),
+            exclude=_parse_keywords(args.exclude),
+            top_n=args.top,
+            context_lines=args.context,
+            rule=args.rule,
+            analyze=not args.no_analysis,
+        )
+    except RuleSetError as exc:
+        print(f"错误：解析规则有问题 —— {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return _emit_result(result, args, source="<标准输入>")
+
+
+def _decode_stdin(raw: bytes) -> str:
+    """stdin 字节 → 文本（探测编码 + 逐行兜底）。"""
+    return decode_log_bytes(raw)
+
+
+def _emit_result(result, args, source: str) -> int:
+    """把分析结果落到出口：报告文件 / stdout，并决定退出码。"""
+    # 二进制输入：明确拒绝，别把「分析了一个 .bin」说成成功。
+    if _is_binary_input(result):
+        s = result.stats
+        print(f"错误：{source} 不是文本日志"
+              f"（{s.nul_lines} 行含 NUL 字节、"
+              f"{s.undecodable_lines} 行无法解码）—— 已中止分析。"
+              f"请确认文件路径是否正确。", file=sys.stderr)
+        return EXIT_NOT_A_LOG
+
+    fmt = _resolve_format(args)
+    content = _FORMAT_TABLE[fmt](result, top_n=args.top)
+
+    # `-f json` 且没给 `-o`：**把 JSON 打到 stdout**。
+    #
+    # 为什么要这样：`-f json` 是「我要机器可读的输出」这个意思，而
+    # 没有 `-o` 时用户没有指定落盘位置 —— 那 stdout 就是那个位置。
+    # 修复前不管 `-f` 写什么都只打印人话摘要（2026-10-21 第九轮外部
+    # 复核实测：`run x.log -f json` 的 stdout 是中文摘要，管道接
+    # `jq` 直接失败，而 `-f json` 这个参数看上去像是生效了的）。
+    if args.output is None and fmt == "json":
+        sys.stdout.write(content)
+        sys.stdout.flush()
+        return EXIT_OK
+
+    if args.output is None and fmt in ("txt", "text"):
+        sys.stdout.write(content)
+        sys.stdout.flush()
+        return EXIT_OK
+
+    output = Path(args.output) if args.output else \
+        Path(source).with_name(f"{Path(source).stem}_report.{fmt}") \
+        if source != "<标准输入>" else Path(f"stdin_report.{fmt}")
+    # **先写报告，写成功了再打印摘要** —— 顺序反了的话，坏路径时
+    # 屏幕上先出现「【日志分析摘要】…」，紧接着才是报错，滚屏里两者
+    # 混在一起，人会以为分析成功了（2026-10-21 第九轮外部复核实测
+    # 到的正是这个：摘要先出，栈回溯后出）。
+    try:
+        _write_report(output, content)
+    except _OutputError as exc:
+        print(f"错误：报告写不出去 —— {exc.human()}（目标：{output}）",
+              file=sys.stderr)
+        return EXIT_ERROR
 
     # 摘要输出到 stdout（可直接管道组合）
     print(brief_summary(result, top_n=args.top))
-
-    # 报告落盘
-    output = Path(args.output) if args.output else \
-        path.with_name(f"{path.stem}_report.{_resolve_format(args)}")
-    fmt = _resolve_format(args)
-    content = _FORMAT_TABLE[fmt](result, top_n=args.top)
-    output.write_text(content, encoding="utf-8")
 
     size_kb = output.stat().st_size / 1024
     print(f"报告已导出: {output}（{fmt.upper()}，{size_kb:.1f} KB）")
@@ -319,10 +533,30 @@ def cmd_compare(args) -> int:
         print(f"错误：{exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    content = compare_to_markdown(results)
-    output = Path(args.output) if args.output else Path("compare_report.md")
-    output.write_text(content, encoding="utf-8")
-    print(f"对比报告已导出: {output}")
+    fmt = _resolve_compare_format(args)
+    content = export_compare(results, fmt)
+
+    # `-f json`（或 txt）且没给 `-o` → 输出到 stdout（与 run 同一条规矩）。
+    if args.output is None and fmt in ("json", "txt", "text"):
+        sys.stdout.write(content)
+        sys.stdout.flush()
+        return EXIT_OK
+
+    output = Path(args.output) if args.output else \
+        Path("compare_report.%s" % ("json" if fmt == "json" else "md"))
+    try:
+        _write_report(output, content)
+    except _OutputError as exc:
+        print(f"错误：对比报告写不出去 —— {exc}（目标：{output}）",
+              file=sys.stderr)
+        return EXIT_ERROR
+    if not args.quiet:
+        print(f"对比报告已导出: {output}")
+        for cmp in results:
+            print(f"  {cmp.base_name} vs {cmp.other_name}："
+                  f"新增 {len(cmp.new_items)} 种、"
+                  f"消失 {len(cmp.gone_items)} 种、"
+                  f"共同 {len(cmp.common_items)} 种")
     return EXIT_OK
 
 
@@ -424,6 +658,65 @@ def _verdict_exit(report: dict) -> int:
     return _VERDICT_EXIT.get(report.get("verdict"), ("", EXIT_ERROR))[1]
 
 
+def _check_display_ranges(clusters: List[dict]) -> List[dict]:
+    """查报告里**展示出来的行号区间**是否越界（源文件里没有那一行）。
+
+    为什么要有这一层：证据引用与簇的展示区间是**两处**行号
+    （证据那处由 `verify_refs` 逐条回读核对），而簇区间只是**印在报告里**
+    给读者看的。此前只有前者被校验，于是报告可以写着「第 101 行」而那个文件
+    只有 100 行 —— **引用照样 VERIFIED**，读的人照着去翻却什么也没有。
+    「每条结论都能复核」这句话那时只对一半成立。
+
+    2026-10-22 外部复核实测：`--tail 200` 的报告写着「起始行 1」却把区间
+    标成「行 2~101」，而文件只有 100 行，且 `verify` 报 VERIFIED。
+
+    **它不是「日志被改」** —— 那是 `TAMPERED` 的含义，而这里日志可能好得很。
+    所以这里只**单列**一条详情，不改 verdict、不改退出码：
+    指控一个没发生的事，比漏报更糟。
+
+    判据：区间必须落在**它自己那份证据引用的源文件**的行数内。
+    拿不到源文件行数（粘贴文本 / 源已删）就**不判** —— 验不了不是错。
+    """
+    problems: List[dict] = []
+    # 源文件 → 总行数（同一个文件只数一次）
+    line_counts: Dict[str, int] = {}
+    for c in clusters:
+        evs = c.get("evidence") or []
+        if not evs:
+            continue
+        source = evs[0].get("source") or ""
+        if not source or source.startswith("<"):
+            continue
+        if source not in line_counts:
+            path = Path(source)
+            if not path.is_file():
+                line_counts[source] = -1      # 源不可读 ⇒ 不判
+            else:
+                try:
+                    line_counts[source] = sum(
+                        1 for _ in path.open("rb"))
+                except OSError:
+                    line_counts[source] = -1
+        total = line_counts[source]
+        if total <= 0:
+            continue
+        first = int(c.get("first_line") or 0)
+        last = int(c.get("last_line") or 0)
+        if first <= 0 and last <= 0:
+            continue
+        if first < 1 or last < first or last > total:
+            problems.append({
+                "status": "RANGE_OUT_OF_FILE",
+                "source": source,
+                "first_line": first,
+                "last_line": last,
+                "file_lines": total,
+                "detail": ("报告写这个簇在第 %d~%d 行，而该文件只有 %d 行"
+                           % (first, last, total)),
+            })
+    return problems
+
+
 def cmd_verify(args) -> int:
     """证据自校验：把结论的出处拉回原始日志逐条核对。
 
@@ -444,6 +737,8 @@ def cmd_verify(args) -> int:
     refs: List = []
     fingerprint = ""
     source_label = ""
+    #: 报告里「簇的展示区间」是否越界（见 `_check_display_ranges`）。
+    range_problems: List[dict] = []
 
     if args.report:
         report_path = Path(args.report)
@@ -468,6 +763,7 @@ def cmd_verify(args) -> int:
                     # 字段则回退自动探测）
                     encoding=e.get("encoding", ""),
                     note=e.get("note", "")))
+        range_problems = _check_display_ranges(payload.get("clusters") or [])
         source_label = f"报告 {report_path.name}"
         if not refs:
             print(f"错误：{report_path} 里没有任何证据引用"
@@ -504,6 +800,10 @@ def cmd_verify(args) -> int:
     report["fingerprint"] = fingerprint
     report["source"] = source_label
     report["mode"] = "report" if args.report else "self-check"
+    if range_problems:
+        # **单列，不混进 verdict** —— 「报告写的行号越界」与「日志被改过」
+        # 是两件事（后者才是 TAMPERED）。混在一起会指控一个没发生的事。
+        report["range_problems"] = range_problems
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
@@ -523,6 +823,12 @@ def cmd_verify(args) -> int:
             print(f"  ✗ {d['status']} {d.get('evidence_id')} {d.get('source')}"
                   f" 期望 {d.get('expected', '-')} 实际 {d.get('actual', '-')}",
                   file=sys.stderr)
+    for rp in report.get("range_problems") or []:
+        # 措辞与 TAMPERED 刻意分开：这里说的是**报告的行号越界**，
+        # 不是「日志被改过」—— 指控一个没发生的事，比漏报更糟。
+        print(f"  ⚠ {rp['status']} {rp['source']} —— {rp['detail']}"
+                  f"（引用本身仍可复核；这是报告**标出来的区间**有问题）",
+              file=sys.stderr)
     print()
     print(f"自校验结论：{report['verdict']}")
     text, code = _VERDICT_EXIT.get(report["verdict"], ("", EXIT_ERROR))

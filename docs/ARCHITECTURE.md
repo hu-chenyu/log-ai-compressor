@@ -12,7 +12,7 @@ log_ai_compressor/
 │   └── presets/             #   generic / embedded / jenkins 三套模板
 ├── core/                    # 核心处理层（零 UI / 零 Web 依赖）
 │   ├── models.py            #   数据模型 + 自适应时间直方图
-│   ├── encoding.py          #   编码探测（BOM/严格解码验证/截断容忍）
+│   ├── encoding.py          #   编码探测 + 逐行解码（摄入与回读共用同一个 LogDecoder）
 │   ├── structured.py        #   结构化日志原生解析（JSON Lines / logfmt）
 │   ├── parser.py            #   增量解析器（多行聚合：折行/堆栈/Caused-by）
 │   ├── causal.py            #   Caused-by 因果链识别原语（摄入层与分析层共用）

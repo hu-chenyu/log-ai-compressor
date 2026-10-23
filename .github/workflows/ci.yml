@@ -195,8 +195,22 @@ jobs:
               "--cov-report=xml",
               "--cov-fail-under=90",
           ])
-          if rc:
-              sys.exit(rc)
+          # **pytest 红了也要把实测值报出来** —— 2026-10-22 实测踩过：
+          # 这一段原本在 pytest 之后 `sys.exit(rc)`，于是 pytest 一红，
+          # 覆盖率**根本没被测**，而外面只能看到一句「exit code 1」。
+          # 更糟的是：门禁的测试（tests/test_ci_step_execution.py）会把
+          # **这段正文抽出来在本地跑**，它打印的 `::error::` 行被 GitHub
+          # 当成了本 job 的 annotation —— 于是「实测 96%」这种数字，
+          # 观测到的其实是**测试夹具里的假数**，不是 ubuntu-3.12 的覆盖率。
+          #
+          # 「我读到 CI 说 96%」本身可能就是一次伪造观测。
+          # 所以：把对账挪到 pytest **之后但不中断**，
+          # 并且**任何情况下都把实测值打出来**（失败也打）。
+          pytest_green = (rc == 0)
+          if not pytest_green:
+              print("pytest 未全绿 —— 下面的覆盖率**对账**因此跳过"
+                    "（测试没过时测的是残缺的一遍，对账结论不可信）；"
+                    "但**实测值照样报出来**，供人参考")
 
           # --cov-fail-under 只卡**地板**（90%），三个矩阵都卡。
           # 但 README 工程指标表里写的是**精确值**，而覆盖率是**平台相关**的：
@@ -216,21 +230,49 @@ jobs:
           # 「README 的口径就是 ubuntu-3.12」的红，那是误导而不是门禁。
           is_ref = ("${{ matrix.os }}" == "ubuntu-latest"
                     and "${{ matrix.python }}" == "3.12")
+          # **矩阵身份必须现算，不能写死** ——
+          # 2026-10-22 实测踩过：这段正文被 tests/test_ci_step_execution.py
+          # 抽出来在本地跑，而消息里写死了「ubuntu-3.12 实测 X%」。
+          # 于是 3.11 那一格也打印「ubuntu-3.12 实测 96%」，
+          # 两条**一模一样的** annotation 出现在两个 job 上 ——
+          # 而那个 96% 其实是**测试夹具里的 line-rate**，
+          # 真 CI 这一格压根没跑到对账段（pytest 红了就退出了）。
+          #
+          # 「我读到 CI 说 96%」这件事本身可能就是一次伪造观测。
+          # 所以矩阵名用 ${{ matrix.os }} / ${{ matrix.python }} **当次求值**，
+          # 每格只报自己那一格的名字。
+          matrix_label = "${{ matrix.os }} ${{ matrix.python }}"
           cov = Path("coverage.xml")
           src = ""
+          pct = -1
+          n_valid = -1
+          n_cov = -1
           try:
               src = cov.read_text(encoding="utf-8")
               pct = round(float(re.search(
                   r'line-rate="([0-9.]+)"', src).group(1)) * 100)
+              n_valid = int(re.search(r'lines-valid="(\d+)"', src).group(1))
+              n_cov = int(re.search(r'lines-covered="(\d+)"', src).group(1))
           except (OSError, AttributeError, ValueError):
               print("解析 coverage.xml 失败：文件不存在或格式不对")
               if is_ref:
                   sys.exit(1)
               print("非参考矩阵，跳过判定")
-              pct = -1
           if pct >= 0:
-              print(f"[${{ matrix.os }} ${{ matrix.python }}] 实测覆盖率 {pct}%")
-          if pct >= 0 and is_ref:
+              print(f"[{matrix_label}] 实测覆盖率 {pct}%")
+              # **把实测明细无条件报出来**（`::notice::` 不影响退出码）。
+              #
+              # 为什么要有这一条：job 日志端点要 `actions:read` scope，
+              # 普通 token 读不到 —— 所以 annotation 是**唯一**能让外面
+              # 读到「实测值是多少」的通道。而这一段原先只在**对账失败**
+              # 时才说话，于是「实测值」既难读、又会与测试夹具漏出来的
+              # 假数混在一起（见上面那段注释）。
+              #
+              # 现在：每格都报自己那一格的实测值，带矩阵身份，
+              # 一次 CI 就能问出全部数字（百分比 + 漏行 + 语句数）。
+              print(f"::notice title=覆盖率实测::{matrix_label} 实测覆盖率 {pct}%，"
+                    f"漏行 {n_valid - n_cov} / {n_valid} 语句")
+          if pct >= 0 and is_ref and pytest_green:
               readme = Path("README.md").read_text(encoding="utf-8")
               claimed = re.search(r"覆盖率\s*\*\*(\d+)%\*\*", readme)
               if not claimed:
@@ -238,10 +280,22 @@ jobs:
                   sys.exit(1)
               if int(claimed.group(1)) != pct:
                   print(f"README 写覆盖率 {claimed.group(1)}%，"
-                        f"ubuntu-3.12 实测 {pct}% —— README 的覆盖率口径就是"
+                        f"{matrix_label} 实测 {pct}% —— README 的覆盖率口径就是"
                         f" ubuntu-3.12，二者必须相等")
+                  # `::error::` 会生成一条 **annotation** —— 它能被
+                  # `GET /repos/{owner}/{repo}/check-runs/{id}/annotations`
+                  # 读到，而 **job 日志读不到**（日志端点要 actions:read scope，
+                  # 匿名/普通 token 拿不到）。所以对账失败时**除了 stdout，
+                  # 再发一条 annotation** —— 否则「实测值是多少」只能靠人去
+                  # 翻网页日志，而那正是「没人校过的对外数字」的由来。
+                  #
+                  # 消息里**带上矩阵身份**：不然读的人无从知道这个数
+                  # 是哪一格测的（2026-10-22 实测：两格报出同一个数，
+                  # 而那个数来自测试夹具而不是 CI）。
+                  print(f"::error title=覆盖率对账失败::README 写 {claimed.group(1)}%，"
+                        f"{matrix_label} 实测 {pct}%")
                   sys.exit(1)
-              print(f"覆盖率对账通过：README 与 ubuntu-3.12 实测均为 {pct}%")
+              print(f"覆盖率对账通过：README 与 {matrix_label} 实测均为 {pct}%")
 
               # 「漏行 N / M 语句」这两个数**此前没有任何门禁校过**。
               # 上面那段只读 line-rate、比的是百分比，而 README 那一行同时
@@ -256,20 +310,30 @@ jobs:
                   print("README 里找不到「漏行 N / M 语句」，"
                         "本门禁无法对账（别让它静默通过）")
                   sys.exit(1)
-              try:
-                  n_valid = int(re.search(r'lines-valid="(\d+)"', src).group(1))
-                  n_cov = int(re.search(r'lines-covered="(\d+)"', src).group(1))
-              except (AttributeError, ValueError):
+              if n_valid < 0:
                   print("coverage.xml 里读不到 lines-valid / lines-covered")
                   sys.exit(1)
               c_missing = int(detail.group(1).replace(",", ""))
               c_valid = int(detail.group(2).replace(",", ""))
               if (c_valid, c_missing) != (n_valid, n_valid - n_cov):
                   print(f"README 写漏行 {c_missing} / {c_valid} 语句，"
-                        f"ubuntu-3.12 实测 {n_valid - n_cov} / {n_valid} —— "
+                        f"{matrix_label} 实测 {n_valid - n_cov} / {n_valid} —— "
                         f"口径同样是 ubuntu-3.12，二者必须相等")
+                  print(f"::error title=覆盖率明细对账失败::README 写漏行 {c_missing} / {c_valid} 语句，"
+                        f"{matrix_label} 实测 {n_valid - n_cov} / {n_valid}")
                   sys.exit(1)
               print(f"明细对账通过：漏行 {n_valid - n_cov} / {n_valid} 语句")
+
+          # **pytest 的失败必须让这一步红** ——
+          # 上面为了让「实测值」能被读出来，把 `sys.exit(rc)` 挪到了最后；
+          # 若忘了在这里补上，pytest 全红反而会让这一步**绿**，
+          # 那就是「把最严重的信号吞掉，只留一条无关的噪声」。
+          #
+          # 为什么不能简单地把 `sys.exit(rc)` 放回 pytest 后面：
+          # 那样 pytest 一红，**覆盖率就根本没被测**，
+          # 「实测值是多少」这个问题就再也问不出答案了（2026-10-22 实测）。
+          if not pytest_green:
+              sys.exit(rc or 1)
 
       - name: Performance regression (deterministic work counters)
         # 第十道门禁，也是唯一一道**不看墙钟**的性能门禁。

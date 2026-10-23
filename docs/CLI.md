@@ -9,13 +9,18 @@
 
 | 子命令 | 干什么 | 退出码 |
 | --- | --- | --- |
-| `run` | 分析日志并导出报告 | 0 成功 / 1 出错 |
+| `run` | 分析日志并导出报告 | 0 成功 / 1 出错 / **2 不是日志文件** |
 | `compare` | 两份日志（v2 vs v1）逐条对比 | 0 / 1 |
 | `verify` | 重读原文，核对每条结论的出处摘要 | **见下方「verify 的四档」** |
 | `rules` | `rules list` / `rules show <模板名>` | 0 / 1 |
 | `web` | 启动本地 Web 界面 | 0 / 1 |
 | `mcp` | 以 MCP Server 方式运行，或 `--install` 写入 Agent 配置 | 0 / 1 |
 | `ai` | 解读（可选 extra；**不参与判定**，只读已算好的证据） | 0 / 1 |
+
+> **退出码 2 是新加的**（2026-10-22）：喂进去的不是文本日志（纯二进制 /
+> 图片 / 压缩包外的随机字节）。此前它会被当文本「成功分析」一遍，报告里写着
+> 「压缩 95%」，退出码 0 —— 用户完全看不出自己喂错了文件。
+> 「文件选错了」（2）与「分析失败」（1）对调用方意义不同，CI 里按码分流才用得上。
 
 ## `run` —— 分析并导出
 
@@ -24,6 +29,9 @@ log-ai-compressor run app.log                      # 默认 md，输出 app_repo
 log-ai-compressor run app.log -f json -o report.json
 log-ai-compressor run a.log b.log --top 50         # 多文件合并聚类
 log-ai-compressor run app.log --rule my_format.yaml
+log-ai-compressor run -                            # 从标准输入读（管道）
+log-ai-compressor run app.log --tail 5000          # 只看最后 5000 行
+log-ai-compressor run app.log -f json              # stdout 就是 JSON
 ```
 
 | 选项 | 说明 |
@@ -38,9 +46,55 @@ log-ai-compressor run app.log --rule my_format.yaml
 | `--format`, `-f` | `json` / `markdown` / `md` / `text` / `txt`（默认按输出后缀推断） |
 | `--no-analysis` | 跳过根因/异常/优先级分析 |
 | `--quiet`, `-q` | 抑制进度输出 |
+| `--tail N` | 只分析**最后 N 行**（0 = 全部）。行号仍指向**原文件**，报告里会写明「只看最后 N 行（文件共 M 行，起始行 K）」 |
 
 **`-f` 只接受上面这五个值。** 写 `summary` 会直接报错退出 —— 这不是文档
 细节，`CONTRIBUTING.md` 曾经就写着 `-f summary`，而它跑不起来。
+
+### 输出到哪儿：`-o` 给了就落盘，没给就看格式
+
+| 情况 | 结果 |
+| --- | --- |
+| `-o out.json` | 写文件；stdout 打印人话摘要 |
+| `-f json`（无 `-o`） | **JSON 打到 stdout**（可直接接 `jq`）；不产生文件 |
+| `-f txt`（无 `-o`） | 纯文本打到 stdout |
+| 都不给 | 写 `<日志名>_report.md`；stdout 打印人话摘要 |
+
+> `-f json` 不带 `-o` 时 stdout 是 JSON —— 此前不管 `-f` 写什么都只打印中文
+> 摘要，而 `-f json` 这个参数看上去像是生效了的。接 `jq` 会直接失败。
+> 一条命令的输出格式由**格式参数**决定，语义才该由「写文件还是打屏幕」决定。
+
+## `compare` —— 多文件对比
+
+**2~3 个文件**（第一个为基准；少于 2 个或多于 3 个会被明确拒绝并给出
+人话错误，不是 argparse 的 usage 堆栈）。
+
+```bash
+log-ai-compressor compare v1.log v2.log                 # 写 compare_report.md
+log-ai-compressor compare v1.log v2.log -f json         # stdout 是 JSON
+log-ai-compressor compare v1.log v2.log -o diff.md -q    # 静默
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--level`, `-l` / `--include`, `-k` / `--exclude` / `--top`, `-t` / `--context` / `--rule`, `-r` | 与 `run` 同义 |
+| `-o`, `--output` | 输出路径（默认 `compare_report.md`） |
+| `--format`, `-f` | `json` / `markdown` / `md` / `text` / `txt` |
+| `--quiet`, `-q` | 抑制进度输出 |
+
+**对比按两个键对齐**：先按**消息模板**（同一错误一处带堆栈、一处不带也算
+同一类），再按 **`trace_id` 兜底** —— 同一次请求在两个文件里措辞不同
+（上游 `connection refused`、下游 `upstream unavailable`）时，按模板看是两种
+错误，按 trace 看是**同一件事**。没有第二级的话，这一次事故会被算成
+「新增 1 种 + 消失 1 种」，读起来像「出了新问题、同时修好了老问题」。
+
+> **`trace_id` 兜底只对结构化日志（JSON Lines / logfmt）成立。**
+> 关联键是从结构化字段里**认领**的；纯文本里写着的 `trace_id=t1` **认不出来**
+> （工具不猜），那种情况下仍会算成「新增 + 消失」。
+
+报告里带 🔗 的行就是按 trace 对上的。`compare -f json` 的每一项还带
+`matched_by` 字段（`template` / `trace`）—— MCP 的 `compare_log_files`
+工具也带它，所以 Agent 看到的是**同一份**对齐依据。
 
 ## `verify` —— 重读原文自校验
 

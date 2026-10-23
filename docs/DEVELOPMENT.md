@@ -32,9 +32,10 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 CI（GitHub Actions）三矩阵：`ubuntu-3.11`（`requires-python` 下限）、
 `ubuntu-3.12`（最常用版本，也是覆盖率与变异记分卡的**参考矩阵**）、
 `windows-3.12`（行尾 / shell / 路径处理与 unix 不同，且 `start.bat` 是
-Windows 一等入口）。**十道门禁**：ruff → pytest + 覆盖率 ≥90% → 对抗性评分卡
+Windows 一等入口）。**十一道门禁**：ruff → pytest + 覆盖率 ≥90% → 对抗性评分卡
 → 确定性指纹 → 自证脚本 → 构建可复现性 → 变异存活率记分卡 →
-SAST → 依赖漏洞扫描 → 性能回归（逐条见 [`AGENTS.md` §4](AGENTS.md)）。
+SAST → 依赖漏洞扫描 → 性能回归 → **产物审计**
+（逐条见 [`AGENTS.md` §4](AGENTS.md)）。
 自证脚本内部已扩到 **11 条**主张（v2.8.0 起新增「README 工程指标与仓库一致」，
 v2.8.1 再加「README 架构树必须列全包内模块」，v2.9.0 加「接入层只经 service
 触达 core/export」，v2.9.1 再把「README 写的条数」本身也纳入对账，
@@ -66,7 +67,7 @@ python scripts/sast_gate.py --print-baseline   # 生成骨架（reason 全空，
 把它抄进 `docs/sast_baseline.json` 并**逐条写 reason**。门禁会在四种情况下红：
 新发现不在基线、数量对不上、**豁免过期**（代码里已不报错而基线里还留着）、
 **豁免没写 reason**。能修的一律先修 —— v2.11.5 建基线时修掉了 5 处，
-剩下 57 条才是真该留下的。
+剩下 63 条才是真该留下的。
 
 **性能基线怎么维护**：
 

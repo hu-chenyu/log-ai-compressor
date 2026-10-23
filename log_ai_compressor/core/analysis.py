@@ -662,14 +662,32 @@ def _mark_root_causes(clusters: List[ErrorCluster], *,
             continue
         key = int(c.first_seen // BURST_WINDOW_SEC)
         windows.setdefault(key, []).append(c)
-    for group in windows.values():
-        earliest = group[0]  # ordered 已按时间排序，组内首个即窗口内首发
+    # 「首发」必须说清是**哪个窗口**的首发，且**只有最早的那个窗口**
+    # 能叫「源头」—— 2026-10-21 第九轮外部复核抓到：两个簇**都**自称
+    # 「窗口内首发」，而其中一个的 first_seen 明明更晚。读者看到
+    # 「首发」会当成「全局最早的那个」，于是追到了晚的那个错误上。
+    burst_done = False
+    for key in sorted(windows):
+        group = windows[key]
+        earliest = min(group, key=lambda c: c.first_seen)
         if (not earliest.is_root_cause
                 and _keyword_score(earliest, weights) > 0):
             earliest.is_root_cause = True
-            earliest.root_cause_reason = (
-                "时间连锁源头（窗口内首发且含根因特征）")
             earliest.root_cause_confidence = CONF_LIKELY
+            win_start = format_timestamp(earliest.first_seen)
+            if not burst_done:
+                burst_done = True
+                if len(group) == 1:
+                    earliest.root_cause_reason = (
+                        f"突发窗口（起 {win_start}）内唯一的错误，且含根因特征")
+                else:
+                    earliest.root_cause_reason = (
+                        f"时间连锁源头（突发窗口起 {win_start}，窗口内首发"
+                        "且含根因特征）")
+            else:
+                earliest.root_cause_reason = (
+                    f"后续突发窗口（起 {win_start}）内的最早错误，且含根因特征"
+                    "—— 本次最早的窗口在更前面")
 
     # 3) 强关键词 / 4) 连锁衍生标记
     for c in ordered:
@@ -942,6 +960,28 @@ def _collect_gaps(inv: _EvidenceInventory, clusters: List[ErrorCluster],
     return gaps
 
 
+def root_cause_name(cluster: ErrorCluster) -> str:
+    """根因的**名字**：有 Caused-by 链时取**链尾内层因**，否则取簇摘要。
+
+    为什么不能直接用簇摘要：摘要是**第一条错误消息**，通常只是**外层症状**
+    （「request failed: upstream unavailable」），而真因在链尾
+    （「java.net.ConnectException: Connection refused」）。
+
+    2026-10-21 的第九轮外部复核抓到这一处：报告标题写「已定位根因：
+    request failed: upstream unavailable」（症状），而同一条簇自己的
+    ``root_cause_reason`` 写着「Caused-by 因果链直连，根因：
+    java.net.ConnectException: Connection refused」（真因）——
+    **同一个工具的两处口径自相矛盾**，而标题那一处正是读者唯一会记住的。
+
+    报告标题与簇 reason 现在**取同一个值**（这里），不会再分叉。
+    """
+    for v in getattr(cluster, "root_cause_variants", ()) or ():
+        reason = (getattr(v, "reason", "") or "").strip()
+        if reason and not reason.startswith("（另有"):
+            return reason
+    return cluster.summary
+
+
 def _decide_verdict(inv: _EvidenceInventory, clusters: List[ErrorCluster]
                     ) -> Tuple[str, str, bool, List[ErrorCluster]]:
     """给出判定 + headline + 能否定论，外加排好序的候选列表。
@@ -960,13 +1000,13 @@ def _decide_verdict(inv: _EvidenceInventory, clusters: List[ErrorCluster]
     if confirmed:
         verdict = CONF_CONFIRMED
         top = max(confirmed, key=lambda c: (c.priority, c.count))
-        headline = (f"已定位根因：{top.summary[:60]}"
+        headline = (f"已定位根因：{root_cause_name(top)[:60]}"
                     f"（Caused-by 因果链直连，见第 {top.first_line} 行）")
         can_conclude = True
     elif likely:
         verdict = CONF_LIKELY
         top = candidates[0] if candidates else None
-        name = top.summary[:50] if top else "（无）"
+        name = (root_cause_name(top)[:50] if top else "（无）")
         headline = (f"最可能的原因：{name} —— 但这是统计推断，"
                     f"不是因果证明；下面列出了还缺什么才能定论。")
         can_conclude = False

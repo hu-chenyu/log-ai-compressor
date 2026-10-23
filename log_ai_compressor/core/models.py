@@ -22,13 +22,26 @@ from log_ai_compressor.core.evidence import EvidenceRef
 
 
 def format_timestamp(t: Optional[float]) -> str:
-    """时间戳展示格式化：epoch 秒 -> 日期时间；相对秒 -> 秒计数。"""
+    """时间戳展示格式化：epoch 秒 -> 日期时间；相对秒 -> 秒计数。
+
+    **按 UTC 展示**（2026-10-22 第十轮修复）。
+
+    为什么：`datetime.fromtimestamp(t)` 不带 tz 时按**本机本地时区**渲染，
+    于是同一份日志在 UTC 机器与 UTC+8 机器上会显示**不同的钟点** ——
+    报告里「时间范围 08:00:00 ~ 08:00:25」在别人的机器上变成
+    「00:00:00 ~ 00:00:25」。日志里的裸时间戳没有时区信息，本工具统一
+    按 UTC 解释它（见 `core/parser.py::_to_epoch`），展示口径就必须与
+    解释口径一致，否则「同一份日志的结论」在不同机器上对不上。
+
+    这也是 JSON 导出（`export/reporters.py::_iso_ts`）一直以来的口径 ——
+    这次是把人读的那几条路径补齐到同一套规则上。
+    """
     if t is None:
         return "-"
     if t < 1e9:                      # 相对计时（嵌入式秒计数等）
         return f"{t:.3f}s"
-    from datetime import datetime
-    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +155,20 @@ class LogEntry:
     message_extra: List[str] = field(default_factory=list)  # 折行续接内容
     stack: List[str] = field(default_factory=list)          # 堆栈/回溯行
     last_line_no: int = 0               # 条目结束行号（含堆栈与续行）
+    # **文件内**行号（1-based）—— 与 `line_no` 的差别见下。
+    #
+    # `line_no` 是**全局**计数：轮转合并（run_files）时它是「这批行里的第几行」，
+    # 用于内部逻辑（滚动窗口、后上下文待补、进度）。
+    # `file_line_no` 才是**这个来源文件里的第几行** —— 报告里给人看的行号、
+    # 证据引用要指向的都是它。
+    #
+    # 两者在单文件、非尾部窗口时相等；一旦不等（`--tail` 的尾部窗口、轮转合并），
+    # 用错的那套就会让「报告里的行号」指向错的地方 ——
+    # 而「行号能让人复核回去」正是本工具的核心承诺。
+    # 2026-10-22 实测踩过：`--tail 10` 的簇区间报成 92~101，而窗口首行是 91。
+    file_line_no: int = 0
+    # 同上：条目结束时的**文件内**行号。
+    file_last_line_no: int = 0
     # 轮转合并分析时这一行来自哪个文件（单文件时等于该文件路径）。
     # 证据引用要精确到文件，否则 app.log.1 / app.log.2 合并后
     # "第 42 行"指向两个不同的地方，引用就没法复核了。
@@ -308,6 +335,17 @@ class ErrorCluster:
     # 该簇出现过的调用链关联键（analysis 填充）。**不提升置信档位** ——
     # 链路只证明同一次请求的先后顺序，不证明因果。
     traces: List[str] = field(default_factory=list)
+    # 该簇出现过的**关联键**（request_id / trace_id），**摄入期**流式收集。
+    #
+    # 为什么要有它（与 `traces` 区分）：`traces` 由 analysis 层填充，而
+    # 对比分析走 `analyze=False`（不做智能标记，只要差异）—— 于是 compare
+    # 此前**拿不到任何关联键**，同一个 trace 跨两个文件时只能按消息文本
+    # 匹配，同一次请求在两边措辞不同就会被算成「新增 + 消失」两份。
+    # 这个字段在聚类期就记好，与分析层无关，compare 因此能按 trace 对齐。
+    #
+    # 上限：每簇最多记 MAX_CLUSTER_TRACE_IDS 个（内存有界；超出只说明
+    # 「这个簇关联了很多次请求」，不影响对齐判定 —— 对齐只需要**有没有**）。
+    trace_ids: List[str] = field(default_factory=list)
     # 变更事件时间窗关联（analysis._attach_change_events 填充）："错误
     # 首发在「发版/重启」后 Ns" 的一行叙事。与 traces 同一语义边界 ——
     # **只作统计线索，绝不提升置信档位**（时间共现不证明因果）。
@@ -365,6 +403,11 @@ class RunStats:
     # 过滤近乎全灭的 notice 必须点破这一点，否则用户只知道「过滤很狠」，
     # 不知道「狠到把根因一起扔了」。
     causal_dropped: int = 0
+    # 混合编码：按**另一种**编码才解出来的行数（这份文件混着两种编码）
+    mixed_encoding_lines: int = 0
+    # 解不出来的行数（多半不是文本日志）+ 含 NUL 字节的行数
+    undecodable_lines: int = 0
+    nul_lines: int = 0
     duration: float = 0.0                # 处理耗时（秒）
     lines_per_second: float = 0.0
     time_start: Optional[float] = None   # 日志时间范围
@@ -391,6 +434,11 @@ class RunStats:
             "error_entries": self.error_entries,
             "ts_entries": self.ts_entries,
             "level_counts": dict(self.level_counts),
+            # 混合编码 / 非文本：JSON 侧据此判断「这份输入解得干不干净」——
+            # 一份二进制文件被当成日志分析过，机器侧必须能自己看出来。
+            "mixed_encoding_lines": self.mixed_encoding_lines,
+            "undecodable_lines": self.undecodable_lines,
+            "nul_lines": self.nul_lines,
             # 因果线索被级别过滤掉的条数：JSON 侧据此判断「根因可能被扔了」，
             # 不落盘的话 Web/API 消费者就看不到这个诊断（缺陷#6 的同类：
             # 关键状态只存在于内存里，机器读不到）。

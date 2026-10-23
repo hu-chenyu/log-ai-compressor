@@ -217,6 +217,9 @@ def analyze_log_text(
     description=(
         "对比 2~5 个日志文件，列出相对基准文件的「新增 / 消失 / 共同」错误，"
         "适配版本回归验证与修复前后对比。"
+        "对齐分两级：先按消息模板，再按 trace_id 兜底 —— 同一个 trace 在两边"
+        "措辞不同（同一次事故）时算「共同」而不是「新增 + 消失」两份。"
+        "每项的 matched_by 字段（template / trace）说明它是怎么对上的。"
     ),
     annotations=READONLY,
 )

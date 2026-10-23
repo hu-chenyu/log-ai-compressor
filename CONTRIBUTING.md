@@ -35,7 +35,7 @@ log-ai-compressor run examples/sample_system.log -f json -o report.json
 log-ai-compressor verify --report report.json      # 重读原文自校验
 python -m pytest -q                                # 全量测试应该十几秒内跑完
 python scripts/prove.py                            # 11 条自证主张应全部成立
-python scripts/mutation_scorecard.py               # 17 条已知危险变异应全被抓住
+python scripts/mutation_scorecard.py               # 139 条已知危险变异应全被抓住
 ```
 
 ## 3. 分支与提交
@@ -81,7 +81,7 @@ python -m pytest --cov=log_ai_compressor --cov-report=term-missing
 
 ## 5. 门禁
 
-CI 跑十道，全部必须在本地先跑通（见 [`AGENTS.md` §4](AGENTS.md#4-ci-的十道门禁)）。
+CI 跑十一道，全部必须在本地先跑通（见 [`AGENTS.md` §4](AGENTS.md#4-ci-的十一道门禁)）。
 最常用的三条：
 
 ```bash
