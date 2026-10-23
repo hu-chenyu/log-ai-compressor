@@ -407,7 +407,7 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 
 仓库根目录的 [`server.json`](server.json) 就是官方 Registry 的清单格式，
 登记名 `io.github.hu-chenyu/log-ai-compressor` **已于 2026-10-18 提交**，
-指向 PyPI 上的 `log-ai-compressor` **2.12.6**（stdio，`uvx` 拉起）——
+指向 PyPI 上的 `log-ai-compressor` **2.12.7**（stdio，`uvx` 拉起）——
 清单里的版本号跟着每次发版更新（`tests/test_registry_manifest.py` 盯着
 它与 `pyproject.toml` 一致）。
 
@@ -426,10 +426,10 @@ curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.hu
 不是「这个接口只会回 0」。
 
 **2026-10-23 再查一次**（接口的响应形状变了，所以单独记一段）：同一个查询现在
-返回 `metadata.count = 11` —— **同一个登记名下挂着 11 个版本**（2.11.2 … 2.12.6）。
+返回 `metadata.count = 12` —— **同一个登记名下挂着 12 个版本**（2.11.2 … 2.12.7）。
 两个字段的位置也变了：`count` 从顶层挪进了 `metadata`，版本号在
 `servers[].server.version`（不再是顶层 `version`，`isLatest` 这个字段也没了）。
-**2.12.6 在册** —— 判据仍是「全名 + 版本」双重精确匹配，
+**2.12.7 在册** —— 判据仍是「全名 + 版本」双重精确匹配，
 与 [`publish-mcp.yml`](https://github.com/hu-chenyu/log-ai-compressor/blob/main/.github/workflows/publish-mcp.yml)
 里的回查代码用的是同一套字段。
 
