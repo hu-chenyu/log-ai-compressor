@@ -340,8 +340,8 @@
     {
       "test_id": "B603",
       "path": "tests/test_timezone_independence.py",
-      "count": 1,
-      "reason": "复核过：subprocess.run 的第一参数是 sys.executable —— 那是**当前解释器的绝对路径**（不是 PATH 查找），且 shell=False、无 shell 拼接；参数是本测试的常量（仓库里的 examples/app.log 与两个固定的 TZ 值），不接收任何外部输入作为命令行片段。bandit 的 B603 是字面量启发式，看不见这一点。"
+      "count": 8,
+      "reason": "复核过：八处都是列表传参 + shell=False，第一参数是 sys.executable —— 那是**当前解释器的绝对路径**（不是 PATH 查找），无 shell 拼接；参数是本测试的常量（仓库里的样例路径与两个固定的 TZ 值），不接收任何外部输入作为命令行片段。bandit 的 B603 是字面量启发式，看不见这一点。（2026-10-22 由 1 条增到 8 条：为了让这些断言在**任何时区**下都能抓住回归，子进程调用从 1 处增到 8 处 —— 原因见 CHANGELOG 第十一轮。）"
     },
     {
       "test_id": "B603",

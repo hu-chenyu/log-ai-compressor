@@ -234,6 +234,33 @@ UTC 机器与 UTC+8 机器上得到**不同的 epoch**；而 epoch 会进 `stats
 **5 条**变异（记分卡从 **134 条增到 139 条**，含「过度修正」那一条：把带时区的
 时间戳也当成 UTC 同样被抓住）。全部**先人工验红**才进记分卡。
 
+**⚠️ 而「人工验红」这件事本身，第一版也只验了一半。**
+
+第一版那几条断言是**进程内**跑的 —— 它们看到的是**本机**时区。
+本地是 UTC+8，验红时 5 条变异全被杀；推到 CI（ubuntu = **UTC**）跑记分卡，
+**存活 2 条**（`r11/service-time-localtime`、`r11/tod-window-localtime`）：
+在 UTC 机器上 `time.localtime` 与 `time.gmtime` **完全一样**，
+把 gmtime 改回 localtime **输出不变** ⇒ 门禁看不见。
+
+⇒ **「门禁必须可失效」这条规矩，在只验一台机器时会被骗过去。**
+修法：那几条改成**带 TZ 的子进程**跑（`TZ=UTC-8`）——
+判据在**能观察到差异的时区**里执行，于是**任何**机器上都能抓住。
+人工验红也改成**两种时区各跑一次**，5 条都必须红：
+
+| 变异 | UTC | UTC+8 |
+| --- | --- | --- |
+| parser: naive 时间戳改回 localtime 解释 | RED | RED |
+| parser: 把带时区的时间戳也当 UTC | RED | RED |
+| models: 展示改回 localtime 渲染 | RED | RED |
+| service: Web 时间文本改回 localtime | RED | RED |
+| pipeline: 时段窗口改回 localtime | RED | RED |
+
+顺带修掉三处**真红**（这次改动的连带影响，判据口径要与产品口径对齐）：
+`tests/test_parser.py` 的无年份时间戳期望值原来用 `datetime(...).timestamp()`
+（走本机本地时区）⇒ 改成显式 UTC；`tests/test_pipeline.py` 的 epoch 过滤下界
+原来用 `time.mktime`（本地时区）⇒ 改成 `calendar.timegm`。
+这两处原来都**只在 UTC+8 机器上成立** —— 与本轮修的是同一个族。
+
 ### 覆盖率那个数：变量终于被分离干净了
 
 上一节说「本地数不能用来填那个位置」，但**到底是哪个变量在动**当时没查清。
