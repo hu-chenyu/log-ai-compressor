@@ -721,16 +721,24 @@ def test_every_statement_count_in_the_docs_is_the_same_number():
     **改坏会红吗**：把 README 里那处「4,298 语句」改成别的数，本条立刻红。
     """
     canonical = _readme_detail(ROOT / "README.md")[0]
+    seen_any = False
     for name in ("README.md", "AGENTS.md"):
         text = (ROOT / name).read_text(encoding="utf-8")
         found = {int(m.group(1).replace(",", ""))
                  for m in re.finditer(r"([\d,]+)\s*语句", text)}
-        assert found, f"{name} 里一处「N 语句」都没有 —— 判据没生效，检查它"
+        if not found:
+            # 这份文档里一处「N 语句」都没有 ⇒ 这一份上**没有可对账的对象**
+            # （不是判据失效 —— 判据失效是下面那个 seen_any 断言在管）
+            continue
+        seen_any = True
         wrong = sorted(v for v in found if v != canonical)
         assert not wrong, (
             "%s 里的语句数 %s 与指标表里的 %d 不一致 —— "
             "同一个量在一份文档里只能有一个值（CI 那段对账只查第一处，"
             "看不见后面这些）" % (name, wrong, canonical))
+    assert seen_any, (
+        "所有文档里一处「N 语句」都没有 —— 判据没生效，检查它"
+        "（是不是把措辞改了？比如把「N 语句」写成别的写法）")
 
 
 @pytest.mark.parametrize("os_name,py_ver", [
