@@ -17,6 +17,27 @@
 *.toml text eol=lf
 *.txt  text eol=lf
 
+# 下面三类 + 无扩展名的 LICENSE 也必须钉死（2026-10-23 第十一轮外部复核后补）
+# ---------------------------------------------------------------------------
+# 钉了 eol 的文件，**每一台机器**检出的字节都一样；没钉的就跟着本机的
+# `core.autocrlf` 走 —— 而本项目的产品是「从源码构建出可复现的产物」，
+# 那条承诺要求**产物字节只由内容决定**。
+#
+# 实测踩到的后果（2026-10-23）：已发布的 2.12.6 sdist 里，MANIFEST.in /
+# docs/*.json / docs/*.csv / server.json 是 **CRLF**，而 git 里存的是 **LF**
+# —— 同一份源码在不同机器上构建出**不同字节**的 sdist，
+# 「本地构建 == PyPI == GitHub 三方 sha256 对账」因此只在那台机器上成立。
+# 同样的洞也让 wheel 差 21 字节：LICENSE 没钉 eol，
+# Windows 检出后是 CRLF（1108 字节），而已发布的那份是 LF（1087 字节）。
+#
+# 判据：**每个进产物的文本文件都必须有 eol 规则**。
+# 少了任何一条，构建出来的字节就随构建机变 —— 而这件事在 CI 上看不出来
+# （CI 的 runner 固定是 Linux）。
+*.json text eol=lf
+*.csv  text eol=lf
+*.in   text eol=lf
+LICENSE text eol=lf
+
 # 二进制：禁止任何行尾转换
 *.log   binary
 *.png   binary
