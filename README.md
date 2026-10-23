@@ -21,9 +21,9 @@
 ```console
 $ log-ai-compressor run examples/app.log
 【日志分析摘要】examples/app.log
-原始日志 ≈379 tokens → 压缩后 ≈186 tokens（压缩 51%）
+原始日志 ≈379 tokens → 压缩后 ≈175 tokens（压缩 54%）
 确定性指纹 `56df0a5f2bdff598e23edb83f2487ade1d5607410320188b4c2ab6d05c478ded`（同一份日志跑两遍必须完全一致）
-总行数 24，错误 8 行，去重后 4 种，时间范围 2024-03-15 08:00:00 ~ 08:00:25。
+总行数 24，错误 8 行，去重后 4 种，时间范围 2024-03-15 08:00:00 ~ 2024-03-15 08:00:25。
 已定位根因：java.net.ConnectException: Connection refused（另有 1 个根因候选）
 
 1. [P0 | ERROR | ×3 | 根因 | 行 4~13] authorization failed: connection refused to db-primary:5432
@@ -32,7 +32,22 @@ $ log-ai-compressor run examples/app.log
 3. [P0 | ERROR | ×1 | 根因 | 行 18~22] java.net.ConnectException: Connection refused
    -> Caused-by 因果链直连，根因：java.net.ConnectException: Connection refused
 4. [P0 | ERROR | ×1 | 行 23~23] stock check timeout after 3000ms item=SKU-7781
+报告已导出: examples/app_report.md（MD，9.2 KB）
 ```
+
+> **有三处随环境变**，别拿它们对不上就以为装错了：
+>
+> * 首行的路径**回显你给的写法** —— Windows 上是 `examples\app.log`，
+>   Linux 上是 `examples/app.log`；
+> * 「压缩后 ≈175 tokens」**随路径长度变**（摘要里有那一行路径）——
+>   同一份日志，给绝对路径会多几个 token。实测：相对路径 175、
+>   临时目录里的绝对路径 184、仓库里的绝对路径 186；
+> * 「时间范围」两端都带完整日期 —— 这是 2026-10-23 起统一按 UTC 展示的结果
+>   （此前第二端只显示钟点）。
+>
+> **指纹与行号区间不随这些变** —— 那两个才是结论本身，也是本工具的承诺。
+> 上面那个 175 是**照上面那条命令**（仓库根目录 + 相对路径）跑出来的数；
+> 这条由 `tests/test_readme_sample_is_reproducible.py` 逐行盯着。
 
 注意第 3 行：标题点名的**不是**「外层症状」而是**链尾真因**。
 这条结论指向日志的**第 18~22 行**，那段原文的 sha256 一并写进报告 ——
@@ -349,7 +364,7 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 > [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 > **覆盖率的分母比上面那行代码量小**：`pyproject.toml` 的
-> `[tool.coverage.run] omit` 排除了 `cli.py`（薄适配层，637 行，
+> `[tool.coverage.run] omit` 排除了 `cli.py`（薄适配层，868 行，
 > 只做参数解析与格式分发）。所以 95% 是在 7,874 行上算的，
 > 而「8,742 行生产代码」**含**它 —— 两个数字口径不同，别拿它们互推。
 > 这个排除列表由 `tests/test_coverage_omit_watchdog.py` 钉住：
