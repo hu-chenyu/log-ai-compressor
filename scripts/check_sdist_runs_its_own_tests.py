@@ -128,11 +128,14 @@ def main(argv: list[str] | None = None) -> int:
             cwd=str(pkg), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace")
         collected: list[str] = []
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            collected.append(line)
-            sys.stdout.write(line)
-            sys.stdout.flush()
+        # 这里**不用 assert**：脚本里的裸断言会被 `-O` 整条删掉，
+        # 而「输出没拿到」这件事必须有兜底分支（SAST 的 B101 也盯着这条）。
+        stream = proc.stdout
+        if stream is not None:
+            for line in stream:
+                collected.append(line)
+                sys.stdout.write(line)
+                sys.stdout.flush()
         rc = proc.wait()
         if rc != 0:
             bad = failing_modules("".join(collected))
