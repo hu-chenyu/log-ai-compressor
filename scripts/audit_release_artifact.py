@@ -61,6 +61,7 @@ import argparse
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -125,10 +126,16 @@ def committed_files() -> set[str]:
 
     用 ``git ls-tree`` 而不是遍历工作区 —— 工作区里有未入库/被忽略的文件，
     而那正是要查出来的东西。
+
+    git 用**绝对路径**起（SAST 的 B607：部分路径启动进程）。解析不到就返回
+    空集 —— 此时「文件是否来自源码树」那一项会被跳过，而不是误判成「有野文件」。
     """
+    git = shutil.which("git")
+    if git is None:
+        return set()
     try:
         proc = subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+            [git, "ls-tree", "-r", "--name-only", "HEAD"],
             cwd=str(ROOT), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=120)
     except (OSError, subprocess.SubprocessError):

@@ -83,6 +83,8 @@
 | 覆盖率 | **95%**（漏行与语句数见 README —— 口径是 ubuntu-3.12 的实测值） |
 | 门禁道数 | **12 道**（本轮 +1：「sdist 能跑自己的测试」） |
 
+静态分析发现里**剩下 73 条**才是真该留下的豁免（`docs/sast_baseline.json` 逐条对账）。
+
 新加的门禁与测试：
 
 * `tests/test_encoding_majority_vote.py`（5 条）—— 主编码投票，含「数据不受影响」

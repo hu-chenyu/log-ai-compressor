@@ -70,7 +70,24 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="lac-sdist-test-") as td:
         tmp = Path(td)
         with tarfile.open(sdist, "r:gz") as t:
-            t.extractall(tmp)
+            try:
+                t.extractall(tmp, filter="data")   # py3.12+；顺带挡住路径穿越
+            except TypeError:
+                # py3.11.0~3.11.3 没有 filter 参数 —— 逐个成员校验后解出来，
+                # 而不是无校验地 extractall（归档里带 ../ 就能写到 temp 外面）。
+                for m in t.getmembers():
+                    name = m.name
+                    if name.startswith("/") or ".." in Path(name).parts:
+                        print("归档里有不安全的成员名：%r" % name, file=sys.stderr)
+                        return 2
+                    if m.isdir():
+                        (tmp / name).mkdir(parents=True, exist_ok=True)
+                    elif m.isfile():
+                        target = tmp / name
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        fh = t.extractfile(m)
+                        if fh is not None:
+                            target.write_bytes(fh.read())
         roots = [p for p in tmp.iterdir() if p.is_dir()]
         if not roots:
             print("解包后没找到顶层目录", file=sys.stderr)

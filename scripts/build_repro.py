@@ -131,6 +131,41 @@ def normalize_sdist(path: Path, epoch: int) -> None:
             gz.write(buf.getvalue())
 
 
+def _extract_archive(archive: tarfile.TarFile, dest: Path) -> None:
+    """把归档安全地解到 dest。
+
+    ``filter="data"`` 是 Python 3.12 起的能力（3.11.4 / 3.10.12 等也回合了），
+    但本项目声明支持 **3.11 起** —— 3.11.0～3.11.3 没有这个参数。
+    所以：能用就用（它顺带挡住了路径穿越与特殊文件），不能用就**逐个成员**
+    手工校验后解出来，而不是无校验地 extractall。
+
+    为什么自己写校验：``extractall`` 不带 filter 时会照着归档里的路径写文件，
+    归档里带 ``../`` 就能写到 dest 外面去。
+    """
+    try:
+        archive.extractall(dest, filter="data")
+        return
+    except TypeError:
+        pass
+    dest.mkdir(parents=True, exist_ok=True)
+    for member in archive.getmembers():
+        name = member.name
+        if name.startswith("/") or ".." in Path(name).parts:
+            raise SystemExit("归档里有不安全的成员名：%r" % name)
+        if member.isdir():
+            (dest / name).mkdir(parents=True, exist_ok=True)
+            continue
+        if not member.isfile():
+            continue
+        target = dest / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fh = archive.extractfile(member)
+        if fh is None:
+            continue
+        with target.open("wb") as out:
+            out.write(fh.read())
+
+
 def snapshot_into(dest: Path, ref: str = "HEAD") -> Path:
     """把**已提交的树**导出成一份干净快照，构建在它里面跑。
 
@@ -150,10 +185,7 @@ def snapshot_into(dest: Path, ref: str = "HEAD") -> Path:
         cwd=ROOT, capture_output=True, check=True,
     )
     with tarfile.open(fileobj=io.BytesIO(proc.stdout), mode="r") as tf:
-        try:
-            tf.extractall(dest, filter="data")     # py3.12+ 要求显式 filter
-        except TypeError:                          # py3.11 没有这个参数
-            tf.extractall(dest)
+        _extract_archive(tf, dest)
     return dest
 
 

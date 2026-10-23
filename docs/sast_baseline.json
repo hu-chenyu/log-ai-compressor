@@ -147,6 +147,12 @@
     },
     {
       "test_id": "B404",
+      "path": "scripts/check_sdist_runs_its_own_tests.py",
+      "count": 1,
+      "reason": "它要**真的起一个 pytest 子进程**才验得了「sdist 能跑自己的测试」；起的是 sys.executable 的绝对路径，不经 shell、不拼任何外部输入。"
+    },
+    {
+      "test_id": "B404",
       "path": "scripts/dep_audit_gate.py",
       "count": 1,
       "reason": "复核过：只调用 `python -m pip_audit`，参数是本脚本从 pyproject.toml 解析出的依赖名 + 临时文件路径，全部由本仓库自身内容决定。import 本身无法消除。"
@@ -159,9 +165,21 @@
     },
     {
       "test_id": "B404",
+      "path": "scripts/run_local_gates.py",
+      "count": 1,
+      "reason": "复核过：这个脚本**要**起子进程 —— 它的活就是跑门禁。命令逐词拆开成 argv，来源只有本仓库自己的 `.github/workflows/ci.yml`（不是用户输入，也不是日志内容），并且刻意**不**用 shell=True。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
       "path": "scripts/sast_gate.py",
       "count": 1,
       "reason": "复核过：只调用 `python -m bandit`，目标是本仓库自己的三个目录。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_audit_release_artifact.py",
+      "count": 1,
+      "reason": "它要真的起一次产物审计脚本（子进程）才验得了「门禁会报红」；起的是 sys.executable 的绝对路径。"
     },
     {
       "test_id": "B404",
@@ -171,9 +189,27 @@
     },
     {
       "test_id": "B404",
+      "path": "tests/test_build_snapshot.py",
+      "count": 1,
+      "reason": "它要真的起 git ls-tree / git show 才验得了「快照来自源码树」；起的是 shutil.which('git') 解析出来的绝对路径。"
+    },
+    {
+      "test_id": "B404",
       "path": "tests/test_ci_step_execution.py",
       "count": 1,
       "reason": "复核过：这条测试的职责就是在受控环境里真的执行 CI 里的 python step，必须起子进程。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_encoding_majority_vote.py",
+      "count": 1,
+      "reason": "它要真的起一次 CLI（子进程）才验得了「命令行输出里说的是 utf-8」；起的是 sys.executable 的绝对路径。"
+    },
+    {
+      "test_id": "B404",
+      "path": "tests/test_evidence_digest_formula.py",
+      "count": 1,
+      "reason": "它要真的起一次 CLI（子进程）拿报告里的摘要才验得了「公式对得上」；起的是 sys.executable 的绝对路径。"
     },
     {
       "test_id": "B404",
@@ -213,6 +249,12 @@
     },
     {
       "test_id": "B404",
+      "path": "tests/test_readme_sample_is_reproducible.py",
+      "count": 1,
+      "reason": "本文件要**真跑一次 CLI**才能验「README 首屏那段输出与仓库里的输入文件对得上」（行号区间/指纹/三个数逐条核对）—— 只读文本比不出「跑出来的结果对不对」。import 本身无法消除。"
+    },
+    {
+      "test_id": "B404",
       "path": "tests/test_registry_manifest.py",
       "count": 1,
       "reason": "复核过：验证 server.json 与 pyproject 的版本一致，需要读包元数据。import 本身无法消除。"
@@ -244,7 +286,7 @@
     {
       "test_id": "B603",
       "path": "scripts/audit_release_artifact.py",
-      "count": 1,
+      "count": 2,
       "reason": "复核过：一处列表传参 + shell=False，跑的是 sys.executable 与解包后目录里的 scripts/sast_gate.py（产物自洽性那一半）。命令与参数都是本脚本的常量，不接收任何外部输入作为命令行片段。"
     },
     {
@@ -256,8 +298,14 @@
     {
       "test_id": "B603",
       "path": "scripts/build_repro.py",
-      "count": 2,
+      "count": 4,
       "reason": "复核过：两处都是列表传参 + shell=False + check=True，命令是 git / sys.executable -m build，参数为常量。bandit 报的是「请复核」，复核结论是：不接收任何外部输入作为命令行。"
+    },
+    {
+      "test_id": "B603",
+      "path": "scripts/check_sdist_runs_its_own_tests.py",
+      "count": 1,
+      "reason": "子进程是 sys.executable（绝对路径），命令与参数都是本脚本写死的，不经 shell、不含外部输入。"
     },
     {
       "test_id": "B603",
@@ -273,9 +321,21 @@
     },
     {
       "test_id": "B603",
+      "path": "scripts/run_local_gates.py",
+      "count": 2,
+      "reason": "复核过：两处都是列表传参 + shell=False。一处跑门禁本身（argv 由 ci.yml 的 run 正文逐词拆出，外加两个固定的本地别名：python -> 当前解释器、ruff -> python -m ruff），另一处用 git credential fill 取 GitHub token —— **不打印、不落盘**（面 6 走匿名额度每 IP 每小时 60 次，连续自测很容易撞上限，那时门禁红的原因与仓库无关）。**不接收任何外部输入作为命令行片段。**"
+    },
+    {
+      "test_id": "B603",
       "path": "scripts/sast_gate.py",
       "count": 1,
       "reason": "复核过：列表传参、shell=False，命令固定为 `python -m bandit`，目标是仓库自己的三个目录。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_audit_release_artifact.py",
+      "count": 1,
+      "reason": "子进程是 sys.executable 的绝对路径，参数写死。"
     },
     {
       "test_id": "B603",
@@ -285,9 +345,27 @@
     },
     {
       "test_id": "B603",
+      "path": "tests/test_build_snapshot.py",
+      "count": 1,
+      "reason": "子进程是 git 的绝对路径（shutil.which 解析），参数写死。"
+    },
+    {
+      "test_id": "B603",
       "path": "tests/test_ci_step_execution.py",
       "count": 5,
       "reason": "复核过：五处都是列表传参 + shell=False，跑的是 CI 里那几段固定的 python 代码与 pytest。执行 CI step 是这条测试的职责。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_encoding_majority_vote.py",
+      "count": 1,
+      "reason": "子进程是 sys.executable 的绝对路径，参数写死。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_evidence_digest_formula.py",
+      "count": 1,
+      "reason": "子进程是 sys.executable 的绝对路径，参数写死。"
     },
     {
       "test_id": "B603",
@@ -324,6 +402,12 @@
       "path": "tests/test_packaging.py",
       "count": 1,
       "reason": "复核过：列表传参 + shell=False，跑的是 pip / python。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_readme_sample_is_reproducible.py",
+      "count": 2,
+      "reason": "复核过：只调用 `sys.executable`（绝对路径，不经 PATH 查找）跑 `-m log_ai_compressor`，**不开 shell**、参数是列表形式，唯一参数是测试自己创建的 tmp 文件路径 —— 没有注入面。"
     },
     {
       "test_id": "B603",
@@ -366,30 +450,6 @@
       "path": "tests/test_subprocess_encoding_contract.py",
       "count": 1,
       "reason": "复核过：跑的是本项目的控制台脚本 `log-ai-compressor`（由 `python -m pip install -e .` 装进 Scripts/），它就是被测对象 —— 换成绝对路径反而测不到「用户 PATH 里那个入口」。"
-    },
-    {
-      "test_id": "B404",
-      "path": "scripts/run_local_gates.py",
-      "count": 1,
-      "reason": "复核过：这个脚本**要**起子进程 —— 它的活就是跑门禁。命令逐词拆开成 argv，来源只有本仓库自己的 `.github/workflows/ci.yml`（不是用户输入，也不是日志内容），并且刻意**不**用 shell=True。import 本身无法消除。"
-    },
-    {
-      "test_id": "B603",
-      "path": "scripts/run_local_gates.py",
-      "count": 2,
-      "reason": "复核过：两处都是列表传参 + shell=False。一处跑门禁本身（argv 由 ci.yml 的 run 正文逐词拆出，外加两个固定的本地别名：python -> 当前解释器、ruff -> python -m ruff），另一处用 git credential fill 取 GitHub token —— **不打印、不落盘**（面 6 走匿名额度每 IP 每小时 60 次，连续自测很容易撞上限，那时门禁红的原因与仓库无关）。**不接收任何外部输入作为命令行片段。**"
-    },
-    {
-      "test_id": "B404",
-      "path": "tests/test_readme_sample_is_reproducible.py",
-      "count": 1,
-      "reason": "本文件要**真跑一次 CLI**才能验「README 首屏那段输出与仓库里的输入文件对得上」（行号区间/指纹/三个数逐条核对）—— 只读文本比不出「跑出来的结果对不对」。import 本身无法消除。"
-    },
-    {
-      "test_id": "B603",
-      "path": "tests/test_readme_sample_is_reproducible.py",
-      "count": 1,
-      "reason": "复核过：只调用 `sys.executable`（绝对路径，不经 PATH 查找）跑 `-m log_ai_compressor`，**不开 shell**、参数是列表形式，唯一参数是测试自己创建的 tmp 文件路径 —— 没有注入面。"
     }
   ]
 }

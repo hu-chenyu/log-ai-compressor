@@ -615,8 +615,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 63 条才是真该留下的。",
-        new="剩下 64 条才是真该留下的。",
+        old="剩下 73 条才是真该留下的。",
+        new="剩下 74 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
