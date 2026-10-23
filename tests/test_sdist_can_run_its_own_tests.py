@@ -116,7 +116,8 @@ def test_the_gate_really_names_the_module_when_the_sdist_tests_fail(tmp_path):
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
     proc = subprocess.run([sys.executable, str(script), "--sdist", str(sdist)],
                           cwd=str(_ROOT), capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", env=env, timeout=600)
+                          encoding="utf-8", errors="replace", env=env, timeout=600,
+                          shell=False)
     assert proc.returncode == 1, (
         "红的 sdist 居然过了门禁：\n%s" % (proc.stdout + proc.stderr)[-800:])
     # 断的是**门禁自己那句话** —— 而不是「test_boom.py 这个字符串出现过」：
