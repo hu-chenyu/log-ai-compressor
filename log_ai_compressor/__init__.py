@@ -16,5 +16,5 @@
 - log_ai_compressor.cli          命令行入口（run / compare / rules / web / mcp / ai）
 """
 
-__version__ = "2.12.5"
+__version__ = "2.12.6"
 __app_name__ = "log-ai-compressor"
