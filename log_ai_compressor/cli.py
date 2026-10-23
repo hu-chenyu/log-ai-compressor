@@ -642,9 +642,47 @@ _VERDICT_EXIT = {
         "源）—— 这说明「验不了」，**不是**「查出问题」。结论可能仍然正确，"
         "但本机已无从复核；要复核请把原始日志找回来。", EXIT_ERROR),
     "TAMPERED": (
-        "存在对不上的引用 —— 日志**确实被改过**，结论可能来自旧版本，请勿直接采信。",
+        "存在对不上的引用 —— **报告与日志对不上**（两边有一方变了）："
+        "这条结论在本机**无法复核**，请勿直接采信。",
         EXIT_ERROR),
 }
+
+
+def _verdict_text(report: dict) -> str:
+    """按档位给出那句话 —— TAMPERED 要**看失配的种类**才说得准。
+
+    为什么不能一句话打包：2026-10-24 第十二轮外部复核实测，把一份合法报告的
+    ``line_end`` 改成 9999（**报告**被改坏了，日志一个字没动），
+    verify 打印的是「日志**确实被改过**」—— 指控了一件**没有发生的事**，
+    而照着这句话去查日志的人会白查一轮。
+
+    两种失配指向的**现实**不同：
+
+    * ``MISMATCH`` —— 回读到的内容与报告记录的摘要不一致
+      （日志那几行被改过，**或**报告被改过）；
+    * ``OUT_OF_RANGE`` —— 报告里记的行区间超出了日志当前的长度
+      （日志被截短了，**或**报告被改过）。
+
+    两种都**分不出是哪一方变了** —— 回读只看得到「两边对不上」，
+    所以话必须停在「对不上」这里，而不是替用户指认一个对象。
+
+    **档位与退出码一个字没改**：TAMPERED 仍是 TAMPERED，退出码仍是 1。
+    改的只是「是谁变了」这句话 —— 那句话原来是在**指控**。
+    """
+    verdict = report.get("verdict")
+    text = _VERDICT_EXIT.get(verdict, ("", EXIT_ERROR))[0]
+    if verdict != "TAMPERED":
+        return text
+    statuses = {d.get("status") for d in (report.get("details") or [])}
+    if "MISMATCH" in statuses:
+        return ("存在对不上的引用 —— **回读到的内容与报告记录的摘要不一致**"
+                "（日志那几行被改过，**或**报告本身被改过）："
+                "这条结论在本机**无法复核**，请勿直接采信。")
+    if "OUT_OF_RANGE" in statuses:
+        return ("存在对不上的引用 —— **报告里记的行区间超出了日志当前的长度**"
+                "（日志被截短了，**或**报告本身被改过）："
+                "这条结论在本机**无法复核**，请勿直接采信。")
+    return text
 
 
 def _verdict_exit(report: dict) -> int:
@@ -831,7 +869,8 @@ def cmd_verify(args) -> int:
               file=sys.stderr)
     print()
     print(f"自校验结论：{report['verdict']}")
-    text, code = _VERDICT_EXIT.get(report["verdict"], ("", EXIT_ERROR))
+    text = _verdict_text(report)
+    code = _VERDICT_EXIT.get(report["verdict"], ("", EXIT_ERROR))[1]
     if code == EXIT_OK:
         print(text)
     else:

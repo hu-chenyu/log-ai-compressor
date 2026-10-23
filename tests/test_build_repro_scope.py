@@ -91,6 +91,10 @@ def _install_fake_build(monkeypatch, outdir: Path, produced: Path,
     monkeypatch.setattr(br, "snapshot_into", _fake_snapshot)
     # last_commit_epoch 现在带 ref 参数（构建哪一笔提交）
     monkeypatch.setattr(br, "last_commit_epoch", lambda ref="HEAD": EPOCH)
+    # 「导出与构建机无关」的自证要真的跑两次 git archive —— 本测试刻意
+    # **不依赖真实仓库状态**（它验的是归一化范围），所以把它也 stub 掉。
+    # 它本身另有判据：tests/test_build_snapshot.py。
+    monkeypatch.setattr(br, "assert_config_independent", lambda ref="HEAD": [])
 
 
 @pytest.fixture()

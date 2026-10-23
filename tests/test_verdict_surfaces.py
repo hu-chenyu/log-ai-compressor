@@ -116,6 +116,12 @@ class TestUnverifiableIsNotTampered:
 
         注意源文件必须**还在** —— 源不在时一律是 UNVERIFIABLE，根本走不到
         TAMPERED 那一侧，用错夹具会得到一个恒真的测试。
+
+        **档位与退出码一个字没改**（TAMPERED / 1）；改的只是「是谁变了」
+        那句话 —— 回读只分得出「两边对不上」，**分不出是哪一方**，
+        所以话必须停在「对不上」这里，而不是替用户指认一个对象
+        （2026-10-24 第十二轮外部复核实测：报告被改坏而日志好得很时，
+        原先打印的是「日志**确实被改过**」—— 指控了一件没有发生的事）。
         """
         import json
         d = json.loads(exported_report.read_text(encoding="utf-8"))
@@ -126,7 +132,36 @@ class TestUnverifiableIsNotTampered:
         assert r.returncode == 1, (
             f"日志确实被改过却仍然放行：\n{r.stdout}{r.stderr}")
         assert "TAMPERED" in r.stdout, r.stdout
-        assert "确实被改过" in (r.stdout + r.stderr), r.stdout + r.stderr
+        out = r.stdout + r.stderr
+        assert "请勿直接采信" in out, out
+        assert "确实被改过" not in out, (
+            "它把「哪一方变了」说死了 —— 回读只分得出「两边对不上」，"
+            f"分不出是日志变了还是报告变了：\n{out}")
+
+    def test_an_out_of_range_reference_does_not_accuse_the_log(self, exported_report):
+        """报告里的行区间越界 ⇒ **日志一个字没动**，不许说它「确实被改过」。
+
+        实测（2026-10-24 第十二轮外部复核）：把报告里的 ``line_end`` 改成 9999
+        （**报告**坏了，日志好得很），verify 打印的是
+        「存在对不上的引用 —— 日志**确实被改过**」——
+        指控了一件没有发生的事，而照着这句话去查日志的人会白查一轮。
+
+        档位与退出码一个字没改（TAMPERED / 1）—— 要改的只是那句话。
+        """
+        import json
+        d = json.loads(exported_report.read_text(encoding="utf-8"))
+        d["clusters"][0]["evidence"][0]["line_end"] = 9999
+        exported_report.write_text(json.dumps(d, ensure_ascii=False),
+                                   encoding="utf-8")
+        r = _run("verify", "--report", str(exported_report))
+        out = r.stdout + r.stderr
+        assert r.returncode == 1, out
+        assert "TAMPERED" in r.stdout, out
+        assert "OUT_OF_RANGE" in out, out
+        assert "请勿直接采信" in out, out
+        assert "确实被改过" not in out, (
+            "报告越界 ≠ 日志被改过 —— 日志一个字都没动，"
+            f"这句话指控了一件没有发生的事：\n{out}")
 
 
 # ---------------------------------------------------------------------------

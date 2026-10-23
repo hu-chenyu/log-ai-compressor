@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -123,6 +124,83 @@ class TestTheArtifactAuditHasTeeth:
             % (proc.returncode, proc.stdout[-800:]))
         assert "构建机的路径" in proc.stdout, (
             "门禁没说出「构建机的路径」：%s" % proc.stdout[-800:])
+
+
+class TestTheAuditDoesNotClaimWhatItDidNotCheck:
+    """**「未执行」不许说成「通过」。**
+
+    实测（2026-10-24 第十二轮外部复核抓到的）：这个脚本**随 sdist 发布**，
+    而 sdist 里没有 ``.git`` ⇒ 在那里跑它拿不到源码树清单 ——
+    而它一边打印「跳过这一项」，一边打印
+    「**产物里的文件全部来自源码树**」，最后汇总「产物审计通过：…文件全部来自
+    源码树…」，退出码 **0**。
+
+    ⇒ 「报检查通过但其实什么都没扫」—— 本项目自己写进 AGENTS.md 的那类
+    最坏门禁（「没有门禁你知道那里没检查」）。而这个脚本**随包发布**，
+    从 sdist 里跑它是很自然的用法。
+
+    修法：拿不到清单 ⇒ 那一项**未执行**、**不构成通过**，退出码 2
+    （与「产物缺失 / 跑不起来」同一档：无法判定）。
+    """
+
+    def _run_without_git(self, tmp_path: Path) -> subprocess.CompletedProcess:
+        """把脚本与词表复制到一个**没有 .git** 的临时目录里跑。"""
+        sandbox = tmp_path / "sandbox"
+        (sandbox / "scripts").mkdir(parents=True)
+        (sandbox / "tests").mkdir(parents=True)
+        shutil.copy2(_SCRIPT, sandbox / "scripts" / "audit_release_artifact.py")
+        shutil.copy2(_ROOT / "tests" / "test_no_job_wording.py",
+                     sandbox / "tests" / "test_no_job_wording.py")
+        dist = tmp_path / "dist"
+        _make_artifacts(
+            dist,
+            {"README.md": "# readme\n",
+             "log_ai_compressor/__init__.py": "x = 1\n"},
+            {"log_ai_compressor/__init__.py": "x = 1\n"})
+        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+        return subprocess.run(
+            [sys.executable, str(sandbox / "scripts" / "audit_release_artifact.py"),
+             "--version", "2.12.6", "--dist", str(dist)],
+            cwd=str(sandbox), capture_output=True, text=True, encoding="utf-8",
+            errors="replace", env=env, timeout=600)
+
+    def test_it_must_not_say_the_files_all_come_from_the_source_tree(self, tmp_path: Path):
+        """拿不到源码树清单 ⇒ **不许**打印「全部来自源码树」。
+
+        **改坏会红吗**：把 `committed_files()` 在拿不到清单时返回空集合
+        （而不是 ``None``），本条立刻红 —— 那正是原先的形状。
+        """
+        proc = self._run_without_git(tmp_path)
+        assert "全部来自源码树" not in proc.stdout, (
+            "没查过却说了「全部来自源码树」：\n%s" % proc.stdout[-800:])
+        assert "未执行" in proc.stdout, (
+            "它没说自己没查：\n%s" % proc.stdout[-800:])
+
+    def test_it_must_not_exit_zero_when_a_check_could_not_run(self, tmp_path: Path):
+        """一项没查成 ⇒ 退出码**不是 0**（无法判定 = 2）。
+
+        **改坏会红吗**：把「未执行」那个分支的退出码改回 0，本条立刻红。
+        """
+        proc = self._run_without_git(tmp_path)
+        assert proc.returncode == 2, (
+            "有一项检查没执行，退出码却是 %d —— 照着这个码写 CI 的人会以为"
+            "审计通过了：\n%s" % (proc.returncode, proc.stdout[-800:]))
+
+    def test_in_a_repository_the_check_still_runs_and_is_claimed(self, tmp_path: Path):
+        """对照组：在**仓库**里跑，那一项照查照说。
+
+        没有这一条的话，上一条可以靠「永远说未执行」来通过 ——
+        而那等于把一项检查彻底关掉。
+        """
+        dist = tmp_path / "dist"
+        _make_artifacts(
+            dist,
+            {"README.md": "# readme\n",
+             "log_ai_compressor/__init__.py": "x = 1\n"},
+            {"log_ai_compressor/__init__.py": "x = 1\n"})
+        proc = _run_audit(dist)
+        assert "全部来自源码树" in proc.stdout, (
+            "在仓库里跑却没说这一项查过了：\n%s" % proc.stdout[-800:])
 
 
 class TestTheHelpers:

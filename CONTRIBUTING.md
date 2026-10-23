@@ -35,7 +35,7 @@ log-ai-compressor run examples/sample_system.log -f json -o report.json
 log-ai-compressor verify --report report.json      # 重读原文自校验
 python -m pytest -q                                # 全量测试应该十几秒内跑完
 python scripts/prove.py                            # 11 条自证主张应全部成立
-python scripts/mutation_scorecard.py               # 142 条已知危险变异应全被抓住
+python scripts/mutation_scorecard.py               # 148 条已知危险变异应全被抓住
 ```
 
 ## 3. 分支与提交
@@ -143,12 +143,16 @@ sha256sum dist/*
 
 # 2.5 **审计产物本身**（不是源码树）—— 这一步在 2.12.3 之前是不存在的
 python scripts/audit_release_artifact.py
-#    查两件事：产物里的每个文本文件用措辞门禁那套词表再扫一遍；
-#    把 sdist 解包后跑它自带的 scripts/sast_gate.py（自洽性）。
+#    查四件事：产物里的每个文本文件用措辞门禁那套词表再扫一遍；
+#    把 sdist 解包后跑它自带的 scripts/sast_gate.py（自洽性）；
+#    产物里的每个文件是否都来自源码树；产物里是否带着构建机的路径。
 #    **为什么必须做**：2.12.3 的产物是措辞清理**之前**构建的 ——
 #    实测产物里 88 处、38 个文件（含一个真实内部主机名），而仓库当时
 #    已经是 0 命中。清理只改了仓库、没重建产物，而 PyPI 不允许覆盖
 #    已发布文件，那一版**永远留在那儿**。仓库干净 ≠ 产物干净。
+#    **要在仓库里跑**：脚本随 sdist 发布，而 sdist 里没有 .git ⇒
+#    拿不到源码树清单时那一项**未执行**（退出码 2 = 无法判定），
+#    不构成通过。
 
 # 3. 先传 PyPI —— 必须在推 tag 之前
 #    **按完整文件名钉死这两个，不要 `dist/*`**

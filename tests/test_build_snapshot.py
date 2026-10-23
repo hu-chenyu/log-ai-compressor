@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,6 +56,17 @@ def _git(*args: str) -> bytes:
     proc = subprocess.run([_GIT, *args], cwd=str(_ROOT), capture_output=True,
                           env=env, timeout=180)
     return proc.stdout
+
+
+def _attr(path: str, name: str) -> str:
+    """问 git：这个文件的某个属性是什么（``eol`` / ``text``）。
+
+    输出形如 ``<路径>: eol: lf`` —— 取**最后**一段才是属性值
+    （路径本身可能带冒号）。
+    """
+    out = _git("check-attr", name, "--", path).decode("utf-8", "replace").strip()
+    m = re.search(r":\s*([\w-]+)\s*$", out)
+    return m.group(1) if m else ""
 
 
 class TestTheBuildInputIsTheCommittedTree:
@@ -124,6 +136,84 @@ class TestTheBuildInputIsTheCommittedTree:
             "这些扩展名没有 eol 规则：%s —— 产物会随构建机的 core.autocrlf 变" % missing)
         assert "LICENSE" in rules, (
             "LICENSE（无扩展名）没有 eol 规则 —— 实测它让 wheel 差了 21 字节")
+
+    def test_every_tracked_text_file_has_an_eol_rule(self):
+        """**逐个跟踪文件**核对 —— 而不是核对一份写死的扩展名清单。
+
+        为什么必须逐个：上一条查的是「must_cover = ['*.py', '*.md', ...]」
+        这份**写死的清单**，而写死的清单必然漏 —— 漏的正是清单没列的那类。
+        实测（2026-10-24 第十二轮外部复核）：``.gitignore`` /
+        ``.gitattributes`` / ``py.typed`` 这三个**无扩展名**的文件没有 eol
+        规则，于是它们跟着构建机的 ``core.autocrlf`` 走 ——
+        已发布的 2.12.7 sdist 在两种机器上重建出**两份字节**
+        （29a9f8bf… vs c3001fed…，差 96 个 CR）。
+
+        判据：问 git「这个文件的 eol 是什么」——
+        要么有明确的 eol（lf / crlf），要么它被声明成二进制。
+
+        **改坏会红吗**：把 ``.gitattributes`` 里 ``.gitignore text eol=lf``
+        那一行删掉，本条立刻红。
+        """
+        files = [ln for ln in _git("ls-files", "-z").decode("utf-8", "replace").split("\0")
+                 if ln]
+        assert files, "一个跟踪文件都没有 —— git 读不到？"
+        missing = []
+        for name in files:
+            eol = _attr(name, "eol")
+            text = _attr(name, "text")
+            if eol == "unspecified" and text != "unset":
+                missing.append(name)
+        assert not missing, (
+            "这些跟踪文件没有 eol 规则（也没声明成二进制）：%s —— "
+            "它们的字节会随构建机的 core.autocrlf 变，"
+            "「三方 sha256 对账」就只在那台机器上成立" % missing)
+
+    def test_the_export_does_not_depend_on_the_build_machine_config(self):
+        """同一笔提交，在两种 git 配置下导出的字节必须**完全一样**。
+
+        这是「产物与构建机无关」这条承诺的**直接判据**：把
+        ``core.autocrlf`` 逼成 true 与 false 各导一次，比字节。
+
+        为什么不能靠「同一台机器构建两次」：那是**同一个环境**跑两遍 ——
+        而这一版的缺陷恰恰是**环境**参与了结果（§4b 记的同一个形状：
+        环境输入泄漏进了结论）。
+
+        **改坏会红吗**：把 ``.gitattributes`` 里 ``.gitignore text eol=lf``
+        删掉，本条立刻红（两个导出的那一个文件会差 50 个 CR）。
+        """
+        mod = _load()
+        lf = mod.export_bytes("HEAD", mod._ARCHIVE_CONFIG_LF)
+        crlf = mod.export_bytes("HEAD", mod._ARCHIVE_CONFIG_CRLF)
+        assert lf and crlf, "导出为空 —— git archive 失败？"
+        diff = sorted(k for k in set(lf) | set(crlf) if lf.get(k) != crlf.get(k))
+        assert not diff, (
+            "这些文件在两种 git 配置下导出的字节不同（%d 个）：%s —— "
+            "产物会随构建机变，给它们补一条 eol 规则" % (len(diff), diff[:10]))
+
+    def test_the_build_refuses_to_produce_a_machine_dependent_artifact(self):
+        """构建前必须**自证**导出与构建机无关 —— 不然就停下。
+
+        **改坏会红吗**：把 ``build()`` 里那句 ``assert_config_independent(ref)``
+        删掉，本条立刻红（源码里找不到了）。
+        """
+        mod = _load()
+        assert callable(mod.assert_config_independent), (
+            "没有 assert_config_independent() —— 构建不再自证与机器无关")
+        # 导出配置必须**钉死**：空配置 = 跟着构建机的 core.autocrlf 走。
+        # 这条是**源码级**判据，而且是环境无关的 —— 它在每台机器上都成立
+        #（§4d 规则五：只在作者那台机器上有牙齿的断言等于没有牙齿）。
+        assert "core.autocrlf=false" in mod._ARCHIVE_CONFIG_LF, (
+            "导出配置没有钉死 core.autocrlf ⇒ 快照的字节跟着构建机走：%s"
+            % (mod._ARCHIVE_CONFIG_LF,))
+        assert "core.eol=lf" in mod._ARCHIVE_CONFIG_LF, (
+            "导出配置没有钉死 core.eol ⇒ 快照的字节跟着构建机走：%s"
+            % (mod._ARCHIVE_CONFIG_LF,))
+        assert mod.assert_config_independent("HEAD") == [], (
+            "当前的导出结果与构建机配置有关 —— 补 eol 规则")
+        src = (_ROOT / "scripts" / "build_repro.py").read_text(encoding="utf-8")
+        assert "assert_config_independent(ref)" in src, (
+            "build() 没调用 assert_config_independent() —— "
+            "构建不再自证与机器无关")
 
     def test_the_build_refuses_a_dirty_worktree(self):
         """工作区有未提交改动时，构建必须**停下来**。

@@ -53,7 +53,13 @@
     python scripts/audit_release_artifact.py --version X.Y.Z
     python scripts/audit_release_artifact.py --dist dist
 
-退出码：0 = 通过；1 = 产物里有禁用词；2 = 产物缺失或跑不起来。
+退出码：0 = 通过；1 = 产物里有禁用词/野文件/构建机路径；
+2 = 产物缺失、跑不起来，**或某一项检查无法执行（无法判定）**。
+
+2026-10-24 第十二轮外部复核后补的一条纪律：**「未执行」不许说成「通过」**。
+这个脚本随 sdist 发布，而 sdist 里没有 ``.git`` ⇒ 在那里跑它拿不到源码树
+清单 —— 而那一项一旦「跳过」，就不能再打印「产物里的文件全部来自源码树」。
+（详见 :func:`committed_files` 的注释。）
 """
 from __future__ import annotations
 
@@ -121,25 +127,34 @@ _BUILD_METADATA = re.compile(
     r"^(PKG-INFO|setup\.cfg|.*\.egg-info/.*|.*\.dist-info/.*)$")
 
 
-def committed_files() -> set[str]:
+def committed_files() -> set[str] | None:
     """源码树（HEAD）里有哪些文件，相对仓库根目录。
 
     用 ``git ls-tree`` 而不是遍历工作区 —— 工作区里有未入库/被忽略的文件，
     而那正是要查出来的东西。
 
     git 用**绝对路径**起（SAST 的 B607：部分路径启动进程）。解析不到就返回
-    空集 —— 此时「文件是否来自源码树」那一项会被跳过，而不是误判成「有野文件」。
+    ``None`` —— 意思是「**这一项无法执行**」，而不是「没有野文件」。
+
+    为什么不能返回空集合：空集合与「真的一个文件都没有」长得一模一样，
+    而调用方会把它当成「没有野文件」⇒ **报检查通过，但什么都没扫**。
+    2026-10-24 第十二轮外部复核抓到的正是这个：脚本随 sdist 发布，
+    而从 sdist 里跑它（很自然的用法）拿不到 git 上下文，于是它一边打印
+    「跳过这一项」，一边打印「**产物里的文件全部来自源码树**」，退出码 0。
     """
     git = shutil.which("git")
     if git is None:
-        return set()
+        return None
     try:
         proc = subprocess.run(
             [git, "ls-tree", "-r", "--name-only", "HEAD"],
             cwd=str(ROOT), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=120)
     except (OSError, subprocess.SubprocessError):
-        return set()
+        return None
+    if proc.returncode != 0:
+        # 不是 git 仓库（或 git 报错）⇒ 同样拿不到清单
+        return None
     return {ln.strip() for ln in proc.stdout.splitlines() if ln.strip()}
 
 
@@ -263,15 +278,21 @@ def main(argv: list[str] | None = None) -> int:
     # ---- 3) 产物里的文件必须来自源码树 ----
     committed = committed_files()
     extra = []
-    if committed:
+    tree_checked = committed is not None
+    if tree_checked:
         for art, rel in artifact_names:
             if rel in committed or _BUILD_METADATA.match(rel):
                 continue
             extra.append("%s :: %s" % (art, rel))
     else:
-        print("（拿不到源码树清单 —— 跳过「文件是否来自源码树」这一项）")
+        print("（拿不到源码树清单 —— 「文件是否来自源码树」这一项**未执行**）")
+        print("   **未执行不等于通过**：这一项没查，就不能说产物里的文件都来自源码树。"
+              "请在**仓库**里跑这个脚本（sdist 里没有 .git，拿不到那份清单）。")
 
-    if not extra:
+    if not tree_checked:
+        print()
+        print("**「文件是否来自源码树」这一项未执行** —— 不构成通过")
+    elif not extra:
         print()
         print("**产物里的文件全部来自源码树**（构建元数据除外）")
     else:
@@ -309,6 +330,11 @@ def main(argv: list[str] | None = None) -> int:
         print("**产物审计未通过** —— 不要发布。"
               "（已发布到 PyPI 的版本不可覆盖，只能再发一版。）")
         return 1
+    if not tree_checked:
+        print()
+        print("产物审计**无法判定**：「文件是否来自源码树」这一项**未执行**"
+              "（拿不到 git 源码树清单）—— 请在**仓库**里跑这个脚本再发布。")
+        return 2
     print()
     print("产物审计通过：内容 0 命中、产物自带门禁绿、文件全部来自源码树、没有构建机路径。")
     return 0

@@ -717,7 +717,8 @@ def verify_result(result: AnalysisResult) -> Dict[str, Any]:
 
     这是本工具对「你凭什么这么说」的唯一回答方式：不解释、不辩护，
     直接把原文拉出来重算摘要给你看。
-    - 日志被改过 / 被截断 → MISMATCH，verdict=TAMPERED；
+    - 日志那几行与报告记录的不一致 → MISMATCH，verdict=TAMPERED
+      （**分不出是日志变了还是报告变了** —— 回读只看得到「两边对不上」）；
     - 源文件已不在（换机器、日志轮转清理）→ MISSING_SOURCE；
     - 粘贴文本没有可回读的源文件 → NO_SOURCE，如实说明而不是谎称通过。
 

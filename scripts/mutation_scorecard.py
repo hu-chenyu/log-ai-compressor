@@ -615,8 +615,8 @@ MUTATIONS: List[Mutation] = [
             "44 —— **那 44 里有一条是过期的**。过期条目不是豁免，它是门禁"
             "正在报的债。照着它数，文档就会比门禁多报一条",
         target="docs/DEVELOPMENT.md",
-        old="剩下 73 条才是真该留下的。",
-        new="剩下 74 条才是真该留下的。",
+        old="剩下 75 条才是真该留下的。",
+        new="剩下 76 条才是真该留下的。",
         tests=["tests/test_sast_gate.py"],
     ),
     Mutation(
@@ -1716,6 +1716,77 @@ MUTATIONS: List[Mutation] = [
         old='    n_u8 = sum(1 for ln in lines if _decodes_strict(ln, "utf-8"))',
         new="    n_u8 = 0",
         tests=["tests/test_encoding_majority_vote.py"],
+    ),
+
+    # ---- 第十二轮外部复核（2026-10-24） --------------------------------
+    Mutation(
+        id="r12/eol-dotfile-rule-removed",
+        why="把 `.gitignore` 的 eol 规则删掉 —— 它是**无扩展名**的文件，"
+            "上一版按扩展名补 eol 规则时漏的正是这一类。"
+            "后果：git archive 按**构建机**的 core.autocrlf 转换它 ⇒ "
+            "同一个 tag 在两种机器上导出成**两份字节**的 sdist"
+            "（实测 29a9f8bf… vs c3001fed…），"
+            "「本地/PyPI/GitHub 三方 sha256 对账」只在其中一种机器上成立",
+        target=".gitattributes",
+        old=".gitignore     text eol=lf\n",
+        new="",
+        tests=["tests/test_build_snapshot.py"],
+    ),
+    Mutation(
+        id="r12/snapshot-config-unpinned",
+        why="导出时不再**钉死** git 配置 ⇒ 快照的字节跟着构建机走。"
+            "这是「环境输入泄漏进结论」的同族：路径不是结论、"
+            "构建机的 git 配置同样不是结论",
+        target="scripts/build_repro.py",
+        old='_ARCHIVE_CONFIG_LF = ("core.autocrlf=false", "core.eol=lf")',
+        new='_ARCHIVE_CONFIG_LF = ()',
+        tests=["tests/test_build_snapshot.py"],
+    ),
+    Mutation(
+        id="r12/audit-skip-claims-pass",
+        why="拿不到源码树清单时（从 sdist 里跑就是这个情形），"
+            "一边说「跳过这一项」一边说「产物里的文件全部来自源码树」，"
+            "退出码 0 —— **报检查通过但其实什么都没扫**。"
+            "本项目自己写进 AGENTS.md 的那类最坏门禁",
+        target="scripts/audit_release_artifact.py",
+        old=('    if not tree_checked:\n'
+             '        print()\n'
+             '        print("**「文件是否来自源码树」这一项未执行** —— 不构成通过")\n'),
+        new=('    if not tree_checked:\n'
+             '        print()\n'
+             '        print("**产物里的文件全部来自源码树**（构建元数据除外）")\n'),
+        tests=["tests/test_audit_release_artifact.py"],
+    ),
+    Mutation(
+        id="r12/verify-out-of-range-accuses-the-log",
+        why="报告里的行区间越界（**报告**坏了，日志一个字没动）时，"
+            "verify 说「日志**确实被改过**」—— 指控了一件没有发生的事，"
+            "而照着这句话去查日志的人会白查一轮。"
+            "回读只分得出「两边对不上」，分不出是哪一方变了",
+        target="log_ai_compressor/cli.py",
+        old=('        return ("存在对不上的引用 —— **报告里记的行区间超出了日志当前的长度**"\n'),
+        new=('        return ("存在对不上的引用 —— 日志**确实被改过**，结论可能来自旧版本。"\n'),
+        tests=["tests/test_verdict_surfaces.py"],
+    ),
+    Mutation(
+        id="r12/readme-second-statement-count-stale",
+        why="README 里**第二处**语句数没跟着改（同一段里 4,298 与 4,279 并存）"
+            "—— CI 那段对账用 re.search，只查**第一处**，原理上看不见后面这些。"
+            "实测：4,279 是旧值（用 coverage 自己的配置重算是 4,298）",
+        target="README.md",
+        old="> 其中「4,298 语句」跨平台**必然相同**（它由源码静态解析决定），",
+        new="> 其中「4,279 语句」跨平台**必然相同**（它由源码静态解析决定），",
+        tests=["tests/test_ci_step_execution.py"],
+    ),
+    Mutation(
+        id="r12/gate12-names-nothing",
+        why="第 12 道门禁红了却**不点名是哪个模块** ⇒ "
+            "「新增一个需要仓库上下文的测试模块却忘了登记」这件事"
+            "只能靠猜（真正的兜底就是这道门禁，它得说清楚）",
+        target="scripts/check_sdist_runs_its_own_tests.py",
+        old='            bad = failing_modules("".join(collected))',
+        new="            bad = []",
+        tests=["tests/test_sdist_can_run_its_own_tests.py"],
     ),
 ]
 

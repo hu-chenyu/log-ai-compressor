@@ -38,6 +38,24 @@
 *.in   text eol=lf
 LICENSE text eol=lf
 
+# 2026-10-24 第十二轮外部复核后补：上一版补的是「按扩展名」，于是**无扩展名**
+# 的那三个文件漏在外面 —— 而它们恰恰是会进产物的（.gitignore 与 .gitattributes
+# 由 MANIFEST.in 收进 sdist，py.typed 是包数据）。
+#
+# 实测踩到的后果：已发布的 2.12.7 sdist 里，`.gitignore` 与 `.gitattributes`
+# 是 **CRLF**，而在 `core.autocrlf=false` 的机器上从同一个 tag 重建出来是 **LF**
+# —— 同一份源码在两种机器上导出成**不同字节**的 sdist
+# （29a9f8bf… vs c3001fed…，差 96 个 CR）。
+# 根因：`git archive` 对**没有 eol 规则**的文本文件按本机 `core.autocrlf` 转换，
+# 而那三个文件正好一条规则都没有（`git check-attr` 实测：text/eol 都是
+# unspecified）。
+#
+# 判据仍然是那一条：**每个进产物的文本文件都必须有 eol 规则**。
+# 这次补齐的是「无扩展名」这一类 —— 上一版按扩展名补，漏的正是这一类。
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+py.typed      text eol=lf
+
 # 二进制：禁止任何行尾转换
 *.log   binary
 *.png   binary

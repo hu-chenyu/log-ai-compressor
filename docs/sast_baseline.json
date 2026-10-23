@@ -261,6 +261,12 @@
     },
     {
       "test_id": "B404",
+      "path": "tests/test_sdist_can_run_its_own_tests.py",
+      "count": 1,
+      "reason": "它要**真的起一次第 12 道门禁脚本**（子进程）才验得了「门禁红了会不会点名是哪个模块」；起的是 sys.executable 的绝对路径，参数写死，不经 shell。"
+    },
+    {
+      "test_id": "B404",
       "path": "tests/test_subprocess_encoding_contract.py",
       "count": 1,
       "reason": "复核过：这条测试的主题就是子进程的输出编码契约，起子进程是它要测的东西本身。import 本身无法消除。"
@@ -298,8 +304,8 @@
     {
       "test_id": "B603",
       "path": "scripts/build_repro.py",
-      "count": 4,
-      "reason": "复核过：两处都是列表传参 + shell=False + check=True，命令是 git / sys.executable -m build，参数为常量。bandit 报的是「请复核」，复核结论是：不接收任何外部输入作为命令行。"
+      "count": 5,
+      "reason": "五条子进程调用：两次 git archive（绝对路径、参数写死；一次取快照、一次为「导出与构建机无关」的自证各导一次）、git log（绝对路径）、python -m build（sys.executable）、以及上一次提交的时间戳查询 —— 参数全写死，不经 shell。"
     },
     {
       "test_id": "B603",
@@ -334,8 +340,8 @@
     {
       "test_id": "B603",
       "path": "tests/test_audit_release_artifact.py",
-      "count": 1,
-      "reason": "子进程是 sys.executable 的绝对路径，参数写死。"
+      "count": 2,
+      "reason": "两条子进程调用：一条起产物审计脚本、一条起它自带的那套 SAST 门禁 —— 都是 sys.executable 的绝对路径，参数写死。"
     },
     {
       "test_id": "B603",
@@ -414,6 +420,12 @@
       "path": "tests/test_registry_manifest.py",
       "count": 1,
       "reason": "复核过：列表传参 + shell=False，跑的是 python -m。"
+    },
+    {
+      "test_id": "B603",
+      "path": "tests/test_sdist_can_run_its_own_tests.py",
+      "count": 1,
+      "reason": "子进程是 sys.executable 的绝对路径，参数写死（--sdist 指向临时目录里自己造的那个 sdist），不经 shell。"
     },
     {
       "test_id": "B603",
