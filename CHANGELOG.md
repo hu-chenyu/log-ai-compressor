@@ -98,6 +98,24 @@
 
 每一条新断言都**先人工验红**确认会被抓住，才算数。
 
+#### 顺带修掉一处**一直藏着**的 CI 事故源
+
+把 CI 的构建步骤换成 `scripts/build_repro.py` 之后，windows-3.12 红在
+「Build sdist and wheel」—— 而**构建其实完全成功**，红的是它最后那行
+`print`：`UnicodeEncodeError: 'charmap' codec can't encode character '（'`。
+
+这正是本仓库记过两次的形状（Windows 控制台 cp1252 ⇒ 打印中文崩），
+而 `scripts/build_repro.py` 一直没有那层 stdout 兜底 —— 它此前**从没被接进
+CI**，所以那处缺陷一直藏着；一接进来就现形。
+
+连带修了两件事：
+
+* `scripts/build_repro.py` 补上 UTF-8 兜底；
+* `tests/test_invariants.py` 的覆盖面改成**从 `.github/workflows/ci.yml` 派生**
+  —— 写死的脚本名单必然漏，而漏的时候**没有任何东西会叫**。
+  （顺带把判据从文本搜索改成按 AST 找调用点：文本搜索会把文档串里提到的
+  `print(` 也算成打印 ⇒ 判据误报一次，之后就没人信它了。）
+
 ### 发布之后：把 2.12.5 清掉（只留最新版本）
 
 这条规矩 CHANGELOG 里早就有（2026-10-21 那一轮）：**只留最新版本** ——

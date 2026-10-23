@@ -57,6 +57,19 @@ import tempfile
 import time
 from pathlib import Path
 
+# Windows 控制台默认 cp1252，打印中文会抛 UnicodeEncodeError ——
+# 症状极具误导性：构建**完全成功**，却因为「打印不出来」让整个 step 变红，
+# 看起来像功能坏了。2026-10-23 实测踩到：Windows CI 的 windows-3.12 就红在这行
+# `print(f"SOURCE_DATE_EPOCH = …")` 上，而 ubuntu 两条全绿。
+# 这个仓库已经因为同一类事故红过两次，所以这里照抄既有做法（见
+# scripts/adversarial_eval.py 顶部），并且由 tests/test_invariants.py
+# 盯着「ci.yml 里跑的每个脚本都必须有这层兜底」。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")   # py3.7+
+    except (AttributeError, ValueError, OSError):                # pragma: no cover
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 

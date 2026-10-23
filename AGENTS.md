@@ -508,8 +508,12 @@ fix(report): 「变更关联」吃掉 Mac 全篇 33%，且它根本不是变更
   （照抄 `scripts/adversarial_eval.py` 那段）。Windows 控制台默认 cp1252，
   打印中文会抛 `UnicodeEncodeError`：**门禁本身全绿，step 却红了**，
   而 ubuntu 两条全绿。症状看起来像功能坏了，实际与代码质量毫无关系。
-  `tests/test_windows_console_encoding.py` 钉住它 —— 新脚本忘了加就会在
-  windows 矩阵上现形。
+  钉它的是 `tests/test_invariants.py::TestGateScriptsEncodingSafe` ——
+  它的**覆盖面从 `.github/workflows/ci.yml` 派生**（ci.yml 里跑的每个
+  `scripts/*.py` 都在内），不是一份写死的名单。
+  写死的名单必然漏：2026-10-23 实测，`scripts/build_repro.py` 打印中文却没有
+  兜底，Windows CI 的 windows-3.12 就红在那一行 `print` 上（**构建其实完全
+  成功**，红的只是「打印不出来」）——而它没被抓到，只因为那时它还没被接进 CI。
 - **`requirements*.txt` 的每一行都要能被机器解析**，不管 pip 会不会执行它。
   Dependabot 按通配扫全部文件，"这里只是给人看的"不成立（见
   `requirements-optional.txt` 开头那段事故记录）。要放安装命令就加 `# `。

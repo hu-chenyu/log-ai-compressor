@@ -21,9 +21,11 @@
 """
 from __future__ import annotations
 
+import ast
 import os
 import pathlib
 import random
+import re
 import subprocess
 import sys
 
@@ -254,6 +256,31 @@ ARG_GATE_SCRIPTS = (
 ALL_GATE_SCRIPTS = CI_GATE_SCRIPTS + ARG_GATE_SCRIPTS
 
 
+def _ci_run_scripts() -> list[str]:
+    """ci.yml 里被**真正执行**的 scripts/*.py。
+
+    **从 workflow 里派生，而不是写死一份名单** —— 写死的名单必然漏，
+    而且漏的时候**没有任何东西会叫**。
+
+    实测（2026-10-23）：`scripts/build_repro.py` 打印中文却没有 stdout 的
+    UTF-8 兜底，Windows CI 的 windows-3.12 就红在那一行 print 上
+    （构建其实完全成功，红的只是「打印不出来」）。而这条门禁没抓到它 ——
+    因为名单里没有它：**它此前从没被接进 CI**，一接进来就现形。
+
+    改成从 ci.yml 派生 ⇒ 以后新接进 CI 的脚本自动被盯上，
+    这才是 AGENTS.md §6.4 承诺的「新脚本忘了加就会在 windows 矩阵上现形」。
+    """
+    ci = _ROOT / ".github" / "workflows" / "ci.yml"
+    text = ci.read_text(encoding="utf-8")
+    found = sorted(set(re.findall(r"scripts/[A-Za-z0-9_]+\.py", text)))
+    return [f for f in found if (_ROOT / f).is_file()]
+
+
+#: 静态检查覆盖面：**ci.yml 里跑的全部脚本** + 既有名单（写死的那批里
+#: 有些脚本已经不在 ci.yml 里了，但它们仍要有人守）。
+STATIC_CHECK_SCRIPTS = sorted(set(_ci_run_scripts()) | set(ALL_GATE_SCRIPTS))
+
+
 class TestGateScriptsEncodingSafe:
     """CI 门禁脚本打印中文，必须在非 UTF-8 控制台下也能跑完。
 
@@ -274,28 +301,38 @@ class TestGateScriptsEncodingSafe:
     def _args_for(script: str):
         return ["--help"] if script in ARG_GATE_SCRIPTS else []
 
-    @pytest.mark.parametrize("script", ALL_GATE_SCRIPTS)
+    @pytest.mark.parametrize("script", STATIC_CHECK_SCRIPTS)
     def test_source_reconfigures_stdout(self, script):
         """源码层面的快速检查（拼写错也能抓到）。"""
         src = (_ROOT / script).read_text(encoding="utf-8")
         assert 'reconfigure(encoding="utf-8"' in src, (
             f"{script} 必须把 stdout/stderr 切到 UTF-8")
 
-    @pytest.mark.parametrize("script", ALL_GATE_SCRIPTS)
+    @pytest.mark.parametrize("script", STATIC_CHECK_SCRIPTS)
     def test_reconfigure_happens_before_the_first_print(self, script):
         """判据看的是**位置**，不是「文件里出现过 reconfigure」。
 
         只查「出现过」的话，把那段挪到文件末尾一样绿 —— 而那样在 Windows
         上照样崩。这是本项目记过多次的形状：判据认了名字，没认行为。
+
+        **按 AST 找调用点，不做文本搜索**（2026-10-23 修）：文本搜索会把
+        文档串里提到的 `print(` 也算成打印 —— 而模块文档串**必须**在文件最前，
+        于是任何在文档里写了「print(」的脚本都会被误判成「reconfigure 排在
+        打印之后」。判据误报一次，之后就没人信它了。
         """
         src = (_ROOT / script).read_text(encoding="utf-8")
-        reconfig = src.find('reconfigure(encoding="utf-8"')
-        first_print = src.find("print(")
-        assert reconfig != -1, f"{script} 没有那段兜底"
-        assert first_print != -1, f"{script} 一个 print 都没有，判据本身失效"
-        assert reconfig < first_print, (
+        tree = ast.parse(src)
+        prints = [n.lineno for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                  and n.func.id == "print"]
+        reconfigs = [n.lineno for n in ast.walk(tree)
+                     if isinstance(n, ast.Attribute) and n.attr == "reconfigure"]
+        assert reconfigs, f"{script} 没有那段兜底"
+        assert prints, f"{script} 一个 print 都没有，判据本身失效"
+        assert min(reconfigs) < min(prints), (
             f"{script} 的 reconfigure 出现在第一个 print 之后"
-            f"（偏移 {reconfig} vs {first_print}）—— 前面那几次打印照样会崩")
+            f"（第 {min(reconfigs)} 行 vs 第 {min(prints)} 行）—— "
+            f"前面那几次打印照样会崩")
 
     @pytest.mark.parametrize("script", ALL_GATE_SCRIPTS)
     def test_runs_under_cp1252_stdout(self, script):
