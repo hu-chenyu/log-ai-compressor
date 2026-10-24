@@ -407,7 +407,7 @@ Hadoop 在 0.85、HealthApp 在 0.90），而 **PA 对阈值完全不敏感**。
 
 仓库根目录的 [`server.json`](server.json) 就是官方 Registry 的清单格式，
 登记名 `io.github.hu-chenyu/log-ai-compressor` **已于 2026-10-18 提交**，
-指向 PyPI 上的 `log-ai-compressor` **2.12.8**（stdio，`uvx` 拉起）——
+指向 PyPI 上的 `log-ai-compressor` **2.12.9**（stdio，`uvx` 拉起）——
 清单里的版本号跟着每次发版更新（`tests/test_registry_manifest.py` 盯着
 它与 `pyproject.toml` 一致）。
 
