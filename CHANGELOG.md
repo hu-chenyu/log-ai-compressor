@@ -81,7 +81,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 变异记分卡 | **150 条**（本轮 +2：`r13/audit-path-claim-too-wide`、`r13/card-size-drifts-back-in-a-doc`） |
+| 变异记分卡 | **150 条**（本轮 +2：`r13/audit-path-claim-too-wide`、`r13/card-size-drifts-back-in-a-doc`），**本地实跑：150 条，存活 0，击杀率 100%** |
 | 测试 | **1,815 用例**（本轮 +3） |
 | SAST 豁免 | 静态分析发现里**剩下 75 条**才是真该留下的（`docs/sast_baseline.json` 逐条对账） |
 | 生产代码 | 8,824 行 / 32 个模块（**未变** —— 这一轮改的都是门禁与文档） |
