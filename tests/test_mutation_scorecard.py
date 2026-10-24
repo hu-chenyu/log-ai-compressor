@@ -18,6 +18,8 @@ import sys
 
 import pytest
 
+from docscope import current_scope
+
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _SCRIPT = _ROOT / "scripts" / "mutation_scorecard.py"
 
@@ -60,7 +62,9 @@ def test_every_doc_claiming_a_current_card_size_agrees():
         path = _ROOT / name
         if not path.is_file():
             continue
-        text = path.read_text(encoding="utf-8")
+        # CHANGELOG 只认**顶格节**（历史节里的数字是关于那次发布的记录）——
+        # 口径在 `tests/docscope.py`，只有一份。
+        text = current_scope(name, _ROOT)
         for pat in patterns:
             for m in re.finditer(pat, text):
                 claimed = int(m.group(1))
@@ -71,6 +75,54 @@ def test_every_doc_claiming_a_current_card_size_agrees():
         "这些文档宣称了过期的记分卡条数：\n"
         + "\n".join("  " + b for b in bad)
         + "\n（加了几条变异就要回头改这些地方 —— 与 AUDIT.md 那条门禁同源）")
+
+
+#: 哪些词说明「**这一行**说的是记分卡的长度」。
+_CARD_WORDS = ("记分卡", "mutation_scorecard", "变异存活率")
+
+
+def test_every_line_claiming_the_card_size_agrees():
+    """凡是**说这是记分卡长度**的行，那个数必须等于实际长度。
+
+    为什么要有这条（2026-10-24 第十三轮外部复核后）：
+    `AUDIT.md` 的「怎么自己复核」代码块里有一行
+    ``python scripts/mutation_scorecard.py  # 142 条变异：门禁本身有没有牙齿``，
+    而同一份文件的正文写着「**当前 148 条变异**」——
+    同一份文档、同一个量、两个数，而且**已经进了发布出去的 sdist**。
+
+    上面那条判据为什么没抓到它：它认的是**几种固定措辞**
+    （「当前 N 条变异」「N 条已知危险变异」…），而这一行写的是「N 条变异」
+    —— 措辞一变，判据就失效了。而「措辞一变就失效」正是它自己的病。
+
+    ⇒ 这条改成**行内**判据：只要这一行提到记分卡，它说的「N 条变异」
+    就必须是实际长度。
+
+    **为什么必须行内**：同一份文档里也有「（29 例，7 条变异全杀）」这种
+    **子集**的说法（那不是卡的长度）。靠「这一行提到记分卡」把它们分开。
+
+    **改坏会红吗**：把 `AUDIT.md` 那行的 148 改回 142，本条立刻红。
+    """
+    want = len(MS.MUTATIONS)
+    docs = ("README.md", "AGENTS.md", "CONTRIBUTING.md", "AUDIT.md",
+            "CHANGELOG.md", "docs/DEVELOPMENT.md")
+    bad = []
+    for name in docs:
+        path = _ROOT / name
+        if not path.is_file():
+            continue
+        scope = current_scope(name, _ROOT)
+        for lineno, line in enumerate(scope.splitlines(), 1):
+            if not any(w in line for w in _CARD_WORDS):
+                continue
+            for m in re.finditer(r"(\d+)\s*条变异", line):
+                claimed = int(m.group(1))
+                if claimed != want:
+                    bad.append("%s:%d 写 %d 条，实际 %d 条 ｜ %s"
+                               % (name, lineno, claimed, want, line.strip()[:60]))
+    assert not bad, (
+        "这些行宣称了过期的记分卡条数：\n"
+        + "\n".join("  " + b for b in bad)
+        + "\n（凡是提到记分卡的那一行，它说的条数就得等于实际长度）")
 
 
 def test_audit_doc_agrees_with_the_card_size():

@@ -122,8 +122,8 @@ class TestTheArtifactAuditHasTeeth:
         assert proc.returncode == 1, (
             "带构建机路径的产物居然通过了门禁（退出码 %d）：%s"
             % (proc.returncode, proc.stdout[-800:]))
-        assert "构建机的路径" in proc.stdout, (
-            "门禁没说出「构建机的路径」：%s" % proc.stdout[-800:])
+        assert "本机的路径" in proc.stdout, (
+            "门禁没说出「产物里有本机的路径」：%s" % proc.stdout[-800:])
 
 
 class TestTheAuditDoesNotClaimWhatItDidNotCheck:
@@ -201,6 +201,51 @@ class TestTheAuditDoesNotClaimWhatItDidNotCheck:
         proc = _run_audit(dist)
         assert "全部来自源码树" in proc.stdout, (
             "在仓库里跑却没说这一项查过了：\n%s" % proc.stdout[-800:])
+
+
+class TestThePathCheckSaysWhatItActuallyChecked:
+    """「没有构建机的路径」这句话必须限定成「**本机**的路径」。
+
+    为什么：这一项查的是**跑审计这台机器**的仓库根目录与用户主目录。
+    换一台机器审计别人的产物时，它**一条外来路径都查不出来** ——
+    而那句话听起来像是「产物里没有任何构建机的路径」。
+
+    实测（2026-10-24 第十三轮外部复核）：往产物里注入
+    ``C:\\Users\\someone\\secret.log``，审计**照样**打印
+    「产物里没有构建机的路径」（那一版的措辞比检查范围大）。
+
+    ⇒ 措辞改成「没有**本机**的路径」，并把这条局限**写在输出里** ——
+    这正是本项目自己写下的那一条：「没有门禁你知道那里没检查」。
+
+    **改坏会红吗**：把输出改回「产物里没有构建机的路径」，本条立刻红。
+    """
+
+    def test_the_claim_is_limited_to_this_machine(self, tmp_path: Path):
+        dist = tmp_path / "dist"
+        _make_artifacts(
+            dist,
+            {"README.md": "# readme\n",
+             "log_ai_compressor/__init__.py": "x = 1\n"},
+            {"log_ai_compressor/__init__.py": "x = 1\n"})
+        proc = _run_audit(dist)
+        assert "没有构建机的路径" not in proc.stdout, (
+            "它声称查过所有构建机的路径 —— 而它只查了本机：\n%s"
+            % proc.stdout[-800:])
+        assert "本机" in proc.stdout, (
+            "它没说清自己查的是哪台机器：\n%s" % proc.stdout[-800:])
+
+    def test_the_limitation_is_stated(self, tmp_path: Path):
+        """局限必须**写在输出里** —— 只改措辞不写局限，等于把问题藏起来。"""
+        dist = tmp_path / "dist"
+        _make_artifacts(
+            dist,
+            {"README.md": "# readme\n",
+             "log_ai_compressor/__init__.py": "x = 1\n"},
+            {"log_ai_compressor/__init__.py": "x = 1\n"})
+        proc = _run_audit(dist)
+        assert "别的" in proc.stdout and "机器" in proc.stdout, (
+            "输出里没有说明「换台机器就查不出来」这条局限：\n%s"
+            % proc.stdout[-800:])
 
 
 class TestTheHelpers:
