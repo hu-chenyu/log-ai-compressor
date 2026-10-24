@@ -228,9 +228,12 @@ class TestThePathCheckSaysWhatItActuallyChecked:
              "log_ai_compressor/__init__.py": "x = 1\n"},
             {"log_ai_compressor/__init__.py": "x = 1\n"})
         proc = _run_audit(dist)
-        assert "没有构建机的路径" not in proc.stdout, (
-            "它声称查过所有构建机的路径 —— 而它只查了本机：\n%s"
-            % proc.stdout[-800:])
+        # 两种写法都不许出现：「没有构建机的路径」与「没有构建机路径」
+        # （后者是**汇总行**的写法 —— 改一处漏一处，就是「症状修好、病还在」）
+        for claim in ("没有构建机的路径", "没有构建机路径"):
+            assert claim not in proc.stdout, (
+                "它声称查过所有构建机的路径 —— 而它只查了本机（%r）：\n%s"
+                % (claim, proc.stdout[-800:]))
         assert "本机" in proc.stdout, (
             "它没说清自己查的是哪台机器：\n%s" % proc.stdout[-800:])
 
