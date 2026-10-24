@@ -1033,9 +1033,9 @@ MUTATIONS: List[Mutation] = [
             "唯一能过的改法变成篡改历史或让 CI 变红 —— 两条都是错的，"
             "而门禁**仍然是绿的**。这条是 2026-10-19 实测撞出来的："
             "我加豁免时它立刻把 v2.11.5 的旧数字判成了「写错」",
-        target="tests/test_sast_gate.py",
-        old='    if doc != "CHANGELOG.md":\n        return text\n',
-        new='    if doc != "CHANGELOG.md":\n'
+        target="tests/docscope.py",
+        old='    if Path(doc).name != "CHANGELOG.md":\n        return text\n',
+        new='    if Path(doc).name != "CHANGELOG.md":\n'
             '        pass  # 变异：作用域退回整份文件\n',
         tests=["tests/test_sast_gate.py"],
     ),
@@ -1787,6 +1787,30 @@ MUTATIONS: List[Mutation] = [
         old='            bad = failing_modules("".join(collected))',
         new="            bad = []",
         tests=["tests/test_sdist_can_run_its_own_tests.py"],
+    ),
+
+    # ---- 第十三轮外部复核（2026-10-24） --------------------------------
+    Mutation(
+        id="r13/audit-path-claim-too-wide",
+        why="产物审计把「**本机**的路径」说成「**构建机**的路径」—— "
+            "而它查的只是跑审计这台机器的仓库根目录与用户主目录。"
+            "换一台机器审计别人的产物时，它一条外来路径都查不出来，"
+            "而那句话听起来像是「产物里没有任何构建机的路径」",
+        target="scripts/audit_release_artifact.py",
+        old='        print("**产物里没有本机的路径**（仓库根目录 / 用户主目录）")',
+        new='        print("**产物里没有构建机的路径**")',
+        tests=["tests/test_audit_release_artifact.py"],
+    ),
+    Mutation(
+        id="r13/card-size-drifts-back-in-a-doc",
+        why="文档里的记分卡条数又漂回旧值 —— 这次是在 `AUDIT.md` 的"
+            "「怎么自己复核」代码块里（措辞是「# N 条变异」，"
+            "而原先那几条判据只认「当前 N 条变异」等固定说法 ⇒ 漏网）。"
+            "实测：同一份文档里 148 与 142 并存，而**没有任何门禁看它**",
+        target="AUDIT.md",
+        old="python scripts/mutation_scorecard.py  # 150 条变异：门禁本身有没有牙齿",
+        new="python scripts/mutation_scorecard.py  # 142 条变异：门禁本身有没有牙齿",
+        tests=["tests/test_mutation_scorecard.py"],
     ),
 ]
 

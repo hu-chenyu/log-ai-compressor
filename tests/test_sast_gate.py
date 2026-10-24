@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from docscope import current_scope
+
 ROOT = Path(__file__).resolve().parent.parent
 
 _SPEC = importlib.util.spec_from_file_location(
@@ -167,27 +169,8 @@ _COUNT_PATTERNS = (r"剩下\s*(\d+)\s*条", r"（(\d+)\s*条豁免")
 
 
 def _current_scope(doc: str) -> str:
-    """只取**当前**版本节里写的条数。
-
-    CHANGELOG 是历史档案：AGENTS.md §2.4 明写「撤回的记录不要删，
-    历史引用刻意不重写」。而 v2.11.5 的条目里有一句
-    「新增 `docs/sast_baseline.json`（43 条豁免…）」—— 那是**当时**的条数，
-    是关于那次发布的记录，不是对现状的声明。
-
-    第一版扫**整份**文件，于是每次基线增长都要求把这两处一起改 ——
-    而唯一的改法是篡改历史记录或让 CI 变红，两条都是错的。
-    这正是本仓库记过多次的形状：**判据读到的不是它以为的那个对象**。
-
-    所以 CHANGELOG 只认顶格 `## [...]` 节；docs/DEVELOPMENT.md 是活文档，
-    全文扫。
-    """
-    text = (ROOT / doc).read_text(encoding="utf-8")
-    if doc != "CHANGELOG.md":
-        return text
-    m = re.search(r"^## \[", text, re.M)
-    assert m, "CHANGELOG.md 里找不到任何 `## [...]` 版本节"
-    nxt = re.search(r"^## \[", text[m.end():], re.M)
-    return text[m.start(): m.end() + nxt.start()] if nxt else text[m.start():]
+    """只取**当前**版本节里写的条数（口径在 `tests/docscope.py`，只有一份）。"""
+    return current_scope(doc, ROOT)
 
 
 def test_only_the_current_changelog_section_carries_a_live_count():
